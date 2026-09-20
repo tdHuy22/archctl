@@ -1,0 +1,7 @@
+# Luật kiến trúc. Chỉ người sửa file này, qua `archctl serve` hoặc bằng tay.
+# Agent KHÔNG được ghi vào đây — dùng `archctl propose`.
+
+# component <Tên> at <glob>   @human|@ai  #draft|#proposed|#accepted|#locked
+# store <Tên> owned_by <Component>
+# allow <Nguồn> -> <Đích>
+# deny  <Nguồn> -> <Đích> [except <Component>]

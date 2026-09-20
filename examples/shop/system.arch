@@ -1,0 +1,47 @@
+# Ví dụ lấy từ đặc tả — dùng để thử parser.
+
+component Web      at src/web/**       @human #locked
+component Order    at src/order/**     @human #locked
+component Payment  at src/payment/**   @human #accepted
+component Stock    at src/stock/**     @human #accepted
+component User     at src/user/**      @human #accepted
+external  Stripe                       @human #accepted
+
+store OrderDB    owned_by Order    at "orders", "order_items"
+store PaymentDB  owned_by Payment  at "payments", "refunds"
+
+allow Web     -> Order, User
+allow Order   -> Stock, Payment, OrderDB
+allow Payment -> Stripe, PaymentDB
+deny  * -> PaymentDB except Payment
+deny  * -> Stripe   except Payment
+
+flow PlaceOrder:                                    @human #locked
+  validateCart -> reserveStock -> charge -> confirmOrder
+  parallel: sendEmail, updateAnalytics
+  on_fail(charge): releaseStock
+  on_fail(confirmOrder): refund, releaseStock
+
+contract Payment.charge:                            @human #locked
+  requires      order.status == RESERVED
+  ensures       ok  => payment.status == CAPTURED
+                err => không có tiền nào bị chuyển
+  errors        Declined | Timeout | Unavailable
+  idempotent_by orderId
+  latency       p99 < 800ms
+  consistency   strong
+  verify        contract_test, chaos(Stripe.timeout)
+
+boundary Checkout contains Order, Stock, Payment:   @human #accepted
+  isolation   Payment.down => Order vẫn nhận đơn, trạng thái PENDING_PAYMENT
+  propagate   Declined -> user
+  contain     Timeout, Unavailable
+  retry       Payment.charge: 3 lần, backoff mũ, chỉ khi idempotent
+  timeout     toàn luồng < 3s
+  compensate  charge.fail => releaseStock
+  verify      chaos(Payment.down)
+
+invariant data   [Order]    order.total == sum(items.price * items.qty)
+invariant state  [Order]    CREATED -> RESERVED -> PAID -> SHIPPED
+invariant money  [system]   tổng tiền trừ khách == tổng tiền ghi nhận
+invariant access [system]   PII chỉ nằm trong User
