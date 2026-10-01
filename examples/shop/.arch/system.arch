@@ -1,18 +1,21 @@
-# Ví dụ lấy từ đặc tả — dùng để thử parser.
+# Dự án mẫu để thử bộ kiểm chứng. Cố ý có sẵn hai vi phạm và hai import
+# không phân giải được, để `archctl check` có thứ mà báo.
 
 component Web      at src/web/**       @human #locked
 component Order    at src/order/**     @human #locked
 component Payment  at src/payment/**   @human #accepted
 component Stock    at src/stock/**     @human #accepted
+component Notify   at src/notify/**    @human #accepted
 component User     at src/user/**      @human #accepted
-external  Stripe                       @human #accepted
+external  Stripe   at "stripe"         @human #accepted
 
 store OrderDB    owned_by Order    at "orders", "order_items"
 store PaymentDB  owned_by Payment  at "payments", "refunds"
 
 allow Web     -> Order, User
-allow Order   -> Stock, Payment, OrderDB
+allow Order   -> Stock, Payment, Notify, OrderDB
 allow Payment -> Stripe, PaymentDB
+allow Stock   -> Notify
 deny  * -> PaymentDB except Payment
 deny  * -> Stripe   except Payment
 
@@ -41,7 +44,7 @@ boundary Checkout contains Order, Stock, Payment:   @human #accepted
   compensate  charge.fail => releaseStock
   verify      chaos(Payment.down)
 
-invariant data   [Order]    order.total == sum(items.price * items.qty)
-invariant state  [Order]    CREATED -> RESERVED -> PAID -> SHIPPED
-invariant money  [system]   tổng tiền trừ khách == tổng tiền ghi nhận
-invariant access [system]   PII chỉ nằm trong User
+invariant data   [Order]    order.total == sum(items.price * items.qty) verify property_test
+invariant state  [Order]    CREATED -> RESERVED -> PAID -> SHIPPED verify property_test
+invariant money  [system]   tổng tiền trừ khách == tổng tiền ghi nhận verify daily_reconcile
+invariant access [system]   PII chỉ nằm trong User verify dataflow

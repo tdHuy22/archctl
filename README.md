@@ -23,18 +23,36 @@ https://claude.ai/code/artifact/2b26df5d-d6b0-40d0-a398-7e574c7d1387
 
 ## Trạng thái
 
-Giai đoạn 1 đang làm. Đã có: parser DSL đầy đủ và bộ kiểm tra tham chiếu.
+Giai đoạn 1 đang làm. Đã có **parser DSL** và **kiểm luật phụ thuộc** cho
+TypeScript/JavaScript.
 
 ```bash
-cargo test                                    # 22 test
-cargo run -p archctl -- parse examples/shop/system.arch
+cargo test                                  # 55 test
+cargo run -p archctl -- check --root examples/shop
 ```
 
-Viết bằng Rust, **không có dependency ngoài std**. Binary 360KB, chạy 3.2ms
-mỗi lần — để `archctl check` gọi được trong hook sau mỗi lần agent sửa file
-mà không làm agent bỏ qua. Node khởi động rỗng mất 28.7ms.
+```
+kiến trúc 18614bc9 · 7 file quét · 4/6 component trong diện kiểm
 
-Chưa có: kiểm phụ thuộc trên mã thật, `propose`, `serve`.
+✗ VI PHẠM  Stock -> Payment  (không được phép, #accepted)
+  src/stock/reserve.ts:5  import '../payment/charge'
+  luật: không có allow nào cho Stock -> Payment
+  → Stock chỉ được gọi: Notify
+
+✗ VI PHẠM  Web -> Stripe  (bị cấm, #accepted)
+  src/web/checkout-page.ts:5  import 'stripe'
+  luật: deny * -> Stripe except Payment
+  → gọi Payment thay vì truy cập thẳng Stripe
+```
+
+`--json` cho agent đọc. Mã thoát 1 khi có vi phạm, nên dùng được trong CI ngay.
+
+Viết bằng Rust, **không có dependency ngoài std** — kể cả bộ quét import. Binary
+400KB. Đọc file luật mất 3ms; quét 2000 file TypeScript mất 123ms.
+
+Ngữ nghĩa và giới hạn đã biết: [docs/check.md](docs/check.md).
+
+Chưa có: tsconfig `paths`, `--changed`, kiểm `store owned_by`, `propose`, `serve`.
 
 ## Cấu trúc repo
 

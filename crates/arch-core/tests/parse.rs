@@ -22,11 +22,11 @@ fn ok(src: &str) -> Document {
 
 #[test]
 fn doc_mau_trong_examples_doc_khong_loi() {
-    let src = include_str!("../../../examples/shop/system.arch");
+    let src = include_str!("../../../examples/shop/.arch/system.arch");
     let doc = ok(src);
-    assert_eq!(doc.components.len(), 6, "5 component + 1 external");
+    assert_eq!(doc.components.len(), 7, "6 component + 1 external");
     assert_eq!(doc.stores.len(), 2);
-    assert_eq!(doc.rules.len(), 5);
+    assert_eq!(doc.rules.len(), 6);
     assert_eq!(doc.flows.len(), 1);
     assert_eq!(doc.contracts.len(), 1);
     assert_eq!(doc.boundaries.len(), 1);
