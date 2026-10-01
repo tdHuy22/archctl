@@ -23,7 +23,18 @@ https://claude.ai/code/artifact/2b26df5d-d6b0-40d0-a398-7e574c7d1387
 
 ## Trạng thái
 
-Giai đoạn 0 — mới dựng khung. Xem mục 13 của đặc tả để biết lộ trình.
+Giai đoạn 1 đang làm. Đã có: parser DSL đầy đủ và bộ kiểm tra tham chiếu.
+
+```bash
+cargo test                                    # 22 test
+cargo run -p archctl -- parse examples/shop/system.arch
+```
+
+Viết bằng Rust, **không có dependency ngoài std**. Binary 360KB, chạy 3.2ms
+mỗi lần — để `archctl check` gọi được trong hook sau mỗi lần agent sửa file
+mà không làm agent bỏ qua. Node khởi động rỗng mất 28.7ms.
+
+Chưa có: kiểm phụ thuộc trên mã thật, `propose`, `serve`.
 
 ## Cấu trúc repo
 
@@ -32,5 +43,7 @@ archctl/
 ├── docs/         # đặc tả, ghi chú thiết kế
 ├── templates/    # khung .arch/ mà `archctl init` sinh ra
 ├── examples/     # ví dụ DSL để thử parser
-└── packages/     # mã nguồn (chưa có)
+└── crates/
+    ├── arch-core/   # parser, mô hình, kiểm tra tham chiếu
+    └── archctl/     # CLI
 ```

@@ -1,0 +1,13 @@
+[package]
+name = "archctl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "archctl"
+path = "src/main.rs"
+
+[dependencies]
+arch-core = { path = "../arch-core" }

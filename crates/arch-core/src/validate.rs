@@ -1,0 +1,203 @@
+//! Kiểm tra mô hình sau khi đọc: tham chiếu có tồn tại, tên có trùng, và luật
+//! nào đang không kiểm được. Phần cuối quan trọng ngang phần đầu — một luật
+//! không có cách kiểm thì chỉ là lời hứa, và hệ thống phải nói ra điều đó.
+
+use crate::diag::Diag;
+use crate::model::*;
+use std::collections::HashMap;
+
+/// Các loại invariant mà hệ thống hiểu. `algo` nằm trong danh sách nhưng không
+/// kiểm được bằng máy, nên luôn bị cảnh báo riêng.
+const INVARIANT_KINDS: &[&str] = &["data", "state", "money", "time", "access", "algo"];
+
+pub fn validate(doc: &Document) -> Vec<Diag> {
+    let mut diags = Vec::new();
+    check_unique_names(doc, &mut diags);
+    check_references(doc, &mut diags);
+    check_verifiability(doc, &mut diags);
+    diags
+}
+
+/// `allow` và `deny` trỏ tới cả component lẫn store, nên hai loại dùng chung
+/// một không gian tên.
+fn check_unique_names(doc: &Document, diags: &mut Vec<Diag>) {
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    let entries = doc
+        .components
+        .iter()
+        .map(|c| (c.name.as_str(), c.meta.line, "component"))
+        .chain(doc.stores.iter().map(|s| (s.name.as_str(), s.meta.line, "store")))
+        .chain(doc.boundaries.iter().map(|b| (b.name.as_str(), b.meta.line, "boundary")))
+        .chain(doc.flows.iter().map(|f| (f.name.as_str(), f.meta.line, "flow")))
+        .chain(doc.views.iter().map(|v| (v.name.as_str(), v.meta.line, "view")));
+
+    for (name, line, what) in entries {
+        if let Some(first) = seen.insert(name, line) {
+            diags.push(
+                Diag::error(line, format!("{what} `{name}` trùng tên đã khai báo ở dòng {first}"))
+                    .with_hint("component, store, boundary, flow và view dùng chung không gian tên"),
+            );
+        }
+    }
+
+    let mut contracts: HashMap<(&str, &str), usize> = HashMap::new();
+    for c in &doc.contracts {
+        let key = (c.component.as_str(), c.capability.as_str());
+        if let Some(first) = contracts.insert(key, c.meta.line) {
+            diags.push(Diag::error(
+                c.meta.line,
+                format!(
+                    "contract `{}.{}` trùng khai báo ở dòng {first}",
+                    c.component, c.capability
+                ),
+            ));
+        }
+    }
+}
+
+fn check_references(doc: &Document, diags: &mut Vec<Diag>) {
+    for store in &doc.stores {
+        if doc.component(&store.owned_by).is_none() {
+            diags.push(
+                Diag::error(
+                    store.meta.line,
+                    format!("store `{}` thuộc component `{}` chưa khai báo",
+                        store.name, store.owned_by),
+                )
+                .with_hint(format!("thêm `component {}` hoặc sửa lại tên", store.owned_by)),
+            );
+        }
+    }
+
+    for rule in &doc.rules {
+        let line = rule.meta.line;
+        for target in std::iter::once(&rule.from).chain(&rule.to) {
+            if let Target::Named(name) = target {
+                if !doc.knows(name) {
+                    diags.push(Diag::error(
+                        line,
+                        format!("quan hệ trỏ tới `{name}` nhưng chưa có component hay store nào tên đó"),
+                    ));
+                }
+            }
+        }
+        for name in &rule.except {
+            if !doc.knows(name) {
+                diags.push(Diag::error(
+                    line,
+                    format!("`except {name}` trỏ tới tên chưa khai báo"),
+                ));
+            }
+        }
+        if let Target::Named(from) = &rule.from
+            && rule.to.iter().any(|t| matches!(t, Target::Named(to) if to == from))
+        {
+            diags.push(Diag::warning(line, format!("`{from}` trỏ tới chính nó, luật này vô nghĩa")));
+        }
+    }
+
+    for boundary in &doc.boundaries {
+        for name in &boundary.contains {
+            if doc.component(name).is_none() {
+                diags.push(Diag::error(
+                    boundary.meta.line,
+                    format!("boundary `{}` chứa component `{name}` chưa khai báo",
+                        boundary.name),
+                ));
+            }
+        }
+    }
+
+    for contract in &doc.contracts {
+        if doc.component(&contract.component).is_none() {
+            diags.push(Diag::error(
+                contract.meta.line,
+                format!("contract thuộc component `{}` chưa khai báo", contract.component),
+            ));
+        }
+    }
+
+    for view in &doc.views {
+        for name in &view.components {
+            if doc.component(name).is_none() {
+                diags.push(Diag::error(
+                    view.meta.line,
+                    format!("view `{}` nhắc tới component `{name}` chưa khai báo", view.name),
+                ));
+            }
+        }
+    }
+
+    for inv in &doc.invariants {
+        if let Some(scope) = &inv.scope
+            && scope != "system"
+            && doc.component(scope).is_none()
+            && doc.boundary(scope).is_none()
+        {
+            diags.push(
+                Diag::error(inv.meta.line, format!("phạm vi `[{scope}]` không tồn tại"))
+                    .with_hint("phạm vi là tên component, tên boundary, hoặc `system`"),
+            );
+        }
+        if !INVARIANT_KINDS.contains(&inv.kind.as_str()) {
+            diags.push(
+                Diag::error(inv.meta.line, format!("loại invariant không nhận ra: `{}`", inv.kind))
+                    .with_hint(format!("loại hợp lệ: {}", INVARIANT_KINDS.join(", "))),
+            );
+        }
+    }
+}
+
+fn check_verifiability(doc: &Document, diags: &mut Vec<Diag>) {
+    for c in &doc.components {
+        if c.paths.is_empty() && !c.external {
+            diags.push(
+                Diag::warning(
+                    c.meta.line,
+                    format!("component `{}` không có `at`, bộ kiểm chứng sẽ bỏ qua", c.name),
+                )
+                .with_hint(format!("thêm `at <glob>`, hoặc đổi thành `external {}`", c.name)),
+            );
+        }
+    }
+
+    for c in &doc.contracts {
+        if !has_field(&c.fields, "verify") && c.meta.status.is_enforced() {
+            diags.push(Diag::warning(
+                c.meta.line,
+                format!("contract `{}.{}` không có verify, đây chỉ là lời hứa",
+                    c.component, c.capability),
+            ));
+        }
+    }
+
+    for b in &doc.boundaries {
+        if !has_field(&b.fields, "verify") && b.meta.status.is_enforced() {
+            diags.push(Diag::warning(
+                b.meta.line,
+                format!("boundary `{}` không có verify, đây chỉ là lời hứa", b.name),
+            ));
+        }
+    }
+
+    for inv in &doc.invariants {
+        if inv.kind == "algo" {
+            diags.push(
+                Diag::warning(
+                    inv.meta.line,
+                    "invariant loại `algo` không kiểm được bằng máy, chỉ là ghi chú",
+                )
+                .with_hint("đừng dựa vào nó như một ràng buộc"),
+            );
+        } else if inv.verify.is_empty() && inv.meta.status.is_enforced() {
+            diags.push(Diag::warning(
+                inv.meta.line,
+                format!("invariant {} không có verify, đây chỉ là lời hứa", inv.kind),
+            ));
+        }
+    }
+}
+
+fn has_field(fields: &[Field], key: &str) -> bool {
+    fields.iter().any(|f| f.key == key)
+}

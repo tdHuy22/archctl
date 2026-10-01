@@ -1,0 +1,10 @@
+[package]
+name = "arch-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Không có dependency. Mọi thứ thêm vào đây phải có lý do, vì CLI này chạy
+# trong repo của người dùng và trong vòng lặp của agent.
+[dependencies]
