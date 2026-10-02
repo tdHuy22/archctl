@@ -40,6 +40,13 @@ macro_rules! say_inline {
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Số mục in ra cho mỗi loại cảnh báo.
+///
+/// Trên một cây 5078 file, một lần `check` từng in ra 7247 dòng. Danh sách
+/// dài tới mức đó thì người đọc bỏ qua cả những dòng đáng đọc, nên cắt bớt
+/// làm nó hữu ích hơn chứ không phải kém đi. `--json` vẫn đưa đủ.
+const MAX_LISTED: usize = 12;
+
 /// Mã thoát, theo mục 7 của đặc tả.
 pub mod exit {
     pub const OK: u8 = 0;
@@ -367,14 +374,14 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
 
     // Khai báo nói một đằng, mã làm một nẻo. Không phải vi phạm luật, nhưng
     // là dấu hiệu sơ đồ đã lạc hậu — và sơ đồ sai còn tệ hơn không có sơ đồ.
-    for m in &report.missing {
+    for m in report.missing.iter().take(MAX_LISTED) {
         crate::say!("⚠ KHAI BÁO LẠC HẬU  {} `{}`", m.source, m.name);
         crate::say!("  {}:{}  — {}\n", arch_core::ARCH_FILE, m.line, m.hint);
     }
 
     // Pass nhưng pass vô nghĩa. Nguy hiểm hơn một cảnh báo thường: người đọc
     // tin rằng chỗ đó đã được kiểm.
-    for v in &report.vacuous {
+    for v in report.vacuous.iter().take(MAX_LISTED) {
         crate::say!("⚠ KIỂM KHÔNG KẾT LUẬN  {} `{}`", v.source, v.name);
         crate::say!(
             "  {}:{}  — `{}` được {} trong {}/{} file nên tìm thấy nó không nói lên điều gì",
@@ -388,13 +395,26 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
         crate::say!("  → đổi sang một tên chỉ thuộc về bước này\n");
     }
 
+    // Gộp theo tên: một header sinh lúc build có thể bị include ở hàng trăm
+    // chỗ, mà in cả trăm lần thì không nói thêm được gì.
+    let mut grouped: Vec<(&str, &arch_core::check::Unresolved, usize)> = Vec::new();
     for u in &report.unresolved {
-        crate::say!("⚠ CHƯA PHÂN GIẢI  '{}'", u.spec);
-        crate::say!("  {}:{}  — {}\n", u.file, u.line, u.reason.describe(u.lang));
+        match grouped.iter_mut().find(|(spec, _, _)| *spec == u.spec) {
+            Some((_, _, n)) => *n += 1,
+            None => grouped.push((&u.spec, u, 1)),
+        }
+    }
+    for (spec, first, n) in grouped.iter().take(MAX_LISTED) {
+        let more = if *n > 1 { format!("  ({n} chỗ)") } else { String::new() };
+        crate::say!("⚠ CHƯA PHÂN GIẢI  '{spec}'{more}");
+        crate::say!("  {}:{}  — {}\n", first.file, first.line, first.reason.describe(first.lang));
+    }
+    if let Some(rest) = grouped.len().checked_sub(MAX_LISTED).filter(|n| *n > 0) {
+        crate::say!("⚠ … còn {rest} tên nữa chưa phân giải được — xem `--json`\n");
     }
 
     // Bỏ qua thì bỏ qua, nhưng không được im lặng: đó là mã đang không kiểm.
-    for (file, bytes) in &report.oversized {
+    for (file, bytes) in report.oversized.iter().take(MAX_LISTED) {
         crate::say!("⚠ QUÁ LỚN  {file} ({} MB) — không dò", bytes / (1 << 20));
         crate::say!(
             "  → file sinh ra hay đã minify thì thêm vào {}\n",
@@ -402,8 +422,19 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
         );
     }
 
-    for (file, owners) in &report.ambiguous {
+    for (file, owners) in report.ambiguous.iter().take(MAX_LISTED) {
         crate::say!("⚠ MẪU CHỒNG NHAU  {file} khớp cả {}\n", owners.join(" và "));
+    }
+
+    for (label, shown, total) in [
+        ("khai báo lạc hậu", MAX_LISTED, report.missing.len()),
+        ("kiểm không kết luận", MAX_LISTED, report.vacuous.len()),
+        ("file quá lớn", MAX_LISTED, report.oversized.len()),
+        ("mẫu chồng nhau", MAX_LISTED, report.ambiguous.len()),
+    ] {
+        if let Some(rest) = total.checked_sub(shown).filter(|n| *n > 0) {
+            crate::say!("⚠ … còn {rest} {label} nữa — xem `--json`\n");
+        }
     }
 
     if !report.unchecked.is_empty() && !report.partial {

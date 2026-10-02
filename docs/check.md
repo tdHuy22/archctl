@@ -174,6 +174,24 @@ báo động giả tốn lòng tin nhiều hơn bỏ sót:
 
 Repo không có file C nào thì không phải quét tìm `Makefile`: phần này đọc muộn.
 
+## Báo cáo không được dài tới mức không ai đọc
+
+Cảnh báo lặp lại được gộp theo tên, và mỗi loại in tối đa mười hai mục:
+
+```
+⚠ CHƯA PHÂN GIẢI  'test/jemalloc_test.h'  (132 chỗ)
+  deps/jemalloc/test/analyze/prof_bias.c:1  — không tìm thấy header…
+
+⚠ … còn 17 tên nữa chưa phân giải được — xem `--json`
+```
+
+Trên một cây 5078 file gộp từ mười repo thật, một lần `check` từng in ra 7247
+dòng; giờ là 49. redis đi từ 719 xuống 43, hugo từ 960 xuống 44. Danh sách dài
+tới mức đó thì người đọc bỏ qua cả những dòng đáng đọc, nên cắt bớt làm nó hữu
+ích hơn chứ không phải kém đi.
+
+`--json` vẫn đưa đủ, không cắt gì.
+
 ## Giới hạn tài nguyên
 
 File trên **4 MB** không được dò, và được báo ra:

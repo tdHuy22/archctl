@@ -503,3 +503,41 @@ mod changed {
         assert!(out.contains("Web -> Report"), "{out}");
     }
 }
+
+/// Trên một cây 5078 file, một lần `check` từng in ra 7247 dòng — và danh
+/// sách dài tới mức đó thì người đọc bỏ qua cả những dòng đáng đọc.
+#[test]
+fn canh_bao_lap_lai_duoc_gop_va_cat_bot() {
+    let p = Project::new("flood");
+    std::fs::create_dir_all(p.0.join("src/web")).unwrap();
+    // Một header không có thật, include ở ba mươi chỗ.
+    for i in 0..30 {
+        std::fs::write(
+            p.0.join(format!("src/web/f{i}.c")),
+            "#include \"khong-co-that.h\"\nint main(void){return 0;}\n",
+        )
+        .unwrap();
+    }
+    let out = text(&p.run(&["check"]));
+    assert!(out.contains("(30 chỗ)"), "phải gộp theo tên: {out}");
+    assert_eq!(out.matches("CHƯA PHÂN GIẢI").count(), 1, "{out}");
+    assert!(out.lines().count() < 30, "{} dòng là quá nhiều", out.lines().count());
+}
+
+#[test]
+fn danh_sach_dai_thi_noi_ro_con_bao_nhieu() {
+    let p = Project::new("capped");
+    std::fs::create_dir_all(p.0.join("src/web")).unwrap();
+    for i in 0..20 {
+        std::fs::write(
+            p.0.join(format!("src/web/f{i}.c")),
+            format!("#include \"thieu-{i}.h\"\nint main(void){{return 0;}}\n"),
+        )
+        .unwrap();
+    }
+    let out = text(&p.run(&["check"]));
+    assert!(out.contains("còn 8 tên nữa"), "{out}");
+    // `--json` vẫn phải đưa đủ.
+    let json = text(&p.run(&["check", "--json"]));
+    assert_eq!(json.matches("\"spec\"").count(), 20, "{json}");
+}
