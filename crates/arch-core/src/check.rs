@@ -259,7 +259,7 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
         }
 
         let owners = owners_of(doc, path);
-        if owners.len() > 1 {
+        if ambiguous(doc, path, &owners) {
             report.ambiguous.push((path.clone(), owners.clone()));
         }
         let Some(from) = owners.first() else {
@@ -720,12 +720,49 @@ fn classify(doc: &Document) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
+/// Hai component cùng nhận một file ở **cùng độ cụ thể**: không có cách nào
+/// chọn, nên phải hỏi người viết.
+fn ambiguous(doc: &Document, path: &str, owners: &[String]) -> bool {
+    let top = |name: &str| {
+        doc.component(name)
+            .map(|c| c.paths.iter().filter(|p| glob::matches(p, path)).map(|p| specificity(p)).max())
+    };
+    matches!(owners, [a, b, ..] if top(a) == top(b))
+}
+
+/// Component sở hữu một đường dẫn, **cụ thể nhất trước**.
+///
+/// Mẫu chồng nhau là chuyện bình thường chứ không phải lỗi: `src/**` và
+/// `src/web/**` cùng khớp một file, và người viết rõ ràng muốn cái thứ hai.
+/// Cùng quy tắc với mọi bộ định tuyến — mẫu nào nói nhiều hơn thì thắng.
+///
+/// Chỉ khi hai mẫu **cùng độ cụ thể** mới là nhập nhằng thật, và chỗ gọi báo
+/// ra chuyện đó.
 fn owners_of(doc: &Document, path: &str) -> Vec<String> {
-    doc.components
+    let mut matched: Vec<(usize, &str)> = doc
+        .components
         .iter()
-        .filter(|c| !c.external && glob::matches_any(&c.paths, path))
-        .map(|c| c.name.clone())
-        .collect()
+        .filter(|c| !c.external)
+        .filter_map(|c| {
+            c.paths
+                .iter()
+                .filter(|p| glob::matches(p, path))
+                .map(|p| specificity(p))
+                .max()
+                .map(|s| (s, c.name.as_str()))
+        })
+        .collect();
+    matched.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+    matched.into_iter().map(|(_, name)| name.to_string()).collect()
+}
+
+/// Số đoạn nói rõ một cái tên. `src/web/**` là 2, `src/**` là 1, `*` là 0.
+fn specificity(pattern: &str) -> usize {
+    pattern
+        .trim_matches('/')
+        .split('/')
+        .filter(|seg| !seg.is_empty() && !seg.contains(['*', '?']))
+        .count()
 }
 
 /// Tên gói trong `at` của một `external`. So khớp chính xác trước, rồi không

@@ -32,13 +32,45 @@ Mất khoảng 190ms trên 2000 file.
 
 | Bước | Cách làm |
 | --- | --- |
-| Gốc mã nguồn | Thư mục tên quy ước (`src`, `lib`, `app`, `internal`, `pkg`), nhiều file nhất trong số đó. Không có cái nào thì lấy thư mục chiếm từ 60% số file. Vẫn không có thì dùng gốc repo |
-| Component | Mỗi thư mục con ngay dưới gốc mã nguồn. File nằm thẳng trong gốc gom thành một component riêng |
+| Gốc mã nguồn | Thư mục mà chia theo con của nó thì lộ ra **nhiều cấu trúc nhất** — xem dưới |
+| Component | Mỗi thư mục con ngay dưới gốc. File nằm thẳng trong gốc gom thành một component riêng |
 | Tên | `create-order` → `CreateOrder`. Trùng thì đánh số |
 | Quan hệ | Import **thật** trong mã, chỉ giữa hai component. Thư viện ngoài bị bỏ qua |
 | Giới hạn | Tối đa 24 component; phần dư liệt kê trong chú thích cuối file |
 
+### Chọn gốc mã nguồn
+
+Thước đo là **số file không nằm trong nhóm lớn nhất**. Nó phạt cả hai kiểu hỏng
+cùng lúc: gốc quá sâu thì phủ được ít file, còn gốc quá nông thì một nhóm nuốt
+gần hết và cũng chẳng nói lên gì.
+
+Thử trên tám repo thật:
+
+| Repo | Gốc chọn được | Component |
+| --- | --- | --- |
+| hugo (943 file Go) | gốc repo | 24 |
+| ripgrep | `crates/` | 11 |
+| vue core | `packages/` | 13 |
+| tokio | `tokio/src/` | 15 |
+| flask | `src/flask/` | 3 |
+| curl | `lib/` | 7 |
+
+Thư mục test, ví dụ, tài liệu và thư viện nhúng (`deps/`, `vendor/`) **không
+tính khi chọn bố cục** — nhưng vẫn được kiểm bình thường sau đó. Nếu bỏ chúng
+đi mà còn lại quá ít thì repo này chủ yếu *là* test, và khi đó bỏ chúng chỉ
+làm mất thông tin.
+
 Khi không đoán được chắc chắn thì nó **không đoán** — dùng gốc repo và nói ra.
+
+### Luật sinh ra phải tự nhất quán
+
+Luật được dựng **từ chính mã này**, nên nâng mọi thứ lên `#accepted` rồi kiểm
+lại phải ra **0 vi phạm**. Mỗi vi phạm còn lại là một chỗ bộ khám phá và bộ
+kiểm chứng nhìn khác nhau về cùng một import — tức là một lỗi, không phải một
+phát hiện.
+
+Bất biến này được kiểm trên cả tám repo ở trên, và có test giữ lại trong
+`tests/discover.rs`.
 
 ### Kết quả là mô tả, không phải thiết kế
 

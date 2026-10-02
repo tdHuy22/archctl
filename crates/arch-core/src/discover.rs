@@ -15,8 +15,19 @@ use crate::scan::Lang;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// Thư mục gốc mã nguồn thường gặp, xét theo thứ tự này.
-const SOURCE_ROOTS: &[&str] = &["src", "lib", "app", "internal", "pkg", "source"];
+/// Thư mục không nói gì về kiến trúc của sản phẩm. Bỏ khi **chọn bố cục**;
+/// chúng vẫn được kiểm bình thường sau đó.
+const ASIDE: &[&str] = &[
+    "test", "tests", "testing", "spec", "specs", "__tests__", "e2e", "example", "examples",
+    "bench", "benches", "doc", "docs", "deps", "vendor", "third_party", "thirdparty",
+    "fixtures", "testdata",
+];
+
+/// Tiền tố đào sâu tối đa. `src/flask` và `tokio/src` cần hai cấp.
+const MAX_PREFIX_DEPTH: usize = 3;
+/// Tiền tố phủ quá ít file thì không đáng xét, và xét hết mọi thư mục của một
+/// repo lớn thì tốn.
+const MIN_PREFIX_SHARE: usize = 8;
 
 /// Quá nhiều component thì sơ đồ vô dụng và file luật không ai đọc. Phần dư
 /// được liệt kê riêng để người tự quyết.
@@ -53,14 +64,7 @@ pub fn discover(root: &Path, ignores: &[String]) -> Discovery {
 
     // Mỗi thư mục con ngay dưới gốc mã nguồn là một component ứng viên. File
     // nằm thẳng trong gốc gom vào một component riêng.
-    let mut groups: BTreeMap<String, usize> = BTreeMap::new();
-    for file in &files {
-        if let Some(group) = group_of(file, &prefix) {
-            *groups.entry(group).or_default() += 1;
-        }
-    }
-
-    let mut ranked: Vec<(String, usize)> = groups.into_iter().collect();
+    let mut ranked: Vec<(String, usize)> = groups_under(&files, &prefix).into_iter().collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let (kept, dropped) = ranked.split_at(ranked.len().min(MAX_COMPONENTS));
     out.skipped = dropped.to_vec();
@@ -68,9 +72,14 @@ pub fn discover(root: &Path, ignores: &[String]) -> Discovery {
     let mut names: Vec<String> = Vec::new();
     let mut owners: BTreeMap<String, String> = BTreeMap::new();
     for (dir, _) in kept {
-        let name = unique_name(&pascal_case(dir), &names);
+        let base = if dir == "." { root_group_name(&prefix) } else { pascal_case(dir) };
+        let name = unique_name(&base, &names);
         names.push(name.clone());
-        let glob = if dir == "." { format!("{prefix}*") } else { format!("{prefix}{dir}/**") };
+        let glob = if dir == "." {
+            root_glob(&files, &prefix)
+        } else {
+            format!("{prefix}{dir}/**")
+        };
         owners.insert(dir.clone(), name.clone());
         out.components.push((name, glob));
     }
@@ -102,7 +111,10 @@ fn observe_edges(
 
         for import in lang.imports(&src) {
             let Resolved::Path(target) = resolver.resolve(lang, file, &import) else { continue };
-            let Some(to) = group_of(&target, prefix).and_then(|g| owners.get(&g)) else { continue };
+            let Some(to) = group_of_target(root, &target, prefix).and_then(|g| owners.get(&g))
+            else {
+                continue;
+            };
             if to != from {
                 edges.push((from.clone(), to.clone()));
             }
@@ -120,33 +132,149 @@ fn group_of(path: &str, prefix: &str) -> Option<String> {
     Some(rest.split_once('/').map_or_else(|| ".".to_string(), |(dir, _)| dir.to_string()))
 }
 
+/// Nhóm mà một **đích phân giải** thuộc về.
+///
+/// Khác `group_of` ở chỗ đích có thể là cả một thư mục: Go phân giải import
+/// thành package, và gói không gian tên của Python cũng vậy. Coi `helpers` là
+/// "file nằm thẳng ở gốc" sẽ gom mọi package cấp một của Go vào chung một
+/// component, và khi đó mọi cạnh giữa chúng biến mất.
+fn group_of_target(root: &Path, path: &str, prefix: &str) -> Option<String> {
+    let rest = path.strip_prefix(prefix)?;
+    match rest.split_once('/') {
+        Some((dir, _)) => Some(dir.to_string()),
+        None if !rest.is_empty() && root.join(path).is_dir() => Some(rest.to_string()),
+        None => Some(".".to_string()),
+    }
+}
+
+/// Mẫu `at` cho nhóm file nằm thẳng trong gốc.
+///
+/// `*` thì hỏng: nó khớp một đoạn bất kỳ, nên nó nhận luôn mọi **thư mục** con
+/// chứ không riêng file. Go và Python phân giải import thành cả thư mục, nên
+/// một package không thành component sẽ bị mẫu này nhận bừa — và khi đó bộ
+/// khám phá với bộ kiểm chứng nói hai chuyện khác nhau về cùng một import.
+///
+/// Liệt kê đúng những phần mở rộng thật sự có ở đó thì mẫu chỉ còn khớp file.
+fn root_glob(files: &[String], prefix: &str) -> String {
+    let mut exts: Vec<String> = files
+        .iter()
+        .filter_map(|f| f.strip_prefix(prefix))
+        .filter(|rest| !rest.contains('/'))
+        .filter_map(|rest| rest.rsplit_once('.').map(|(_, ext)| ext.to_string()))
+        .collect();
+    exts.sort();
+    exts.dedup();
+    if exts.is_empty() {
+        return format!("{prefix}*");
+    }
+    exts.iter().map(|e| format!("{prefix}*.{e}")).collect::<Vec<_>>().join(", ")
+}
+
+/// Đoạn đường dẫn chỉ nói "đây là mã nguồn", không nói component nào.
+const GENERIC_DIRS: &[&str] = &["src", "lib", "source", "crates", "packages", "internal", "pkg"];
+
+/// Tên cho nhóm file nằm thẳng trong gốc.
+///
+/// `pascal_case(".")` ra chuỗi rỗng rồi rơi vào nhánh dự phòng thành `M` —
+/// một cái tên không nói gì với người đọc sơ đồ. Lấy tên từ chính gốc mã
+/// nguồn thì có nghĩa hơn: `src/flask` ra `Flask`, `tokio/src` ra `Tokio`.
+fn root_group_name(prefix: &str) -> String {
+    let name = prefix
+        .trim_end_matches('/')
+        .split('/')
+        .rev()
+        .find(|part| !part.is_empty() && !GENERIC_DIRS.contains(part))
+        .unwrap_or("");
+    if name.is_empty() { "Core".to_string() } else { pascal_case(name) }
+}
+
 /// Gốc mã nguồn là thư mục đầu chứa phần lớn file. Không có thư mục nào chiếm
 /// ưu thế rõ rệt thì dùng luôn gốc repo — đoán sai còn tệ hơn không đoán.
+/// Gốc mã nguồn: thư mục mà chia theo con của nó thì lộ ra nhiều cấu trúc
+/// nhất.
+///
+/// Trước đây chỗ này chọn theo tên quy ước (`src`, `lib`, `internal`…) và tên
+/// quy ước thắng vô điều kiện. Hugo có `internal/` với 28 file trên tổng 943,
+/// nên nó thắng và 915 file còn lại nằm ngoài sơ đồ. Flask có đúng một thư mục
+/// dưới `src/`, nên bản nháp ra **một** component và không luật nào cả.
+///
+/// Thước đo thay thế là **số file không nằm trong nhóm lớn nhất**. Nó phạt cả
+/// hai kiểu hỏng cùng lúc: gốc quá sâu thì phủ ít, còn gốc quá nông thì một
+/// nhóm nuốt gần hết và cũng chẳng nói lên gì. `crates/` của ripgrep thắng
+/// gốc repo vì chia được thành mười một; gốc repo của hugo thắng `tpl/` vì
+/// `tpl` chỉ là một phần.
 fn pick_source_root(files: &[String]) -> String {
-    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-    for f in files {
-        if let Some((head, _)) = f.split_once('/') {
-            *counts.entry(head).or_default() += 1;
+    let main = architectural(files);
+    let floor = main.len() / MIN_PREFIX_SHARE;
+
+    let mut best: Option<(usize, usize, String)> = None;
+    for prefix in candidates(&main) {
+        let groups = groups_under(&main, &prefix);
+        if groups.len() < 2 {
+            continue;
+        }
+        let covered: usize = groups.values().sum();
+        if covered < floor {
+            continue;
+        }
+        let biggest = groups.values().copied().max().unwrap_or(0);
+        // Hoà thì gốc nông thắng, rồi tới tên nhỏ nhất: kết quả không được
+        // phụ thuộc thứ tự duyệt thư mục.
+        let score = (covered - biggest, covered, std::cmp::Reverse(prefix.clone()));
+        if best.as_ref().is_none_or(|b| {
+            (score.0, score.1, &score.2) > (b.0, b.1, &std::cmp::Reverse(b.2.clone()))
+        }) {
+            best = Some((score.0, score.1, prefix));
         }
     }
-    // Hoà thì lấy tên nhỏ nhất, để kết quả không phụ thuộc thứ tự duyệt.
-    fn best(pool: Vec<(&str, usize)>) -> Option<(String, usize)> {
-        pool.into_iter()
-            .max_by_key(|(name, n)| (*n, std::cmp::Reverse(*name)))
-            .map(|(name, n)| (name.to_string(), n))
-    }
+    best.map(|(_, _, p)| p.trim_end_matches('/').to_string()).unwrap_or_default()
+}
 
-    // Tên quy ước thắng trước; trong số đó lấy cái nhiều file nhất.
-    let conventional: Vec<(&str, usize)> =
-        counts.iter().filter(|(n, _)| SOURCE_ROOTS.contains(n)).map(|(n, c)| (*n, *c)).collect();
-    if let Some((name, _)) = best(conventional) {
-        return name;
+/// File nói được điều gì đó về kiến trúc sản phẩm. Test và ví dụ thì không —
+/// nhưng nếu bỏ chúng đi mà còn lại quá ít thì repo này chủ yếu **là** test,
+/// và khi đó bỏ chúng chỉ làm mất thông tin.
+fn architectural(files: &[String]) -> Vec<String> {
+    let kept: Vec<String> = files
+        .iter()
+        .filter(|f| {
+            let dirs = f.rsplit_once('/').map_or("", |(d, _)| d);
+            !dirs.split('/').any(|d| ASIDE.contains(&d))
+        })
+        .cloned()
+        .collect();
+    if kept.len() * 4 >= files.len() { kept } else { files.to_vec() }
+}
+
+/// Tiền tố đáng thử: gốc repo, và mọi thư mục tới độ sâu `MAX_PREFIX_DEPTH`
+/// chứa đủ nhiều file.
+fn candidates(files: &[String]) -> Vec<String> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for f in files {
+        let dirs = f.rsplit_once('/').map_or("", |(d, _)| d);
+        if dirs.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = dirs.split('/').collect();
+        for depth in 1..=parts.len().min(MAX_PREFIX_DEPTH) {
+            *counts.entry(format!("{}/", parts[..depth].join("/"))).or_default() += 1;
+        }
     }
-    // Không có tên quy ước thì phải chiếm từ 60% số file trở lên. Nhân chéo
-    // thay vì chia, để phép chia nguyên không làm ngưỡng tụt về 1.
-    best(counts.into_iter().collect())
-        .filter(|(_, n)| n * 5 >= files.len() * 3)
-        .map_or(String::new(), |(name, _)| name)
+    let floor = (files.len() / MIN_PREFIX_SHARE).max(2);
+    let mut out = vec![String::new()];
+    out.extend(counts.into_iter().filter(|(_, n)| *n >= floor).map(|(p, _)| p));
+    out
+}
+
+/// Nhóm file theo thư mục con ngay dưới `prefix`. File nằm thẳng trong đó gom
+/// vào nhóm `.`.
+fn groups_under(files: &[String], prefix: &str) -> BTreeMap<String, usize> {
+    let mut groups: BTreeMap<String, usize> = BTreeMap::new();
+    for file in files {
+        if let Some(group) = group_of(file, prefix) {
+            *groups.entry(group).or_default() += 1;
+        }
+    }
+    groups
 }
 
 fn tally(langs: impl Iterator<Item = Lang>) -> Vec<(Lang, usize)> {
