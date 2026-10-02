@@ -6,6 +6,7 @@
 //! dependency thêm vào là một bề mặt tấn công thêm.
 
 pub mod baseline;
+pub mod cbuild;
 pub mod check;
 pub mod discover;
 pub mod export;

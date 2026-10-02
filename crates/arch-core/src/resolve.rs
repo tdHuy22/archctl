@@ -7,6 +7,7 @@
 
 use crate::jsonc;
 use crate::scan::{Import, Lang};
+use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +40,9 @@ pub struct Resolver {
     /// Mọi `tsconfig.json` trong dự án, gần nhất trước. Monorepo có nhiều cấu
     /// hình, và alias chỉ có hiệu lực trong phạm vi cấu hình chứa file gọi.
     ts_configs: Vec<TsConfig>,
+    /// Thư mục include mà build của C/C++ khai báo. Đọc muộn: repo không có
+    /// file C nào thì không phải quét tìm `Makefile` làm gì.
+    c_includes: OnceCell<Vec<String>>,
 }
 
 /// Phần `paths` của một `tsconfig.json`, đã mở sẵn `extends`.
@@ -58,6 +62,7 @@ impl Resolver {
             go_module: read_go_module(root),
             rust_crates: find_rust_crates(root),
             ts_configs: find_ts_configs(root),
+            c_includes: OnceCell::new(),
         }
     }
 
@@ -177,20 +182,30 @@ impl Resolver {
     // ---- C và C++ ----
 
     fn c(&self, importer: &str, spec: &str, system: bool) -> Resolved {
+        let mut candidates = Vec::new();
+        // `#include "x.h"` tìm cạnh file gọi trước. `<x.h>` thì không.
+        if !system
+            && let Some(local) = join(dir_of(importer), spec)
+        {
+            candidates.push(local);
+        }
+        // Thư mục mà build khai báo. Đây là đường dẫn thật, nên nó áp dụng cho
+        // cả hai dạng include: `<x.h>` tìm thấy ở đây là file của dự án, đúng
+        // như trình biên dịch sẽ thấy.
+        let declared = self.c_includes.get_or_init(|| crate::cbuild::include_dirs(&self.root));
+        candidates.extend(declared.iter().filter_map(|d| join(d, spec)));
+        if let Some(found) = self.first_file(candidates) {
+            return Resolved::Path(found);
+        }
         if system {
             // Header hệ thống và thư viện bên ngoài. Khai báo bằng
             // `external LibC at "stdio.h"` nếu muốn đưa vào luật.
             return Resolved::Package(spec.to_string());
         }
-        // `#include "x.h"` ưu tiên thư mục của file gọi, rồi tới các thư mục
-        // include thường gặp. Đường dẫn thật nằm trong CMake hoặc Makefile mà
-        // ta chưa đọc, nên đây là xấp xỉ.
-        let mut candidates = Vec::new();
-        if let Some(local) = join(dir_of(importer), spec) {
-            candidates.push(local);
-        }
-        candidates.extend(C_INCLUDE_DIRS.iter().filter_map(|d| join(d, spec)));
-        self.first_file(candidates).map_or(Resolved::Missing, Resolved::Path)
+        // Phỏng đoán cuối, cho repo không có file build nào đọc được. Chỉ dùng
+        // cho `"..."`: đoán một thư mục rồi khớp `<stdio.h>` vào đó thì sai.
+        self.first_file(C_INCLUDE_DIRS.iter().filter_map(|d| join(d, spec)))
+            .map_or(Resolved::Missing, Resolved::Path)
     }
 
     // ---- Rust ----
@@ -469,7 +484,7 @@ fn is_relative(spec: &str) -> bool {
     spec.starts_with("./") || spec.starts_with("../") || spec == "." || spec == ".."
 }
 
-fn dir_of(path: &str) -> &str {
+pub(crate) fn dir_of(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(d, _)| d)
 }
 
@@ -482,13 +497,13 @@ fn module_dir(importer: &str) -> String {
     }
 }
 
-fn join(dir: &str, spec: &str) -> Option<String> {
+pub(crate) fn join(dir: &str, spec: &str) -> Option<String> {
     let joined = if dir.is_empty() { spec.to_string() } else { format!("{dir}/{spec}") };
     normalize(&joined)
 }
 
 /// Gộp `.` và `..`. Trả về `None` nếu vượt ra ngoài gốc dự án.
-fn normalize(path: &str) -> Option<String> {
+pub(crate) fn normalize(path: &str) -> Option<String> {
     let mut out: Vec<&str> = Vec::new();
     for segment in path.split('/') {
         match segment {
