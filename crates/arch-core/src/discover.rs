@@ -96,6 +96,9 @@ fn observe_edges(
         let Some(lang) = Lang::for_path(file) else { continue };
         let Some(from) = group_of(file, prefix).and_then(|g| owners.get(&g)) else { continue };
         let Ok(src) = std::fs::read_to_string(root.join(file)) else { continue };
+        if src.len() as u64 > crate::check::MAX_FILE_BYTES {
+            continue;
+        }
 
         for import in lang.imports(&src) {
             let Resolved::Path(target) = resolver.resolve(lang, file, &import) else { continue };

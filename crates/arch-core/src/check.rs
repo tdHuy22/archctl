@@ -158,6 +158,9 @@ pub struct Report {
     pub missing: Vec<Missing>,
     /// Kiểm tồn tại đã pass nhưng không chứng minh được gì.
     pub vacuous: Vec<Vacuous>,
+    /// File quá lớn để dò, kèm kích thước. Không im lặng bỏ qua: đó là mã
+    /// đang không được kiểm.
+    pub oversized: Vec<(String, u64)>,
 }
 
 impl Report {
@@ -165,6 +168,17 @@ impl Report {
         !self.violations.is_empty()
     }
 }
+
+/// Trên mức này thì không dò nữa.
+///
+/// Bộ dò giữ cả dãy token trong bộ nhớ, nên một bundle đã minify 32 MB ngốn
+/// hơn một gigabyte. Công cụ này chạy trong vòng lặp của agent và trong CI có
+/// hạn mức bộ nhớ, nên con số đó là một lần bị giết chứ không phải một lần
+/// chạy chậm.
+///
+/// Một file nguồn do người viết gần như không bao giờ tới mức này, còn file
+/// sinh ra ở cỡ đó thì không chứa thông tin kiến trúc nào.
+pub const MAX_FILE_BYTES: u64 = 4 << 20;
 
 /// Mọi file thuộc ngôn ngữ đã hỗ trợ, tương đối so với gốc dự án.
 pub fn source_files(root: &Path, extra_ignores: &[String]) -> Vec<String> {
@@ -247,6 +261,10 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
         let Ok(src) = std::fs::read_to_string(root.join(path)) else {
             continue;
         };
+        if src.len() as u64 > MAX_FILE_BYTES {
+            report.oversized.push((path.clone(), src.len() as u64));
+            continue;
+        }
         symbol_scanned += 1;
         let scan = lang.scan_all(&src, &needle_set, &as_refs(&table_needles));
         for import in &scan.imports {
@@ -273,6 +291,7 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
 
     report.violations.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
     report.unresolved.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
+    report.oversized.sort();
     report
 }
 

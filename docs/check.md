@@ -124,6 +124,25 @@ báo động giả tốn lòng tin nhiều hơn bỏ sót:
 
 Repo không có file C nào thì không phải quét tìm `Makefile`: phần này đọc muộn.
 
+## Giới hạn tài nguyên
+
+File trên **4 MB** không được dò, và được báo ra:
+
+```
+⚠ QUÁ LỚN  src/web/bundle.min.js (30 MB) — không dò
+  → file sinh ra hay đã minify thì thêm vào .arch/.archignore
+```
+
+Bộ dò giữ cả dãy token trong bộ nhớ, nên một bundle đã minify 32 MB ngốn hơn
+một gigabyte. Trong CI có hạn mức bộ nhớ thì đó là một lần bị giết, và triệu
+chứng không chỉ ra được nguyên nhân. Một file nguồn do người viết gần như
+không bao giờ tới mức đó; file sinh ra ở cỡ đó thì không chứa thông tin kiến
+trúc nào.
+
+Mẫu glob cũng bị chặn: bộ khớp chỉ giữ một điểm quay lui nên không có mẫu nào
+làm nó chạy theo hàm mũ. Điều này quan trọng vì mẫu có thể do agent đề xuất
+rồi được `archctl accept` ghi vào file luật.
+
 ## Giới hạn khác đã biết
 
 - **`flow`, `contract`, `boundary`, `invariant` kiểm được một phần** — xem

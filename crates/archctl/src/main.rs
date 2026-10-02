@@ -223,7 +223,8 @@ fn cmd_check(args: &[String]) -> ExitCode {
     let unchecked = report.unresolved.len()
         + report.ambiguous.len()
         + report.missing.len()
-        + report.vacuous.len();
+        + report.vacuous.len()
+        + report.oversized.len();
     let failed = fresh > 0 || (strict && unchecked > 0);
     if strict && fresh == 0 && unchecked > 0 {
         crate::say!(
@@ -387,6 +388,15 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
         crate::say!("  {}:{}  — {}\n", u.file, u.line, u.reason.describe(u.lang));
     }
 
+    // Bỏ qua thì bỏ qua, nhưng không được im lặng: đó là mã đang không kiểm.
+    for (file, bytes) in &report.oversized {
+        crate::say!("⚠ QUÁ LỚN  {file} ({} MB) — không dò", bytes / (1 << 20));
+        crate::say!(
+            "  → file sinh ra hay đã minify thì thêm vào {}\n",
+            arch_core::IGNORE_FILE
+        );
+    }
+
     for (file, owners) in &report.ambiguous {
         crate::say!("⚠ MẪU CHỒNG NHAU  {file} khớp cả {}\n", owners.join(" và "));
     }
@@ -430,6 +440,7 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
 
     let warnings = report.missing.len()
         + report.vacuous.len()
+        + report.oversized.len()
         + report.unresolved.len()
         + report.ambiguous.len()
         + usize::from(!report.unchecked.is_empty())
