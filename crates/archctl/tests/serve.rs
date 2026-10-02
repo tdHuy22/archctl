@@ -122,6 +122,19 @@ fn mo_hinh_co_du_node_canh_va_vi_pham() {
 }
 
 #[test]
+fn mo_hinh_luon_co_moi_truong_ma_giao_dien_doc() {
+    let s = Server::start("fields", 4742);
+    let out = s.get("/api/model");
+    // Thiếu một trường thì `summarize()` ném lỗi và cả sơ đồ trắng xoá, chứ
+    // không chỉ mất một tab. Nên sự có mặt của chúng là một ràng buộc.
+    for field in
+        ["nodes", "edges", "boundaries", "violations", "missing", "vacuous", "proposals", "stats"]
+    {
+        assert!(out.contains(&format!(r#""{field}":"#)), "thiếu `{field}`: {out}");
+    }
+}
+
+#[test]
 fn khoa_mot_luat_chi_dung_mot_dong() {
     let s = Server::start("lock", 4733);
     assert!(s.post("/api/status", r##"{"name":"Report","status":"#locked"}"##).contains("200 OK"));

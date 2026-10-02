@@ -8,7 +8,7 @@ Hiện kiểm **luật phụ thuộc giữa component** cho năm ngôn ngữ.
 | --- | --- | --- | --- |
 | TypeScript, JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | `import`, `import type`, `export … from`, `require()`, `import()` | tương đối, `index.*`, `.js`→`.ts`, **alias `paths` trong tsconfig** |
 | Python | `.py .pyi` | `import a.b`, `import a as b, c`, `from .x import y` | tương đối theo số dấu chấm; tuyệt đối thử gốc, `src/`, `lib/` |
-| C, C++ | `.c .h .cc .cpp .cxx .hpp .hh .hxx .inl` | `#include "x"`, `#include <x>` | `"…"` theo thư mục file gọi rồi `include/`, `src/`, `lib/` |
+| C, C++ | `.c .h .cc .cpp .cxx .hpp .hh .hxx .inl` | `#include "x"`, `#include <x>` | **thư mục `-I` đọc từ build**; `"…"` ưu tiên thư mục file gọi |
 | Rust | `.rs` | `use`, `pub use`, `use a::{b, c}`, `extern crate` | theo cây module; đọc `Cargo.toml` để biết gốc crate **và các crate anh em trong workspace** |
 | Go | `.go` | `import "x"`, khối `import ( … )` | đọc `module` trong `go.mod` để tách nội bộ với bên ngoài |
 
@@ -88,15 +88,44 @@ tệ hơn hẳn việc nói thẳng là chưa biết.
 | `@/lib/x` khi có `tsconfig.json` khai báo | phân giải theo `paths`; monorepo thì lấy cấu hình gần file gọi nhất |
 | `@/lib/x` khi không có khai báo nào | **báo ra** |
 | `#include "x.h"` không tìm thấy | **báo ra**, có thể nằm trong include path của build |
+| `#include <x.h>` nằm trong một thư mục `-I` của dự án | file của dự án — đúng như trình biên dịch sẽ thấy |
 | `use crate::x` không có module | **báo ra** |
 | `from .x import y` không có file | **báo ra** |
 | `import numpy` không có trong dự án | coi là gói — với import tuyệt đối của Python, không phân biệt được |
 
+## Include path của C/C++
+
+`#include "aes.h"` không nói header nằm đâu — đường dẫn thật nằm trong cờ `-I`
+của build. Đoán bằng vài tên thư mục thường gặp thì bỏ sót, và mất một cạnh
+phụ thuộc là mất một vi phạm thật: `archctl check` sẽ in "0 vi phạm" trong khi
+mã đang vi phạm.
+
+Đọc theo thứ tự tin cậy giảm dần:
+
+| Nguồn | Lấy gì |
+| --- | --- |
+| `compile_commands.json` | `-I`, `-isystem`, `-iquote`, `-idirafter` trong `arguments` hoặc `command`; đường dẫn tính từ `directory` của từng mục |
+| `CMakeLists.txt`, `*.cmake` | `include_directories`, `target_include_directories`; mở `${CMAKE_SOURCE_DIR}` và `${CMAKE_CURRENT_SOURCE_DIR}` |
+| `Makefile`, `*.mk` | mọi `-I` trên mọi dòng, sau khi mở biến `$(VAR)` |
+
+**Không chạy `cmake` hay `make`.** Đọc file build của một repo lạ thì an toàn,
+thực thi nó thì không.
+
+Hai chỗ cố tình thận trọng, vì một đường dẫn đoán sai sinh ra **cạnh sai**, và
+báo động giả tốn lòng tin nhiều hơn bỏ sót:
+
+- **Biến chưa biết thì bỏ.** `${SOMETHING_ELSE}/inc` không sinh ra gì.
+  `${CMAKE_BINARY_DIR}` cũng vậy: đó là header sinh ra lúc build, không có
+  trong cây nguồn.
+- **Hậu tố tuyệt đối phải khớp ít nhất hai đoạn.** `compile_commands.json`
+  sinh trong container mang tiền tố không khớp gốc hiện tại, nên phải khớp
+  theo hậu tố — nhưng nếu chấp nhận một đoạn thì `/usr/include` cũng khớp
+  `include/` của repo.
+
+Repo không có file C nào thì không phải quét tìm `Makefile`: phần này đọc muộn.
+
 ## Giới hạn khác đã biết
 
-- **Include path của C/C++ chưa đọc từ build.** CMake, Makefile và
-  `compile_commands.json` đều chưa được đọc, nên chỉ xấp xỉ bằng vài thư mục
-  thường gặp.
 - **`flow`, `contract`, `boundary`, `invariant` kiểm được một phần** — xem
   [declarations.md](declarations.md). Thứ tự bước và nội dung ngữ nghĩa thì
   chưa.

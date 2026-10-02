@@ -207,7 +207,12 @@ function summarize() {
   const fresh = model.violations.filter((v) => !v.baselined);
   toggle("broken", fresh.length, `${fresh.length} vi phạm`);
   toggle("waiting", model.proposals.length, `${model.proposals.length} chờ duyệt`);
-  toggle("stale", model.missing.length, `${model.missing.length} khai báo lạc hậu`);
+  // Hai vấn đề khác nhau của cùng một thứ: khai báo không còn khớp mã, và
+  // khai báo mà kiểm xong vẫn không biết gì. Cái thứ hai dễ bị bỏ qua hơn.
+  toggle("stale", model.missing.length + model.vacuous.length,
+    model.vacuous.length
+      ? `${model.missing.length} lạc hậu · ${model.vacuous.length} không kết luận`
+      : `${model.missing.length} khai báo lạc hậu`);
 }
 const toggle = (id, count, text) => {
   const node = document.getElementById(id);
@@ -478,14 +483,23 @@ function renderTabs() {
 // dấu hiệu sơ đồ đã lạc hậu — và sơ đồ sai còn tệ hơn không có sơ đồ.
 function renderStale() {
   const box = tab("stale");
-  box.innerHTML = model.missing.length
-    ? model.missing.map((m) => `
-        <div class="card">
-          <h4>${esc(m.source)} <span class="mono">${esc(m.name)}</span></h4>
-          <p class="where mono">system.arch:${m.line}</p>
-          <p class="hint">→ ${esc(m.hint)}</p>
-        </div>`).join("")
-    : `<p class="empty">Mọi tên trong khai báo đều có trong mã.</p>`;
+  const stale = model.missing.map((m) => `
+    <div class="card">
+      <h4>${esc(m.source)} <span class="mono">${esc(m.name)}</span></h4>
+      <p class="where mono">system.arch:${m.line}</p>
+      <p class="hint">→ ${esc(m.hint)}</p>
+    </div>`).join("");
+  // Đã "pass" nhưng pass vì cái tên có mặt khắp nơi. Im lặng ở đây bị đọc
+  // thành "chỗ này đã kiểm, không sao".
+  const vague = model.vacuous.map((v) => `
+    <div class="card">
+      <h4>${esc(v.source)} <span class="mono">${esc(v.name)}</span></h4>
+      <p class="where mono">system.arch:${v.line}</p>
+      <p class="hint">có trong ${v.files}/${v.of} file nên tìm thấy nó không nói lên điều gì
+        → đổi sang một tên chỉ thuộc về bước này</p>
+    </div>`).join("");
+  box.innerHTML = stale + vague
+    || `<p class="empty">Mọi tên trong khai báo đều có trong mã, và đều đủ cụ thể để kiểm.</p>`;
 }
 
 function renderDetail() {

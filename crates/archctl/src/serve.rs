@@ -320,6 +320,21 @@ fn model_json(root: &Path) -> String {
         })
         .collect();
 
+    let vacuous: Vec<String> = report
+        .vacuous
+        .iter()
+        .map(|v| {
+            format!(
+                r#"{{"name":{},"source":{},"line":{},"files":{},"of":{}}}"#,
+                json::string(&v.name),
+                json::string(&v.source),
+                v.line,
+                v.files,
+                v.of,
+            )
+        })
+        .collect();
+
     let (proposals, _) = protocol::parse_proposals(
         &std::fs::read_to_string(root.join(PROPOSALS_FILE)).unwrap_or_default(),
     );
@@ -339,13 +354,14 @@ fn model_json(root: &Path) -> String {
         .collect();
 
     format!(
-        r#"{{"archHash":{},"nodes":[{}],"edges":[{}],"boundaries":[{}],"violations":[{}],"missing":[{}],"proposals":[{}],"stats":{{"files":{},"checked":{},"unchecked":{}}}}}"#,
+        r#"{{"archHash":{},"nodes":[{}],"edges":[{}],"boundaries":[{}],"violations":[{}],"missing":[{}],"vacuous":[{}],"proposals":[{}],"stats":{{"files":{},"checked":{},"unchecked":{}}}}}"#,
         json::string(&hash),
         nodes.join(","),
         edges.join(","),
         boundaries.join(","),
         violations.join(","),
         missing.join(","),
+        vacuous.join(","),
         pending.join(","),
         report.files_scanned,
         json::strings(report.checked.iter().map(String::as_str)),

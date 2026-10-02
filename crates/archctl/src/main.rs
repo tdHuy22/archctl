@@ -220,7 +220,10 @@ fn cmd_check(args: &[String]) -> ExitCode {
     // `--strict` coi cảnh báo là vi phạm. Dành cho CI: một import không phân
     // giải được nghĩa là có một phần mã đang không được kiểm, và trên nhánh
     // chính thì đó không nên là chuyện bỏ qua được.
-    let unchecked = report.unresolved.len() + report.ambiguous.len() + report.missing.len();
+    let unchecked = report.unresolved.len()
+        + report.ambiguous.len()
+        + report.missing.len()
+        + report.vacuous.len();
     let failed = fresh > 0 || (strict && unchecked > 0);
     if strict && fresh == 0 && unchecked > 0 {
         crate::say!(
@@ -364,6 +367,21 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
         crate::say!("  {}:{}  — {}\n", arch_core::ARCH_FILE, m.line, m.hint);
     }
 
+    // Pass nhưng pass vô nghĩa. Nguy hiểm hơn một cảnh báo thường: người đọc
+    // tin rằng chỗ đó đã được kiểm.
+    for v in &report.vacuous {
+        crate::say!("⚠ KIỂM KHÔNG KẾT LUẬN  {} `{}`", v.source, v.name);
+        crate::say!(
+            "  {}:{}  — `{}` có trong {}/{} file nên tìm thấy nó không nói lên điều gì",
+            arch_core::ARCH_FILE,
+            v.line,
+            v.name,
+            v.files,
+            v.of
+        );
+        crate::say!("  → đổi sang một tên chỉ thuộc về bước này\n");
+    }
+
     for u in &report.unresolved {
         crate::say!("⚠ CHƯA PHÂN GIẢI  '{}'", u.spec);
         crate::say!("  {}:{}  — {}\n", u.file, u.line, u.reason.describe(u.lang));
@@ -411,6 +429,7 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
     }
 
     let warnings = report.missing.len()
+        + report.vacuous.len()
         + report.unresolved.len()
         + report.ambiguous.len()
         + usize::from(!report.unchecked.is_empty())
@@ -467,6 +486,21 @@ fn print_json(hash: &str, report: &Report) {
         })
         .collect();
 
+    let vacuous: Vec<String> = report
+        .vacuous
+        .iter()
+        .map(|v| {
+            format!(
+                r#"{{"name":{},"source":{},"line":{},"files":{},"of":{}}}"#,
+                json::string(&v.name),
+                json::string(&v.source),
+                v.line,
+                v.files,
+                v.of,
+            )
+        })
+        .collect();
+
     let unresolved: Vec<String> = report
         .unresolved
         .iter()
@@ -483,7 +517,7 @@ fn print_json(hash: &str, report: &Report) {
         .collect();
 
     crate::say!(
-        r#"{{"archHash":{},"filesScanned":{},"filesUnmapped":{},"checked":{},"unchecked":{},"violations":[{}],"unresolved":[{}],"missing":[{}]}}"#,
+        r#"{{"archHash":{},"filesScanned":{},"filesUnmapped":{},"checked":{},"unchecked":{},"violations":[{}],"unresolved":[{}],"missing":[{}],"vacuous":[{}]}}"#,
         json::string(hash),
         report.files_scanned,
         report.files_unmapped,
@@ -492,6 +526,7 @@ fn print_json(hash: &str, report: &Report) {
         violations.join(","),
         unresolved.join(","),
         missing.join(","),
+        vacuous.join(","),
     );
 }
 

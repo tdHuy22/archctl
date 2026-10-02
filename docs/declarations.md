@@ -25,6 +25,52 @@ của `contract`, `contain` và `compensate` của `boundary`, các trạng thá
 `invariant state`. Những trường còn lại là văn xuôi; moi tên ra từ đó chỉ sinh
 kỳ vọng rác.
 
+## Một bước của flow trỏ vào đâu
+
+Một bước có thể là ba thứ khác nhau, và chỉ một trong ba nói gì về mã:
+
+```
+flow PlaceOrder:
+  Web -> Order.reserveStock -> charge
+```
+
+| Dạng | Nghĩa | Kiểm gì |
+| --- | --- | --- |
+| `Web` — tên component | người thực hiện | không gì cả: không có ký hiệu nào tên `Web` trong mã |
+| `Order.reserveStock` | năng lực của một component | `reserveStock` phải có, **và phải nằm trong `Order`** |
+| `charge` — tên trần | một hàm ở đâu đó | `charge` phải có ở đâu đó |
+| `order.charge` — biến chấm phương thức | `order` không phải component | `charge` phải có ở đâu đó |
+
+Dạng thứ hai kiểm được nhiều nhất, nên nên dùng nó:
+
+```
+⚠ KHAI BÁO LẠC HẬU  bước của flow PlaceOrder `reserveStock`
+  — `reserveStock` chỉ thấy trong Order, lẽ ra phải có trong Web
+```
+
+## Khi "pass" không chứng minh được gì
+
+Kiểm tồn tại dựa trên việc **gặp một cái tên**. Tên càng chung thì gặp nó càng
+không nói lên điều gì — một bước tên `run` sẽ khớp ở khắp nơi, và kiểm tồn tại
+coi như vô hiệu.
+
+Chỗ nguy hiểm không phải là nó vô hiệu, mà là **im lặng**: không có cảnh báo
+nào thì người đọc hiểu rằng chỗ đó đã được kiểm và không sao.
+
+```
+⚠ KIỂM KHÔNG KẾT LUẬN  bước của flow PlaceOrder `run`
+  .arch/system.arch:5  — `run` có trong 12/13 file nên tìm thấy nó không nói lên điều gì
+  → đổi sang một tên chỉ thuộc về bước này
+```
+
+Ngưỡng: có mặt ở **từ một phần tư số file trở lên**, và ít nhất năm file. Mức
+sàn đó để repo nhỏ không bị cảnh báo rác — trong hai file thì tên nào cũng "có
+mặt ở một nửa repo".
+
+Lưu ý câu chữ: *không kết luận được*, không phải *tên xấu*. `log` có thể là một
+hàm hoàn toàn có thật được gọi khắp nơi; gặp nó trong `Order` vẫn không chứng
+minh được rằng bước `log` của luồng này tồn tại.
+
 ## Khai báo lạc hậu
 
 ```
@@ -104,10 +150,11 @@ kiểm vào chỉ làm 2000 file chậm thêm từ ~110ms lên ~120ms.
 
 ## Chế độ hỏng còn lại
 
-- **Tên quá chung thì luôn "tồn tại".** Một bước tên `run` hay `init` sẽ khớp ở
-  khắp nơi, nên kiểm tồn tại coi như vô hiệu. Đặt tên cụ thể.
 - **Kiểm tồn tại hỏng về phía an toàn.** Nhầm thì nó nói "có" trong khi không
   có — bỏ sót, chứ không báo động giả.
+- **Ngưỡng "không kết luận được" là một con số chọn tay.** Một cái tên có mặt ở
+  24% số file vẫn gần như không nói lên điều gì, mà không bị báo. Ngưỡng dịch
+  chuyển đường im lặng chứ không xoá nó.
 - **`invariant data`, `money`, `access`, `algo` vẫn chỉ là lời hứa**, và vẫn bị
   cảnh báo như vậy nếu thiếu `verify`. Muốn chặn dữ liệu nhạy cảm rò ra ngoài
   thì dùng `store owned_by` hoặc `api` cộng `deny` — hai thứ đó kiểm thật.

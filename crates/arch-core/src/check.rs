@@ -117,6 +117,26 @@ pub struct Missing {
     pub hint: String,
 }
 
+/// Một kiểm tồn tại đã "pass" nhưng không chứng minh được gì.
+///
+/// Cái tên có mặt ở khắp repo, nên gặp nó ở đúng component chỉ là trùng hợp.
+/// Im lặng ở đây nghĩa là "đã kiểm, không sao" — và đó là nói sai. Bước tên
+/// `run` hay `init` là ví dụ hay gặp.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Vacuous {
+    pub name: String,
+    pub source: String,
+    pub line: usize,
+    /// Số file có tên này, trên tổng số file đã dò ký hiệu.
+    pub files: usize,
+    pub of: usize,
+}
+
+/// Tên có mặt ở từ `1/4` số file trở lên thì coi như không mang thông tin.
+const VACUOUS_SHARE: (usize, usize) = (1, 4);
+/// Repo nhỏ thì tên nào cũng "có mặt khắp nơi". Dưới mức này không kết luận gì.
+const VACUOUS_MIN_FILES: usize = 5;
+
 #[derive(Debug, Clone, Default)]
 pub struct Report {
     pub files_scanned: usize,
@@ -136,6 +156,8 @@ pub struct Report {
     pub partial: bool,
     /// Tên được khai báo nhưng không có trong mã.
     pub missing: Vec<Missing>,
+    /// Kiểm tồn tại đã pass nhưng không chứng minh được gì.
+    pub vacuous: Vec<Vacuous>,
 }
 
 impl Report {
@@ -197,6 +219,8 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
     // Tên nào xuất hiện ở component nào, để biết cái gì thiếu và cái gì lọt ra.
     let mut sightings: std::collections::BTreeMap<&str, Vec<(String, String, usize)>> =
         std::collections::BTreeMap::new();
+    // Mẫu số cho việc xét một cái tên có quá phổ biến để nói lên điều gì không.
+    let mut symbol_scanned = 0usize;
     fn as_refs(v: &[String]) -> Vec<&str> {
         v.iter().map(String::as_str).collect()
     }
@@ -223,6 +247,7 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
         let Ok(src) = std::fs::read_to_string(root.join(path)) else {
             continue;
         };
+        symbol_scanned += 1;
         let scan = lang.scan_all(&src, &needle_set, &as_refs(&table_needles));
         for import in &scan.imports {
             inspect(&resolver, doc, lang, path, from, import, &mut report);
@@ -241,7 +266,7 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
         }
     }
 
-    judge_expectations(&expectations, &sightings, &mut report);
+    judge_expectations(&expectations, &sightings, symbol_scanned, &mut report);
 
     counts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     report.by_lang = counts;
@@ -256,6 +281,7 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
 fn judge_expectations(
     expectations: &[crate::model::Expectation],
     sightings: &std::collections::BTreeMap<&str, Vec<(String, String, usize)>>,
+    scanned: usize,
     report: &mut Report,
 ) {
     use crate::model::Expect;
@@ -268,6 +294,22 @@ fn judge_expectations(
                     .iter()
                     .any(|(owner, _, _)| within.is_empty() || within.contains(owner));
                 if ok {
+                    // Pass rồi, nhưng pass vì cái tên có mặt khắp nơi thì
+                    // không chứng minh được gì. Phải nói ra, vì im lặng ở đây
+                    // bị đọc là "đã kiểm, không sao".
+                    let mut files: Vec<&str> = seen.iter().map(|(_, f, _)| f.as_str()).collect();
+                    files.sort_unstable();
+                    files.dedup();
+                    let (num, den) = VACUOUS_SHARE;
+                    if files.len() >= VACUOUS_MIN_FILES && files.len() * den >= scanned * num {
+                        report.vacuous.push(Vacuous {
+                            name: want.name.clone(),
+                            source: want.source.clone(),
+                            line: want.line,
+                            files: files.len(),
+                            of: scanned,
+                        });
+                    }
                     continue;
                 }
                 let hint = if within.is_empty() {
@@ -331,6 +373,8 @@ fn judge_expectations(
     }
     report.missing.sort_by(|a, b| (&a.source, &a.name).cmp(&(&b.source, &b.name)));
     report.missing.dedup();
+    report.vacuous.sort_by(|a, b| (&a.source, &a.name).cmp(&(&b.source, &b.name)));
+    report.vacuous.dedup();
 }
 
 fn inspect(

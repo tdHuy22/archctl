@@ -35,7 +35,7 @@ kiến trúc c8bd3bd9 · 15 file quét (5 Rust, 4 C/C++, 4 Python, 2 Go) · 7/8 
 
 | Luật | Kiểm bằng |
 | --- | --- |
-| `allow` / `deny` giữa component | đồ thị import, phân giải theo từng ngôn ngữ |
+| `allow` / `deny` giữa component | đồ thị import, phân giải theo từng ngôn ngữ (C/C++ đọc `-I` từ build) |
 | `api` — hàm và từ khoá bị cấm | dò định danh trên dòng token |
 | `store owned_by` — truy cập dữ liệu | dò tên bảng trong chuỗi |
 | `boundary ... contain` — lỗi không được lọt ra ngoài vùng | dò định danh ngoài vùng |
@@ -113,7 +113,7 @@ Và trong CI, nơi agent không với tới:
 | | |
 | --- | --- |
 | Dependency ngoài std | **0** |
-| Test | 197 |
+| Test | 234 |
 | Binary | 832 KB |
 | Khởi động | 3ms |
 

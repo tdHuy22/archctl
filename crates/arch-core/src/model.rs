@@ -295,16 +295,42 @@ impl Document {
     /// `errors` của `contract`, `contain` và `compensate` của `boundary`, các
     /// trạng thái của `invariant state`. Những trường còn lại là văn xuôi —
     /// moi tên ra từ đó chỉ sinh kỳ vọng rác.
+    /// Bước của flow → `(tên cần tìm trong mã, component phải chứa nó)`.
+    ///
+    /// Một bước có thể là ba thứ khác nhau, và chỉ một trong ba nói gì về mã:
+    ///
+    /// - tên component: người thực hiện, như `Web` trong `Web -> charge`.
+    ///   Không có ký hiệu nào tên `Web` trong mã, nên đòi phải có là báo nhầm.
+    /// - `Component.năng lực`: dò `năng lực`, và dò đúng trong component đó.
+    ///   Dò cả chuỗi `Component.năng lực` thì không bao giờ khớp, vì bộ quét
+    ///   làm việc trên từng định danh một.
+    /// - tên hàm trần: dò ở bất cứ đâu.
+    fn step_expectation(&self, step: &str) -> Option<(String, Vec<String>)> {
+        if self.knows(step) {
+            return None;
+        }
+        match step.rsplit_once('.') {
+            // `order.charge` là biến chứ không phải component, nên chỉ dò tên
+            // sau dấu chấm mà không ràng buộc nơi chứa.
+            Some((head, tail)) if is_identifier(tail) => {
+                let within = self.component(head).map(|c| vec![c.name.clone()]).unwrap_or_default();
+                Some((tail.to_string(), within))
+            }
+            _ => is_identifier(step).then(|| (step.to_string(), Vec::new())),
+        }
+    }
+
     pub fn expectations(&self) -> Vec<Expectation> {
         let mut out = Vec::new();
 
         for flow in &self.flows {
             for line in &flow.lines {
                 for step in flow_steps(line) {
+                    let Some((name, within)) = self.step_expectation(&step) else { continue };
                     out.push(Expectation {
-                        name: step,
+                        name,
                         source: format!("bước của flow {}", flow.name),
-                        expect: Expect::Exists { within: Vec::new() },
+                        expect: Expect::Exists { within },
                         line: flow.meta.line,
                         status: flow.meta.status,
                     });
