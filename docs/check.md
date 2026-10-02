@@ -7,7 +7,7 @@ Hiện kiểm **luật phụ thuộc giữa component** cho năm ngôn ngữ.
 | Ngôn ngữ | Phần mở rộng | Nhận được | Phân giải |
 | --- | --- | --- | --- |
 | TypeScript, JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | `import`, `import type`, `export … from`, `require()`, `import()` | tương đối, `index.*`, `.js`→`.ts`, **alias `paths` trong tsconfig** |
-| Python | `.py .pyi` | `import a.b`, `import a as b, c`, `from .x import y` | tương đối theo số dấu chấm; tuyệt đối thử gốc, `src/`, `lib/` |
+| Python | `.py .pyi` | `import a.b`, `import a as b, c`, `from .x import y` | tương đối theo số dấu chấm; tuyệt đối thử gốc, `src/`, `lib/`; **gói không gian tên (PEP 420)** |
 | C, C++ | `.c .h .cc .cpp .cxx .hpp .hh .hxx .inl` | `#include "x"`, `#include <x>` | **thư mục `-I` đọc từ build**; `"…"` ưu tiên thư mục file gọi |
 | Rust | `.rs` | `use`, `pub use`, `use a::{b, c}`, `extern crate` | theo cây module; đọc `Cargo.toml` để biết gốc crate **và các crate anh em trong workspace** |
 | Go | `.go` | `import "x"`, khối `import ( … )` | đọc `module` trong `go.mod` để tách nội bộ với bên ngoài |
@@ -91,7 +91,8 @@ tệ hơn hẳn việc nói thẳng là chưa biết.
 | `#include <x.h>` nằm trong một thư mục `-I` của dự án | file của dự án — đúng như trình biên dịch sẽ thấy |
 | `use super::Thing` | module cha — `Thing` là item chứ không phải module |
 | `use crate::x` không ra file nào | `mod` viết lồng trong file; không có cạnh, và **không báo** — trình biên dịch đã bảo đảm đường dẫn tồn tại |
-| `from .x import y` không có file | **báo ra** |
+| `from .x import y` không có file nhưng có thư mục | gói không gian tên (PEP 420) — thư mục chính là gói |
+| `from .x import y` không có cả thư mục | **báo ra** |
 | `import numpy` không có trong dự án | coi là gói — với import tuyệt đối của Python, không phân biệt được |
 
 ## Include path của C/C++

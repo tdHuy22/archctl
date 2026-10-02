@@ -156,12 +156,21 @@ impl Resolver {
         let candidates = roots.iter().flat_map(|r| {
             [format!("{r}{path}.py"), format!("{r}{path}/__init__.py"), format!("{r}{path}.pyi")]
         });
-        match self.first_file(candidates) {
-            Some(found) => Resolved::Path(found),
-            // Không tìm thấy trong dự án thì đây là gói bên thứ ba. Với import
-            // tuyệt đối, hai khả năng đó không phân biệt được.
-            None => Resolved::Package(spec.split('.').next().unwrap_or(spec).to_string()),
+        if let Some(found) = self.first_file(candidates) {
+            return Resolved::Path(found);
         }
+        // Gói kiểu không gian tên (PEP 420) không có `__init__.py`, và đó là
+        // mặc định của Python hiện đại. Thư mục chính là gói.
+        if let Some(found) = roots
+            .iter()
+            .map(|r| format!("{r}{path}"))
+            .find(|candidate| self.root.join(candidate).is_dir())
+        {
+            return Resolved::Path(found);
+        }
+        // Không tìm thấy trong dự án thì đây là gói bên thứ ba. Với import
+        // tuyệt đối, hai khả năng đó không phân biệt được.
+        Resolved::Package(spec.split('.').next().unwrap_or(spec).to_string())
     }
 
     fn python_relative(&self, importer: &str, rest: &str) -> Resolved {
@@ -181,7 +190,15 @@ impl Resolver {
         }
         let candidates =
             [format!("{prefix}.py"), format!("{prefix}/__init__.py"), format!("{prefix}.pyi")];
-        self.first_file(candidates).map_or(Resolved::Missing, Resolved::Path)
+        if let Some(found) = self.first_file(candidates) {
+            return Resolved::Path(found);
+        }
+        // Gói kiểu không gian tên, hoặc `from . import x` trỏ thẳng vào thư
+        // mục của chính file này. Cả hai đều là thư mục chứ không phải file.
+        if self.root.join(&prefix).is_dir() {
+            return Resolved::Path(prefix);
+        }
+        Resolved::Missing
     }
 
     // ---- C và C++ ----
