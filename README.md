@@ -136,6 +136,7 @@ agent, nên mỗi dependency thêm vào là một bề mặt tấn công thêm.
 | [docs/serve.md](docs/serve.md) | Sơ đồ tương tác |
 | [docs/diff.md](docs/diff.md) | Tách thay đổi thật khỏi thay đổi hình thức |
 | [docs/toolchain.md](docs/toolchain.md) | Cài và gỡ Rust |
+| [docs/khao-sat.md](docs/khao-sat.md) | Có thứ gì dùng được cho các giới hạn còn lại không |
 
 Bản đặc tả đầy đủ:
 https://claude.ai/code/artifact/2b26df5d-d6b0-40d0-a398-7e574c7d1387
