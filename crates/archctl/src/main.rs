@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 mod proto;
+mod serve;
 mod setup;
 
 /// In ra stdout, bỏ qua lỗi ghi.
@@ -65,6 +66,7 @@ fn main() -> ExitCode {
         "init" => setup::cmd_init(&args[1..]),
         "baseline" => setup::cmd_baseline(&args[1..]),
         "export" => setup::cmd_export(&args[1..]),
+        "serve" => serve::cmd_serve(&args[1..]),
         "help" | "-h" | "--help" => {
             print_usage();
             ExitCode::from(exit::OK)
@@ -96,6 +98,7 @@ Lệnh chung:
   archctl diff [<git-ref>] [--root <dir>] So luật hiện tại với một bản trước
   archctl parse <file.arch>               Chỉ đọc và kiểm tra file luật
   archctl proposals                       Liệt kê đề xuất đang chờ
+  archctl serve [--port <n>]              Mở sơ đồ tương tác ở 127.0.0.1:4000
   archctl export [--view <tên>] [--violations] [--out <file>]
                                           Xuất sơ đồ Mermaid. Đuôi .md thì
                                           bọc sẵn để GitHub render được.

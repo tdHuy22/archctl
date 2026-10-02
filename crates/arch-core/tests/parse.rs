@@ -229,3 +229,13 @@ fn mot_dong_sai_khong_lam_hong_ca_file() {
     assert_eq!(doc.components.len(), 2, "vẫn đọc được component sau dòng lỗi");
     assert_eq!(diags.iter().filter(|d| d.severity == Severity::Error).count(), 1);
 }
+
+#[test]
+fn viet_lai_chu_thich_giu_nguyen_noi_dung() {
+    use arch_core::parser::rewrite_annotations;
+    let out = rewrite_annotations("component Web at src/web/**   @ai #draft", Owner::Human, Status::Locked);
+    assert_eq!(out, "component Web at src/web/**  @human #locked");
+    // Dòng chưa có chú thích thì thêm vào.
+    let out = rewrite_annotations("allow A -> B", Owner::Ai, Status::Accepted);
+    assert_eq!(out, "allow A -> B  @ai #accepted");
+}

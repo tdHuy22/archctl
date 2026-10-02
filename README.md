@@ -27,7 +27,7 @@ Giai đoạn 1 đang làm. Đã có **parser DSL** và **kiểm luật phụ thu
 **TypeScript, Python, C/C++, Rust và Go**.
 
 ```bash
-cargo test                                   # 154 test
+cargo test                                   # 183 test
 cargo run -p archctl -- check --root examples/sensor
 ```
 
@@ -52,6 +52,14 @@ kiến trúc d832ca07 · 15 file quét (5 Rust, 4 C/C++, 4 Python, 2 Go) · 7/8 
 ```
 
 `--json` cho agent đọc. Mã thoát 1 khi có vi phạm, nên dùng được trong CI ngay.
+
+**`archctl serve`** mở sơ đồ tương tác ở `127.0.0.1:4000`: kéo thả, khoá luật
+bằng một cú bấm, duyệt đề xuất tại chỗ, và **tự cập nhật** khi agent sửa mã —
+nhìn sơ đồ là biết nó đang làm tới đâu. Giao diện là một file HTML tự chứa, tự
+vẽ SVG, không framework và không gọi mạng. Xem [docs/serve.md](docs/serve.md).
+
+`archctl export` xuất sơ đồ Mermaid tĩnh, tuỳ chọn `--violations` phủ vi phạm
+thật lên trên — để commit vào repo hoặc dán vào mô tả pull request.
 
 `api` khai báo nhóm hàm và từ khoá bị cấm — `strcpy`, `eval`, `unsafe`. Loại
 luật này **không có vùng mù FFI** như đồ thị import, và vì chạy trên dòng token
@@ -80,7 +88,7 @@ Ngữ nghĩa và giới hạn đầy đủ: [docs/check.md](docs/check.md).
 `archctl check <file>...` quét đúng những file được nêu, mất ~11ms trên dự án
 2000 file — đủ nhanh để chạy trong hook sau mỗi lần agent lưu file.
 
-Chưa có: kiểm `flow`, `contract`, `boundary`, `invariant`; xuất sơ đồ.
+Chưa có: kiểm `flow`, `contract`, `boundary`, `invariant`.
 
 ## Ghi công
 
@@ -99,6 +107,6 @@ archctl/
 │   ├── shop/     # dự án TypeScript, hai vi phạm cài sẵn
 │   └── sensor/   # Rust + C + Python + Go, mỗi ngôn ngữ một vi phạm
 └── crates/
-    ├── arch-core/   # parser, mô hình, kiểm tra tham chiếu
-    └── archctl/     # CLI
+    ├── arch-core/   # parser, mô hình, kiểm chứng, layout, xuất sơ đồ
+    └── archctl/     # CLI và máy chủ sơ đồ
 ```

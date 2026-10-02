@@ -164,6 +164,22 @@ fn split_meta<'a>(line: &'a str, no: usize, diags: &mut Vec<Diag>) -> (&'a str, 
     (line[..cut].trim_end(), meta)
 }
 
+/// Viết lại chú thích `@owner #status` ở cuối một dòng luật, giữ nguyên phần
+/// nội dung và cách căn lề. Dùng khi người bấm khoá một luật trên sơ đồ.
+pub fn rewrite_annotations(line: &str, owner: Owner, status: Status) -> String {
+    let mut cut = line.len();
+    for (offset, token) in whitespace_tokens(line).into_iter().rev() {
+        if token.starts_with('@') || token.starts_with('#') {
+            cut = offset;
+        } else {
+            break;
+        }
+    }
+    let body = line[..cut].trim_end();
+    let owner = if owner == Owner::Ai { "@ai" } else { "@human" };
+    format!("{body}  {owner} {}", status.as_str())
+}
+
 fn whitespace_tokens(s: &str) -> Vec<(usize, &str)> {
     let mut out = Vec::new();
     let mut start = None;

@@ -1,0 +1,525 @@
+<!doctype html>
+<html lang="vi">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>archctl</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --panel: #fff; --line: #e3e3e0; --ink: #1c1c1a; --muted: #6b6b66;
+    --accent: #2f6f4f; --accent-soft: #e8f1ec;
+    --bad: #b3261e; --bad-soft: #fdecea;
+    --warn: #8a6100; --warn-soft: #fdf3e0;
+    --store: #5b4b8a; --api: #8a5a1f; --ext: #4a6b8a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161715; --panel: #1e201d; --line: #32352f; --ink: #eceae4; --muted: #9a9a92;
+      --accent: #74b48f; --accent-soft: #23302a;
+      --bad: #f0877e; --bad-soft: #352422;
+      --warn: #d9ad5b; --warn-soft: #332b1c;
+      --store: #a695d8; --api: #d9a86a; --ext: #8fb0d0;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column;
+    background: var(--bg); color: var(--ink);
+    font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; padding: 10px 16px;
+    border-bottom: 1px solid var(--line); background: var(--panel); flex: none;
+  }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: -.01em; }
+  header .hash { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); font-size: 12px; }
+  header .spacer { flex: 1; }
+  .pill {
+    padding: 2px 9px; border-radius: 999px; font-size: 12px;
+    background: var(--accent-soft); color: var(--accent); white-space: nowrap;
+  }
+  .pill.bad { background: var(--bad-soft); color: var(--bad); }
+  .pill.warn { background: var(--warn-soft); color: var(--warn); }
+  button {
+    font: inherit; padding: 5px 11px; border-radius: 7px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  }
+  button:hover { border-color: var(--muted); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--bad); }
+  button:disabled { opacity: .45; cursor: default; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #canvas { flex: 1; min-width: 0; cursor: grab; touch-action: none; }
+  #canvas.panning { cursor: grabbing; }
+  aside {
+    width: 348px; flex: none; border-left: 1px solid var(--line); background: var(--panel);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  nav { display: flex; border-bottom: 1px solid var(--line); flex: none; }
+  nav button {
+    flex: 1; border: 0; border-radius: 0; border-bottom: 2px solid transparent;
+    background: none; color: var(--muted); padding: 10px 4px;
+  }
+  nav button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+  .tab { display: none; overflow: auto; padding: 14px 16px; }
+  .tab[data-on] { display: block; }
+  .empty { color: var(--muted); padding: 24px 0; text-align: center; }
+  .card {
+    border: 1px solid var(--line); border-radius: 9px; padding: 11px 12px; margin-bottom: 10px;
+  }
+  .card.bad { border-color: var(--bad); }
+  .card h4 { margin: 0 0 5px; font-size: 13px; font-weight: 600; }
+  .card p { margin: 3px 0; color: var(--muted); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .where { color: var(--muted); }
+  .hint { color: var(--accent); }
+  .muted { color: var(--muted); }
+  .faded { opacity: .55; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0 0 14px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; word-break: break-word; }
+  .row { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 9px; }
+  textarea {
+    width: 100%; min-height: 58px; resize: vertical; font: inherit; padding: 7px 8px;
+    border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--ink);
+  }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; padding: 8px 16px; border-top: 1px solid var(--line);
+            color: var(--muted); font-size: 12px; background: var(--panel); flex: none; }
+  .legend span::before { content: ""; display: inline-block; width: 11px; height: 11px;
+                         border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+  .lg-component::before { background: var(--accent); }
+  .lg-store::before { background: var(--store); }
+  .lg-api::before { background: var(--api); }
+  .lg-ext::before { background: var(--ext); }
+  .lg-bad::before { background: var(--bad); }
+  #fault { padding: 24px; color: var(--bad); white-space: pre-wrap; }
+  .node { cursor: pointer; }
+  .node text { pointer-events: none; user-select: none; }
+</style>
+
+<header>
+  <h1>archctl</h1>
+  <span class="hash" id="hash"></span>
+  <span class="pill" id="scanned"></span>
+  <span class="pill bad" id="broken" hidden></span>
+  <span class="pill warn" id="waiting" hidden></span>
+  <span class="spacer"></span>
+  <button id="relayout">Sắp xếp lại</button>
+</header>
+
+<main>
+  <svg id="canvas"></svg>
+  <aside>
+    <nav>
+      <button data-tab="detail" aria-selected="true">Chi tiết</button>
+      <button data-tab="violations" aria-selected="false">Vi phạm</button>
+      <button data-tab="proposals" aria-selected="false">Đề xuất</button>
+    </nav>
+    <div class="tab" data-tab="detail" data-on></div>
+    <div class="tab" data-tab="violations"></div>
+    <div class="tab" data-tab="proposals"></div>
+  </aside>
+</main>
+
+<div class="legend">
+  <span class="lg-component">component</span>
+  <span class="lg-store">kho dữ liệu</span>
+  <span class="lg-api">nhóm api</span>
+  <span class="lg-ext">bên ngoài</span>
+  <span class="lg-bad">vi phạm</span>
+  <span>nét đứt = chưa có hiệu lực</span>
+  <span>viền đậm = đã khoá</span>
+</div>
+
+<script>
+const NODE_W = 180, NODE_H = 56, SVG_NS = "http://www.w3.org/2000/svg";
+const KIND_COLOR = { component: "--accent", store: "--store", api: "--api", external: "--ext" };
+const STATUS_ORDER = ["#draft", "#proposed", "#accepted", "#locked"];
+
+const canvas = document.getElementById("canvas");
+const view = { x: 0, y: 0, k: 1 };
+let model = null, selected = null, drag = null, fitNext = true;
+// Nhãn cạnh hay rơi trùng chỗ khi nhiều cạnh cùng đi qua một vùng.
+const usedLabels = new Set();
+
+// Canh sơ đồ vừa khung lúc mở. Không canh lại ở mỗi lần cập nhật: màn hình
+// tự nhảy khi agent vừa sửa một chỗ thì rất khó theo dõi.
+function fitToView() {
+  if (!model?.nodes.length) return;
+  const pad = 56;
+  const minX = Math.min(...model.nodes.map((n) => n.x)) - pad;
+  const minY = Math.min(...model.nodes.map((n) => n.y)) - pad;
+  const maxX = Math.max(...model.nodes.map((n) => n.x + NODE_W)) + pad;
+  const maxY = Math.max(...model.nodes.map((n) => n.y + NODE_H)) + pad;
+  const box = canvas.getBoundingClientRect();
+  // Có sàn: thu nhỏ quá thì chữ không đọc được, thà để người kéo còn hơn.
+  const fit = Math.min(box.width / (maxX - minX), box.height / (maxY - minY));
+  view.k = Math.min(1.1, Math.max(0.6, fit));
+  view.x = (box.width - (maxX - minX) * view.k) / 2 - minX * view.k;
+  view.y = (box.height - (maxY - minY) * view.k) / 2 - minY * view.k;
+}
+
+const el = (name, attrs = {}, text) => {
+  const node = document.createElementNS(SVG_NS, name);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  if (text !== undefined) node.textContent = text;
+  return node;
+};
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+async function post(path, body) {
+  const res = await fetch(path, { method: "POST", body: JSON.stringify(body) });
+  const data = await res.json().catch(() => ({ ok: false, error: "máy chủ không trả lời" }));
+  if (!data.ok) alert(data.error || "không thực hiện được");
+  return data.ok;
+}
+
+async function refresh() {
+  const res = await fetch("/api/model");
+  const next = await res.json();
+  if (next.error) { showFault(next); return; }
+  model = next;
+  model.byName = Object.fromEntries(model.nodes.map((n) => [n.name, n]));
+  document.getElementById("fault")?.remove();
+  if (fitNext) { fitNext = false; fitToView(); }
+  draw();
+  summarize();
+  renderTabs();
+}
+
+function showFault(data) {
+  document.getElementById("fault")?.remove();
+  const box = document.createElement("div");
+  box.id = "fault";
+  box.textContent = data.error + "\n\n" + (data.errors || []).join("\n");
+  document.querySelector("main").prepend(box);
+  canvas.replaceChildren();
+}
+
+function summarize() {
+  document.getElementById("hash").textContent = model.archHash;
+  document.getElementById("scanned").textContent = `${model.stats.files} file · ${model.stats.checked.length}/${model.nodes.length} trong diện kiểm`;
+  const fresh = model.violations.filter((v) => !v.baselined);
+  toggle("broken", fresh.length, `${fresh.length} vi phạm`);
+  toggle("waiting", model.proposals.length, `${model.proposals.length} chờ duyệt`);
+}
+const toggle = (id, count, text) => {
+  const node = document.getElementById(id);
+  node.hidden = !count;
+  node.textContent = text;
+};
+
+// ---------- vẽ sơ đồ ----------
+
+function violatingPairs() {
+  const pairs = new Map();
+  for (const v of model.violations) {
+    if (v.baselined) continue;
+    const key = v.from + "\u0000" + v.to;
+    pairs.set(key, (pairs.get(key) || 0) + 1);
+  }
+  return pairs;
+}
+
+function draw() {
+  const root = el("g", { transform: `translate(${view.x} ${view.y}) scale(${view.k})` });
+  const defs = el("defs");
+  for (const [id, color] of [["a", "--muted"], ["bad", "--bad"]]) {
+    const marker = el("marker", {
+      id: `arrow-${id}`, viewBox: "0 0 10 10", refX: 9, refY: 5,
+      markerWidth: 6, markerHeight: 6, orient: "auto-start-reverse",
+    });
+    marker.append(el("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: `var(${color})` }));
+    defs.append(marker);
+  }
+  canvas.replaceChildren(defs, root);
+
+  const broken = violatingPairs();
+  usedLabels.clear();
+  drawBoundaries(root);
+  for (const e of model.edges) drawEdge(root, e, broken);
+  for (const [key, count] of broken) {
+    const [from, to] = key.split("\u0000");
+    drawEdge(root, { from, to, kind: "violation", count }, broken);
+  }
+  for (const n of model.nodes) drawNode(root, n, broken);
+}
+
+function drawBoundaries(root) {
+  for (const b of model.boundaries) {
+    const inside = b.contains.map((n) => model.byName[n]).filter(Boolean);
+    if (!inside.length) continue;
+    const pad = 22;
+    const x = Math.min(...inside.map((n) => n.x)) - pad;
+    const y = Math.min(...inside.map((n) => n.y)) - pad - 14;
+    const w = Math.max(...inside.map((n) => n.x + NODE_W)) + pad - x;
+    const h = Math.max(...inside.map((n) => n.y + NODE_H)) + pad - y;
+    root.append(el("rect", {
+      x, y, width: w, height: h, rx: 14,
+      fill: "none", stroke: "var(--line)", "stroke-width": 1.5, "stroke-dasharray": "2 4",
+    }));
+    root.append(el("text", { x: x + 12, y: y + 16, fill: "var(--muted)", "font-size": 11 }, b.name));
+  }
+}
+
+// Cạnh rời mép phải và vào mép trái, uốn bằng bezier. Đường thẳng nối tâm
+// hai hộp sẽ xuyên qua những hộp nằm giữa; đi vòng theo chiều của layout thì
+// gần như không bao giờ chạm vào ai.
+function edgePath(from, to) {
+  const forward = to.x >= from.x;
+  const a = { x: forward ? from.x + NODE_W : from.x, y: from.y + NODE_H / 2 };
+  const b = { x: forward ? to.x : to.x + NODE_W, y: to.y + NODE_H / 2 };
+  const reach = Math.max(42, Math.abs(b.x - a.x) * 0.45);
+  const c1 = { x: a.x + (forward ? reach : -reach), y: a.y };
+  const c2 = { x: b.x + (forward ? -reach : reach), y: b.y };
+  return {
+    d: `M${a.x} ${a.y} C${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${b.x} ${b.y}`,
+    mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 + (forward ? 0 : -14) },
+  };
+}
+
+function drawEdge(root, e, broken) {
+  const from = model.byName[e.from], to = model.byName[e.to];
+  if (!from || !to || from === to) return;
+  // Cạnh vi phạm đã vẽ riêng, đừng vẽ chồng lên luật cùng cặp.
+  if (e.kind !== "violation" && broken.has(e.from + "\u0000" + e.to)) return;
+
+  const { d, mid } = edgePath(from, to);
+  const violation = e.kind === "violation";
+  const draft = e.status && e.status !== "#accepted" && e.status !== "#locked";
+
+  root.append(el("path", {
+    d, fill: "none",
+    stroke: violation ? "var(--bad)" : e.kind === "deny" ? "var(--warn)" : "var(--muted)",
+    "stroke-width": violation ? 2.5 : 1.4,
+    "stroke-dasharray": draft ? "5 4" : e.kind === "deny" ? "2 3" : "",
+    "marker-end": `url(#arrow-${violation ? "bad" : "a"})`,
+    opacity: violation ? 1 : draft ? 0.6 : 0.85,
+  }));
+
+  const label = violation ? (e.count > 1 ? `${e.count} vi phạm` : "vi phạm") : e.kind === "deny" ? "cấm" : "";
+  if (label) {
+    const mx = mid.x;
+    let my = mid.y;
+    for (let i = 0; i < 8; i++) {
+      const slot = `${Math.round(mx / 24)}:${Math.round(my / 14)}`;
+      if (!usedLabels.has(slot)) { usedLabels.add(slot); break; }
+      my += 15;
+    }
+    root.append(el("rect", {
+      x: mx - label.length * 3.4 - 4, y: my - 9, width: label.length * 6.8 + 8, height: 16, rx: 4,
+      fill: "var(--panel)",
+    }));
+    root.append(el("text", {
+      x: mx, y: my + 3, "text-anchor": "middle", "font-size": 11,
+      fill: violation ? "var(--bad)" : "var(--warn)",
+    }, label));
+  }
+}
+
+function nodeShape(n) {
+  const { x, y } = n, w = NODE_W, h = NODE_H;
+  if (n.kind === "store") return el("path", { d: `M${x} ${y + 9} a${w / 2} 9 0 0 1 ${w} 0 v${h - 18} a${w / 2} 9 0 0 1 ${-w} 0 z` });
+  if (n.kind === "api") return el("path", { d: `M${x + 13} ${y} H${x + w} L${x + w - 13} ${y + h} H${x} z` });
+  return el("rect", { x, y, width: w, height: h, rx: 9 });
+}
+
+function drawNode(root, n, broken) {
+  const faulty = [...broken.keys()].some((k) => k.startsWith(n.name + "\u0000"));
+  const draft = n.status === "#draft" || n.status === "#proposed";
+  const g = el("g", { class: "node" });
+
+  const shape = nodeShape(n);
+  shape.setAttribute("fill", "var(--panel)");
+  shape.setAttribute("stroke", faulty ? "var(--bad)" : `var(${KIND_COLOR[n.kind]})`);
+  shape.setAttribute("stroke-width", n.status === "#locked" ? 2.6 : 1.4);
+  if (draft) shape.setAttribute("stroke-dasharray", "5 4");
+  if (selected === n.name) shape.setAttribute("filter", "drop-shadow(0 0 0 2px var(--accent))");
+  g.append(shape);
+
+  const cx = n.x + NODE_W / 2;
+  g.append(el("text", {
+    x: cx, y: n.y + (n.sub ? 24 : 32), "text-anchor": "middle", "font-size": 13,
+    "font-weight": 600, fill: faulty ? "var(--bad)" : "var(--ink)",
+  }, n.name.length > 20 ? n.name.slice(0, 19) + "…" : n.name));
+  if (n.sub) {
+    const short = n.sub.length > 26 ? n.sub.slice(0, 25) + "…" : n.sub;
+    g.append(el("text", {
+      x: cx, y: n.y + 39, "text-anchor": "middle", "font-size": 11, fill: "var(--muted)",
+    }, short));
+  }
+  if (n.status === "#locked") {
+    // Chấm tròn thay cho emoji: emoji hiện thành ô vuông trên nhiều hệ.
+    g.append(el("circle", { cx: n.x + NODE_W - 13, cy: n.y + 13, r: 3.2, fill: "var(--muted)" }));
+  }
+  if (draft) g.setAttribute("opacity", ".75");
+
+  g.addEventListener("pointerdown", (ev) => startDrag(ev, n));
+  root.append(g);
+}
+
+// ---------- tương tác ----------
+
+function toWorld(ev) {
+  const box = canvas.getBoundingClientRect();
+  return { x: (ev.clientX - box.left - view.x) / view.k, y: (ev.clientY - box.top - view.y) / view.k };
+}
+
+function startDrag(ev, node) {
+  ev.stopPropagation();
+  const at = toWorld(ev);
+  drag = { node, dx: at.x - node.x, dy: at.y - node.y, moved: false };
+  selected = node.name;
+  renderTabs();
+  draw();
+  canvas.setPointerCapture(ev.pointerId);
+}
+
+canvas.addEventListener("pointerdown", (ev) => {
+  drag = { pan: true, x: ev.clientX - view.x, y: ev.clientY - view.y };
+  canvas.classList.add("panning");
+  canvas.setPointerCapture(ev.pointerId);
+});
+
+canvas.addEventListener("pointermove", (ev) => {
+  if (!drag) return;
+  if (drag.pan) {
+    view.x = ev.clientX - drag.x;
+    view.y = ev.clientY - drag.y;
+  } else {
+    const at = toWorld(ev);
+    drag.node.x = Math.round(at.x - drag.dx);
+    drag.node.y = Math.round(at.y - drag.dy);
+    drag.moved = true;
+  }
+  draw();
+});
+
+canvas.addEventListener("pointerup", (ev) => {
+  canvas.classList.remove("panning");
+  canvas.releasePointerCapture(ev.pointerId);
+  if (drag && !drag.pan && drag.moved) {
+    // Lưu vị trí để lần sau mở lại sơ đồ không nhảy chỗ.
+    post("/api/layout", { name: drag.node.name, x: String(drag.node.x), y: String(drag.node.y) });
+  }
+  drag = null;
+});
+
+canvas.addEventListener("wheel", (ev) => {
+  ev.preventDefault();
+  const box = canvas.getBoundingClientRect();
+  const px = ev.clientX - box.left, py = ev.clientY - box.top;
+  const next = Math.min(2.4, Math.max(0.25, view.k * (ev.deltaY < 0 ? 1.12 : 1 / 1.12)));
+  view.x = px - (px - view.x) * (next / view.k);
+  view.y = py - (py - view.y) * (next / view.k);
+  view.k = next;
+  draw();
+}, { passive: false });
+
+document.getElementById("relayout").addEventListener("click", async () => {
+  if (await post("/api/relayout", {})) { fitNext = true; refresh(); }
+});
+
+document.querySelectorAll("nav button").forEach((button) => {
+  button.addEventListener("click", () => {
+    document.querySelectorAll("nav button").forEach((b) =>
+      b.setAttribute("aria-selected", String(b === button)));
+    document.querySelectorAll(".tab").forEach((t) =>
+      t.toggleAttribute("data-on", t.dataset.tab === button.dataset.tab));
+  });
+});
+
+// ---------- bảng bên phải ----------
+
+const tab = (name) => document.querySelector(`.tab[data-tab="${name}"]`);
+
+function renderTabs() {
+  renderDetail();
+  renderViolations();
+  renderProposals();
+}
+
+function renderDetail() {
+  const box = tab("detail");
+  const n = selected && model.byName[selected];
+  if (!n) {
+    box.innerHTML = `<p class="empty">Bấm vào một hộp trên sơ đồ để xem chi tiết.</p>`;
+    return;
+  }
+  const mine = model.violations.filter((v) => v.from === n.name && !v.baselined);
+  const kinds = { component: "component", store: "kho dữ liệu", api: "nhóm api", external: "bên ngoài" };
+  box.innerHTML = `
+    <h3 style="margin:0 0 10px">${esc(n.name)}</h3>
+    <dl>
+      <dt>loại</dt><dd>${kinds[n.kind]}</dd>
+      <dt>phạm vi</dt><dd class="mono">${esc(n.sub) || "—"}</dd>
+      <dt>trạng thái</dt><dd class="mono">${esc(n.status)}</dd>
+      <dt>nguồn gốc</dt><dd>${n.owner === "ai" ? "agent đề xuất" : "người viết"}</dd>
+      <dt>dòng</dt><dd>${n.line} trong system.arch</dd>
+    </dl>
+    <div class="row">${STATUS_ORDER.map((s) =>
+      `<button data-status="${s}" ${s === n.status ? "disabled" : ""}>${s}</button>`).join("")}</div>
+    <p class="muted" style="margin-top:8px">Từ <code>#accepted</code> trở lên là luật có hiệu lực.</p>
+    ${mine.length ? `<h4 style="margin:18px 0 8px">${mine.length} vi phạm từ đây</h4>` + mine.map(violationCard).join("") : ""}
+  `;
+  box.querySelectorAll("[data-status]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      if (await post("/api/status", { name: n.name, status: b.dataset.status })) refresh();
+    }));
+}
+
+const violationCard = (v) => `
+  <div class="card bad">
+    <h4>${esc(v.from)} → ${esc(v.to)}</h4>
+    <p class="where mono">${esc(v.file)}:${v.line}${v.count > 1 ? ` · ${v.count} lần` : ""}</p>
+    <p class="mono">${esc(v.via === "import" ? `import '${v.spec}'` : v.via === "table" ? `bảng '${v.spec}'` : `dùng '${v.spec}'`)}</p>
+    <p class="muted">${esc(v.rule)}</p>
+    <p class="hint">→ ${esc(v.hint)}</p>
+  </div>`;
+
+function renderViolations() {
+  const box = tab("violations");
+  const fresh = model.violations.filter((v) => !v.baselined);
+  const old = model.violations.length - fresh.length;
+  box.innerHTML = fresh.length
+    ? fresh.map(violationCard).join("") + (old ? `<p class="muted">${old} vi phạm cũ đang được tha theo baseline.</p>` : "")
+    : `<p class="empty">Không có vi phạm nào.${old ? `<br>${old} cái cũ đang được tha.` : ""}</p>`;
+}
+
+function renderProposals() {
+  const box = tab("proposals");
+  if (!model.proposals.length) {
+    box.innerHTML = `<p class="empty">Không có đề xuất nào đang chờ.</p>`;
+    return;
+  }
+  box.innerHTML = model.proposals.map((p) => `
+    <div class="card">
+      <h4>${p.intent === "block" ? "Bế tắc" : "Đề xuất"} · <span class="mono">${esc(p.id)}</span></h4>
+      <p class="mono">${esc(p.statement)}</p>
+      <p class="muted">${esc(p.reason)}</p>
+      ${p.origin ? `<p class="where mono">${esc(p.origin)}</p>` : ""}
+      <textarea placeholder="Lý do quyết định — bắt buộc" data-reason="${esc(p.id)}"></textarea>
+      <div class="row">
+        <button class="primary" data-accept="${esc(p.id)}">Duyệt</button>
+        <button class="danger" data-reject="${esc(p.id)}">Từ chối</button>
+      </div>
+    </div>`).join("");
+
+  for (const [attr, verdict] of [["data-accept", "accept"], ["data-reject", "reject"]]) {
+    box.querySelectorAll(`[${attr}]`).forEach((b) =>
+      b.addEventListener("click", async () => {
+        const id = b.getAttribute(attr);
+        const reason = box.querySelector(`[data-reason="${id}"]`).value.trim();
+        if (!reason) { alert("Phải ghi lý do, kể cả khi duyệt."); return; }
+        if (await post("/api/decide", { id, verdict, reason })) refresh();
+      }));
+  }
+}
+
+// ---------- cập nhật trực tiếp ----------
+
+new EventSource("/api/events").onmessage = refresh;
+addEventListener("resize", draw);
+refresh();
+</script>
+</html>
