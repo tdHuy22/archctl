@@ -47,6 +47,10 @@ pub struct Discovery {
     pub skipped: Vec<(String, usize)>,
     pub files: usize,
     pub by_lang: Vec<(Lang, usize)>,
+    /// File không thuộc component nào. Bản nháp phủ được bao nhiêu phần repo
+    /// là điều người đọc cần biết ngay, chứ không phải tự suy ra từ số
+    /// component.
+    pub unmapped: usize,
 }
 
 pub fn discover(root: &Path, ignores: &[String]) -> Discovery {
@@ -88,6 +92,8 @@ pub fn discover(root: &Path, ignores: &[String]) -> Discovery {
     out.components.sort();
 
     out.edges = observe_edges(root, &files, &prefix, &owners);
+    out.unmapped =
+        files.iter().filter(|f| group_of(f, &prefix).is_none_or(|g| !owners.contains_key(&g))).count();
     out
 }
 
@@ -210,7 +216,7 @@ fn pick_source_root(root: &Path, files: &[String]) -> String {
     let floor = main.len() / MIN_PREFIX_SHARE;
 
     let mut best: Option<(usize, usize, String)> = None;
-    for prefix in candidates(&main) {
+    for prefix in candidates(root, &main) {
         let groups = groups_under(&main, &prefix);
         if groups.len() < 2 {
             continue;
@@ -291,9 +297,50 @@ fn manifest_langs(root: &Path) -> Vec<Lang> {
     out
 }
 
+/// Thư mục của những package mà chính hệ sinh thái đã khai báo. Không tính
+/// package ở gốc repo: nó bao cả repo nên không nói gì về ranh giới bên trong.
+///
+/// Ranh giới này mạnh hơn mọi phỏng đoán theo thư mục, vì nó **có cưỡng chế
+/// thật**: một crate không gọi vào trong crate khác nếu không khai báo phụ
+/// thuộc. Chia nhỏ hơn nó là mô tả một thứ không tồn tại.
+fn declared_packages(root: &Path) -> Vec<String> {
+    const MANIFESTS: &[&str] = &["Cargo.toml", "package.json", "go.mod", "pyproject.toml"];
+    let mut out = Vec::new();
+    collect_packages(root, "", 0, MANIFESTS, &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn collect_packages(
+    root: &Path,
+    prefix: &str,
+    depth: usize,
+    manifests: &[&str],
+    out: &mut Vec<String>,
+) {
+    const SKIP: &[&str] = &["node_modules", "target", ".git", ".arch", "dist", "build"];
+    if depth > MAX_PREFIX_DEPTH + 1 {
+        return;
+    }
+    let dir = if prefix.is_empty() { root.to_path_buf() } else { root.join(prefix) };
+    if !prefix.is_empty() && manifests.iter().any(|m| dir.join(m).is_file()) {
+        out.push(format!("{prefix}/"));
+    }
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else { continue };
+        if SKIP.contains(&name.as_str()) || name.starts_with('.') || !entry.path().is_dir() {
+            continue;
+        }
+        let next = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
+        collect_packages(root, &next, depth + 1, manifests, out);
+    }
+}
+
 /// Tiền tố đáng thử: gốc repo, và mọi thư mục tới độ sâu `MAX_PREFIX_DEPTH`
-/// chứa đủ nhiều file.
-fn candidates(files: &[String]) -> Vec<String> {
+/// chứa đủ nhiều file — trừ những chỗ nằm trong một package đã khai báo.
+fn candidates(root: &Path, files: &[String]) -> Vec<String> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for f in files {
         let dirs = f.rsplit_once('/').map_or("", |(d, _)| d);
@@ -306,8 +353,19 @@ fn candidates(files: &[String]) -> Vec<String> {
         }
     }
     let floor = (files.len() / MIN_PREFIX_SHARE).max(2);
+    let packages = declared_packages(root);
     let mut out = vec![String::new()];
-    out.extend(counts.into_iter().filter(|(_, n)| *n >= floor).map(|(p, _)| p));
+    out.extend(
+        counts
+            .into_iter()
+            .filter(|(_, n)| *n >= floor)
+            // Đi vào trong một package là chia nhỏ hơn ranh giới thật. `tokio`
+            // có `tokio/src/{runtime,io,fs,…}` nhìn rất giống kiến trúc, nhưng
+            // chọn chỗ đó thì `tokio-util` và `tokio-stream` — hai crate riêng
+            // — rơi hết ra ngoài sơ đồ.
+            .filter(|(p, _)| !packages.iter().any(|pkg| p.starts_with(pkg.as_str())))
+            .map(|(p, _)| p),
+    );
     out
 }
 

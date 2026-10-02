@@ -171,6 +171,16 @@ fn report_discovery(found: &discover::Discovery) {
         found.components.len(),
         found.edges.len()
     );
+    // Số component không nói bản nháp phủ được bao nhiêu repo. Một lần chạy
+    // từng ra "7 component" trong khi toàn bộ mã của dự án nằm ngoài sơ đồ.
+    if let Some(share) = (found.unmapped * 100).checked_div(found.files)
+        && share >= 25
+    {
+        crate::say!(
+            "⚠ {} file ({share}%) chưa thuộc component nào — bản nháp mới phủ một phần repo.",
+            found.unmapped
+        );
+    }
     if !found.skipped.is_empty() {
         crate::say!("Còn {} thư mục nữa, liệt kê trong phần chú thích cuối file.", found.skipped.len());
     }

@@ -185,6 +185,66 @@ fn khong_co_manifest_thi_khong_loc_theo_ngon_ngu() {
     assert!(repo.names().len() >= 3, "{:?}", repo.names());
 }
 
+/// Bố cục của tokio: mười crate ở gốc, mà `tokio/src/{runtime,io,fs,…}` nhìn
+/// rất giống kiến trúc. Chọn chỗ đó thì `tokio-util` và `tokio-stream` — hai
+/// crate riêng — rơi hết ra ngoài sơ đồ.
+#[test]
+fn khong_chia_nho_hon_ranh_gioi_package_da_khai_bao() {
+    let mut files = vec!["Cargo.toml|[workspace]".to_string()];
+    files.push("tokio/Cargo.toml|[package]\nname = \"tokio\"".to_string());
+    for m in ["runtime", "io", "fs", "sync", "net"] {
+        for i in 0..4 {
+            files.push(format!("tokio/src/{m}/f{i}.rs|pub fn f{i}() {{}}"));
+        }
+    }
+    for c in ["tokio-util", "tokio-stream"] {
+        files.push(format!("{c}/Cargo.toml|[package]\nname = \"{c}\""));
+        for i in 0..3 {
+            files.push(format!("{c}/src/f{i}.rs|pub fn f{i}() {{}}"));
+        }
+    }
+    let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+    let repo = Repo::new("pkgbound", &refs);
+    let names = repo.names();
+    assert!(names.contains(&"Tokio".to_string()), "{names:?}");
+    assert!(names.contains(&"TokioUtil".to_string()), "crate riêng không được rơi ra ngoài: {names:?}");
+    assert!(!names.contains(&"Runtime".to_string()), "không được chia nhỏ hơn crate: {names:?}");
+}
+
+#[test]
+fn package_o_goc_repo_khong_chan_viec_di_sau() {
+    // `rusqlite` có package ở gốc; nếu tính nó thì mọi tiền tố đều "nằm trong
+    // một package" và bản nháp không bao giờ chia nhỏ được.
+    let mut files = vec!["Cargo.toml|[package]\nname = \"r\"".to_string()];
+    for d in ["blob", "types", "vtab"] {
+        for i in 0..4 {
+            files.push(format!("src/{d}/f{i}.rs|pub fn f{i}() {{}}"));
+        }
+    }
+    let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+    let names = Repo::new("rootpkg", &refs).names();
+    assert!(names.contains(&"Blob".to_string()), "{names:?}");
+    assert!(names.contains(&"Vtab".to_string()), "{names:?}");
+}
+
+#[test]
+fn bao_cao_phan_repo_chua_duoc_phu() {
+    // `src/` chia ra được nhiều nhất nên nó thắng, và `scripts/` nằm ngoài.
+    let mut files = Vec::new();
+    for d in ["a", "b", "c"] {
+        for i in 0..4 {
+            files.push(format!("src/{d}/f{i}.rs|pub fn f{i}() {{}}"));
+        }
+    }
+    files.push("scripts/s1.rs|pub fn s1() {}".to_string());
+    files.push("scripts/s2.rs|pub fn s2() {}".to_string());
+    let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+    let repo = Repo::new("coverage", &refs);
+    let d = discover(&repo.0, &[]);
+    assert_eq!(d.components.len(), 3, "{:?}", d.components);
+    assert_eq!(d.unmapped, 2, "hai file trong scripts/ nằm ngoài gốc đã chọn");
+}
+
 #[test]
 fn luat_sinh_ra_tu_ma_nay_thi_kiem_lai_phai_sach() {
     for (name, files) in [

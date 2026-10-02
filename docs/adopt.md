@@ -51,7 +51,7 @@ Thử trên tám repo thật:
 | hugo (943 file Go) | gốc repo | 24 |
 | ripgrep | `crates/` | 11 |
 | vue core | `packages/` | 13 |
-| tokio | `tokio/src/` | 15 |
+| tokio | gốc repo (10 crate) | 10 |
 | flask | `src/flask/` | 3 |
 | curl | `lib/` | 7 |
 | zstd-rs | gốc repo | 4 |
@@ -70,7 +70,35 @@ Hai thứ không tính **khi chọn bố cục** — nhưng vẫn được kiể
   ngoài sơ đồ. Manifest nói thẳng đây là dự án gì, nên không phải đoán. Repo
   không có manifest nào, như redis và curl, thì bỏ qua bước này.
 
+### Không chia nhỏ hơn ranh giới đã có cưỡng chế
+
+`Cargo.toml`, `package.json`, `go.mod` và `pyproject.toml` khai ra đâu là một
+package. Ranh giới đó mạnh hơn mọi phỏng đoán theo thư mục, vì nó **có cưỡng
+chế thật**: một crate không gọi vào trong crate khác nếu không khai báo phụ
+thuộc.
+
+Nên những thư mục nằm trong một package đã khai báo không được xét làm gốc.
+`tokio/src/{runtime,io,fs,sync,net}` nhìn rất giống kiến trúc, và thước đo ở
+trên chọn đúng chỗ đó — nhưng khi ấy `tokio-util` và `tokio-stream`, hai crate
+riêng, rơi hết ra ngoài sơ đồ. Với luật này, tokio ra 10 crate và **0% file
+nằm ngoài** thay vì 53%.
+
+Package ở **gốc repo** không tính: nó bao cả repo nên nếu tính thì không bao
+giờ chia nhỏ được gì.
+
 Khi không đoán được chắc chắn thì nó **không đoán** — dùng gốc repo và nói ra.
+
+### Nói ra phần chưa phủ
+
+Số component không cho biết bản nháp phủ được bao nhiêu repo:
+
+```
+Dựng được 3 component và 6 quan hệ, tất cả ở `#draft`.
+⚠ 59 file (71%) chưa thuộc component nào — bản nháp mới phủ một phần repo.
+```
+
+Một lần chạy trên `zstd-rs` từng in ra "7 component" trong khi toàn bộ mã
+Rust của dự án nằm ngoài sơ đồ, và không có gì nói điều đó ra.
 
 ### Luật sinh ra phải tự nhất quán
 
