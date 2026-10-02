@@ -320,6 +320,50 @@ fn post_tu_chinh_giao_dien_van_di_qua() {
     assert!(s.law().contains("@ai #locked"), "{}", s.law());
 }
 
+/// Luồng theo dõi giãn nhịp dần khi không có gì đổi, và ngủ hẳn khi không ai
+/// mở sơ đồ — trên một cây 5078 file nó từng ngốn gần một phần năm lõi trong
+/// lúc không ai đụng vào gì. Nhưng giãn nhịp không được làm mất tính "nhìn là
+/// biết agent đang làm tới đâu".
+#[test]
+fn so_do_van_duoc_bao_khi_ma_doi_sau_mot_luc_im_lang() {
+    let s = Server::start("events", 4748);
+    let mut stream = TcpStream::connect(("127.0.0.1", s.port)).expect("kết nối được");
+    stream.write_all(b"GET /api/events HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    let mut head = [0u8; 256];
+    assert!(stream.read(&mut head).expect("nhận được tiêu đề") > 0);
+
+    // Đủ lâu để luồng theo dõi đã giãn tới nhịp chậm nhất.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    std::fs::write(s.root.join("src/web/moi.ts"), "export const m = 1\n").unwrap();
+
+    let started = std::time::Instant::now();
+    let mut buf = [0u8; 256];
+    let n = stream.read(&mut buf).expect("nhận được sự kiện");
+    assert!(String::from_utf8_lossy(&buf[..n]).contains("changed"));
+    assert!(started.elapsed().as_secs() < 5, "mất {:?}", started.elapsed());
+}
+
+#[test]
+fn khong_ai_mo_so_do_thi_van_phuc_vu_duoc_client_moi() {
+    // Luồng theo dõi ngủ khi không có client. Nó phải tỉnh lại khi có người
+    // mở, chứ không ngủ luôn.
+    let s = Server::start("sleep", 4749);
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    let mut stream = TcpStream::connect(("127.0.0.1", s.port)).expect("kết nối được");
+    stream.write_all(b"GET /api/events HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    let mut head = [0u8; 256];
+    assert!(stream.read(&mut head).unwrap() > 0);
+
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::fs::write(s.root.join("src/web/sau.ts"), "export const x = 1\n").unwrap();
+    let mut buf = [0u8; 256];
+    let n = stream.read(&mut buf).expect("nhận được sự kiện sau khi máy chủ ngủ");
+    assert!(String::from_utf8_lossy(&buf[..n]).contains("changed"));
+}
+
 #[test]
 fn duong_dan_la_tra_ve_404() {
     let s = Server::start("notfound", 4741);

@@ -87,6 +87,29 @@ buộc phải có người xem.
 Trình duyệt luôn gửi `Origin` cho yêu cầu khác nguồn, nên chỉ cần đối chiếu nó.
 Client không phải trình duyệt (`curl`, test) không gửi gì và vẫn dùng như cũ.
 
+## Luồng theo dõi không được ngốn CPU khi ngồi yên
+
+Dò ở nhịp 400ms suốt thì tốn thật. Đo trên một cây 5078 file, không ai đụng
+vào gì:
+
+| | trước | sau |
+| --- | --- | --- |
+| không ai mở sơ đồ | ~19% một lõi | **0** |
+| tab đang mở, không có gì đổi | ~19% | **5%** |
+| hugo, 943 file, tab đang mở | ~9% | **2%** |
+
+Hai việc:
+
+- **Không ai mở sơ đồ thì không dò.** Không có client nào thì không có gì để
+  báo. Đây là trường hợp hay gặp nhất — người dùng đóng tab mà quên tắt máy
+  chủ.
+- **Giãn nhịp dần khi im lặng**, từ 400ms lên tối đa 2s, rồi về lại 400ms ngay
+  khi thấy thay đổi đầu tiên.
+
+Giãn nhịp không làm mất tính "nhìn là biết agent đang làm tới đâu": đo từ lúc
+sửa file tới lúc sơ đồ được báo, sau tám giây im lặng là 548ms, những lần ngay
+sau đó là 345ms.
+
 ## Ghi file
 
 Máy chủ tạo một luồng cho mỗi kết nối, nên hai tab cùng mở có thể cùng
@@ -108,7 +131,7 @@ Mọi lệnh `archctl` ghi file đều theo cách này, không riêng máy chủ
 - **Không sửa được cấu trúc.** Thêm component hay vẽ quan hệ mới vẫn phải sửa
   `.arch/system.arch`. Giao diện chỉ đổi *trạng thái*, vị trí, và quyết định
   trên đề xuất.
-- **Dò thay đổi bằng cách quét lại**, chu kỳ 400ms. Trên repo rất lớn thì tốn
-  hơn, đổi lại không cần thêm dependency nào.
+- **Dò thay đổi bằng cách quét lại** thay vì gọi API theo dõi của hệ điều
+  hành, để không thêm dependency nào.
 - **File luật hỏng thì sơ đồ dừng** và hiện lỗi cú pháp kèm số dòng, thay vì vẽ
   một sơ đồ sai.

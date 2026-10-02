@@ -23,9 +23,15 @@ use std::sync::{Arc, Mutex};
 
 const UI: &str = include_str!("ui.html");
 const LAYOUT_FILE: &str = ".arch/layout.json";
-/// Khoảng dò thay đổi file. Đủ nhanh để thấy agent làm việc gần như tức thì,
-/// đủ chậm để không tốn CPU khi ngồi yên.
+/// Khoảng dò ngay sau một thay đổi: đủ nhanh để thấy agent làm việc gần như
+/// tức thì.
 const POLL_MS: u64 = 400;
+/// Khoảng dò khi đã lâu không có gì đổi.
+///
+/// Dò ở nhịp nhanh suốt thì tốn thật: trên một cây 5078 file, luồng theo dõi
+/// ngốn gần một phần năm lõi trong lúc không ai đụng vào gì. Giãn dần ra khi
+/// im lặng, rồi về lại nhịp nhanh ngay khi thấy thay đổi đầu tiên.
+const IDLE_POLL_MS: u64 = 2_000;
 /// Thân yêu cầu lớn nhất. Thân thật chỉ là vài chục byte JSON; mức này rộng
 /// rãi gấp nhiều lần mà vẫn chặn được `Content-Length` bịa.
 const MAX_BODY: usize = 1 << 20;
@@ -226,13 +232,26 @@ static WRITES: Mutex<()> = Mutex::new(());
 fn spawn_watcher(root: PathBuf, clients: Clients) {
     std::thread::spawn(move || {
         let mut previous = fingerprint(&root);
+        let mut wait = POLL_MS;
         loop {
-            std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
+            std::thread::sleep(std::time::Duration::from_millis(wait));
+
+            // Không ai mở sơ đồ thì không có gì để báo, nên cũng không cần dò.
+            // Đây là trường hợp hay gặp nhất: người dùng đóng tab mà quên tắt
+            // máy chủ.
+            if clients.lock().is_ok_and(|open| open.is_empty()) {
+                wait = IDLE_POLL_MS;
+                continue;
+            }
+
             let current = fingerprint(&root);
             if current == previous {
+                // Giãn dần ra, nhưng không quá nhịp chậm nhất.
+                wait = (wait * 3 / 2).min(IDLE_POLL_MS);
                 continue;
             }
             previous = current;
+            wait = POLL_MS;
             let Ok(mut open) = clients.lock() else { continue };
             // Client đã đóng thì ghi hỏng; bỏ nó ra khỏi danh sách.
             open.retain_mut(|c| c.write_all(b"data: changed\n\n").and_then(|()| c.flush()).is_ok());
