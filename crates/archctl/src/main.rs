@@ -89,7 +89,9 @@ Bắt đầu:
   archctl baseline                        Tha vi phạm có sẵn, chỉ chặn cái mới
 
 Lệnh chung:
-  archctl check [--root <dir>] [--json]   Đối chiếu mã nguồn với luật
+  archctl check [--root <dir>] [--json] [--changed] [<file>...]
+                                          Đối chiếu mã nguồn với luật.
+                                          Cho thẳng đường dẫn thì nhanh nhất.
   archctl diff [<git-ref>] [--root <dir>] So luật hiện tại với một bản trước
   archctl parse <file.arch>               Chỉ đọc và kiểm tra file luật
   archctl proposals                       Liệt kê đề xuất đang chờ
@@ -142,11 +144,14 @@ fn load_arch(root: &Path, as_json: bool) -> Option<(Document, String)> {
 
 fn cmd_check(args: &[String]) -> ExitCode {
     let mut as_json = false;
+    let mut changed_only = false;
+    let mut only: Vec<String> = Vec::new();
     let mut root_arg: Option<PathBuf> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--json" => as_json = true,
+            "--changed" => changed_only = true,
             "--root" => match args.get(i + 1) {
                 Some(p) => {
                     root_arg = Some(PathBuf::from(p));
@@ -157,10 +162,13 @@ fn cmd_check(args: &[String]) -> ExitCode {
                     return ExitCode::from(exit::USAGE);
                 }
             },
-            other => {
+            other if other.starts_with('-') => {
                 eprintln!("archctl check: tham số không nhận ra: `{other}`");
                 return ExitCode::from(exit::USAGE);
             }
+            // Đường dẫn cho thẳng: hook đã biết file nào vừa đổi, nên không
+            // cần hỏi git — bỏ được phần tốn thời gian nhất.
+            other => only.push(other.to_string()),
         }
         i += 1;
     }
@@ -181,7 +189,15 @@ fn cmd_check(args: &[String]) -> ExitCode {
     };
 
     let ignores = arch_core::read_ignores(&root);
-    let report = arch_core::check::check(&root, &doc, &ignores);
+    let subset = if only.is_empty() {
+        changed_only.then(|| changed_files(&root)).flatten()
+    } else {
+        Some(relative_to(&root, &only))
+    };
+    let report = match subset {
+        Some(files) => arch_core::check::check_files(&root, &doc, &files, true),
+        None => arch_core::check::check(&root, &doc, &ignores),
+    };
     let memory = remember(&root, &hash, &report);
 
     if as_json {
@@ -252,22 +268,37 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
     let total = report.checked.len() + report.unchecked.len();
     let langs: Vec<String> =
         report.by_lang.iter().map(|(l, n)| format!("{n} {}", l.name())).collect();
-    crate::say!(
-        "kiến trúc {hash} · {} file quét ({}) · {}/{total} component trong diện kiểm\n",
-        report.files_scanned,
-        if langs.is_empty() { "không có file nào hỗ trợ".to_string() } else { langs.join(", ") },
-        report.checked.len(),
-    );
+    // Quét một phần thì con số tổng vô nghĩa, nói rõ phạm vi thay vì in chúng.
+    if report.partial {
+        crate::say!("kiến trúc {hash} · chỉ quét {} file vừa đổi\n", report.files_scanned);
+    } else {
+        crate::say!(
+            "kiến trúc {hash} · {} file quét ({}) · {}/{total} component trong diện kiểm\n",
+            report.files_scanned,
+            if langs.is_empty() {
+                "không có file nào hỗ trợ".to_string()
+            } else {
+                langs.join(", ")
+            },
+            report.checked.len(),
+        );
+    }
 
     let split = arch_core::baseline::split(&report.violations, &memory.baseline);
     for v in &split.fresh {
         let what = match v.reason {
             Reason::Denied => "bị cấm",
             Reason::NoAllow => "không được phép",
+            Reason::NotOwner => "không phải chủ sở hữu",
         };
         crate::say!("✗ VI PHẠM  {} -> {}  ({what}, {})", v.from, v.to, v.status.as_str());
         match v.via {
             Via::Import => crate::say!("  {}:{}  import '{}'", v.file, v.line, v.spec),
+            Via::Table if v.count > 1 => crate::say!(
+                "  {}:{}  chạm bảng `{}` ({} lần trong file)",
+                v.file, v.line, v.spec, v.count
+            ),
+            Via::Table => crate::say!("  {}:{}  chạm bảng `{}`", v.file, v.line, v.spec),
             Via::Symbol if v.count > 1 => {
                 crate::say!("  {}:{}  dùng `{}` ({} lần trong file)", v.file, v.line, v.spec, v.count)
             }
@@ -289,7 +320,7 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
                         "    archctl block --on '{}' --reason \"...\"",
                         v.rule
                     ),
-                    Reason::NoAllow => crate::say!(
+                    Reason::NoAllow | Reason::NotOwner => crate::say!(
                         "    archctl propose 'allow {} -> {}' --reason \"...\"",
                         v.from, v.to
                     ),
@@ -310,20 +341,14 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
         crate::say!("⚠ MẪU CHỒNG NHAU  {file} khớp cả {}\n", owners.join(" và "));
     }
 
-    if !report.unchecked.is_empty() {
+    if !report.unchecked.is_empty() && !report.partial {
         crate::say!(
             "⚠ CHƯA KIỂM  {} — chưa có allow nào nên tạm để yên",
             report.unchecked.join(", ")
         );
     }
-    if report.files_unmapped > 0 {
+    if report.files_unmapped > 0 && !report.partial {
         crate::say!("⚠ {} file không thuộc component nào trong sơ đồ", report.files_unmapped);
-    }
-    if report.rules_deferred > 0 {
-        crate::say!(
-            "⚠ {} luật về store chưa kiểm được, cần phân tích truy cập dữ liệu",
-            report.rules_deferred
-        );
     }
 
     if !split.grandfathered.is_empty() {
@@ -357,7 +382,7 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
         + report.ambiguous.len()
         + usize::from(!report.unchecked.is_empty())
         + usize::from(report.files_unmapped > 0)
-        + usize::from(report.rules_deferred > 0);
+;
     crate::say!("\n{} vi phạm mới, {warnings} cảnh báo", split.fresh.len());
     if !memory.pending.is_empty() {
         crate::say!("{} đề xuất đang chờ người quyết định — archctl proposals", memory.pending.len());
@@ -379,11 +404,13 @@ fn print_json(hash: &str, report: &Report) {
                 json::string(match v.via {
                     Via::Import => "import",
                     Via::Symbol => "symbol",
+                    Via::Table => "table",
                 }),
                 v.count,
                 json::string(match v.reason {
                     Reason::Denied => "denied",
                     Reason::NoAllow => "no_allow",
+                    Reason::NotOwner => "not_owner",
                 }),
                 json::string(&v.rule),
                 json::string(v.status.as_str()),
@@ -408,13 +435,12 @@ fn print_json(hash: &str, report: &Report) {
         .collect();
 
     crate::say!(
-        r#"{{"archHash":{},"filesScanned":{},"filesUnmapped":{},"checked":{},"unchecked":{},"rulesDeferred":{},"violations":[{}],"unresolved":[{}]}}"#,
+        r#"{{"archHash":{},"filesScanned":{},"filesUnmapped":{},"checked":{},"unchecked":{},"violations":[{}],"unresolved":[{}]}}"#,
         json::string(hash),
         report.files_scanned,
         report.files_unmapped,
         json::strings(report.checked.iter().map(String::as_str)),
         json::strings(report.unchecked.iter().map(String::as_str)),
-        report.rules_deferred,
         violations.join(","),
         unresolved.join(","),
     );
@@ -521,6 +547,58 @@ fn cmd_diff(args: &[String]) -> ExitCode {
         crate::say!("\n! Luật bị nới lỏng: {}  — đọc kỹ chỗ này", loosened.join(", "));
     }
     ExitCode::from(exit::OK)
+}
+
+/// Đưa đường dẫn người dùng gõ về dạng tương đối so với gốc dự án, và bỏ
+/// những file không thuộc ngôn ngữ nào đã hỗ trợ.
+fn relative_to(root: &Path, paths: &[String]) -> Vec<String> {
+    let base = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    paths
+        .iter()
+        .filter_map(|p| {
+            // Người gõ tay thường đứng ở gốc dự án; hook thì đưa đường dẫn
+            // tuyệt đối. Thử theo thư mục hiện tại trước, rồi theo gốc.
+            let full = Path::new(p)
+                .canonicalize()
+                .or_else(|_| base.join(p).canonicalize())
+                .ok()?;
+            let rel = full.strip_prefix(&base).ok()?.to_string_lossy().replace('\\', "/");
+            arch_core::scan::is_supported(&rel).then_some(rel)
+        })
+        .collect()
+}
+
+/// File mã nguồn đã đổi so với HEAD, cộng file chưa theo dõi.
+///
+/// `None` nghĩa là không dùng được chế độ này — không phải repo git, hoặc
+/// chính file luật vừa đổi nên phải quét lại toàn bộ.
+fn changed_files(root: &Path) -> Option<Vec<String>> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["status", "--porcelain", "--untracked-files=all", "."])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+
+    let mut files = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        // `R  cũ -> mới`: chỉ tên mới mới tồn tại trên đĩa.
+        let path = line[3..].rsplit(" -> ").next().unwrap_or_default().trim_matches('"');
+        // Luật đổi thì mọi file đều phải xét lại, không chỉ file vừa sửa.
+        if path.ends_with(".arch/system.arch") {
+            return None;
+        }
+        if arch_core::scan::is_supported(path) && root.join(path).is_file() {
+            files.push(path.to_string());
+        }
+    }
+    Some(files)
 }
 
 /// Lấy nội dung file luật ở một ref của git. Dùng `git` có sẵn thay vì thư

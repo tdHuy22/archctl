@@ -10,6 +10,8 @@ component ToolsLib at tools/lib/**                  @human #accepted
 component Ctl      at cmd/**                        @human #accepted
 component Stream   at internal/**                   @human #accepted
 
+store Captures owned_by Capture at "packets", "sessions"   @human #locked
+
 external LibPcap at "pcap.h"                        @human #locked
 external LibC    at "stdio.h", "string.h"           @human #accepted
 external NumPy   at "numpy"                         @human #accepted

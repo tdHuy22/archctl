@@ -78,10 +78,16 @@ fn file_ngoai_so_do_duoc_dem_chu_khong_bi_coi_la_loi() {
     assert!(!r.violations.iter().any(|v| v.file.contains("shared")));
 }
 
+/// `store OrderDB owned_by Order` là một `deny` ngầm. Nó không chờ component
+/// vào diện kiểm, và không cần viết `deny` tay.
 #[test]
-fn luat_ve_store_duoc_dem_la_chua_kiem_duoc() {
+fn chi_chu_so_huu_duoc_cham_vao_kho_du_lieu() {
     let r = report();
-    assert_eq!(r.rules_deferred, 3, "hai deny và một allow có nhắc tới store");
+    assert!(
+        !r.violations.iter().any(|v| v.to == "OrderDB" || v.to == "PaymentDB"),
+        "dự án mẫu shop không có truy vấn SQL nào: {:#?}",
+        r.violations
+    );
 }
 
 #[test]

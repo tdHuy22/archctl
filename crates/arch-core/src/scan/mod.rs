@@ -95,9 +95,17 @@ impl Lang {
         self.scan(src, &[]).imports
     }
 
-    /// Đọc file một lần, lấy cả import lẫn các ký hiệu đang bị theo dõi.
-    /// Lex là phần tốn nhất, nên không làm hai lượt.
     pub fn scan(self, src: &str, needles: &[&str]) -> FileScan {
+        self.scan_all(src, needles, &[])
+    }
+
+    /// Đọc file một lần, lấy import, ký hiệu bị theo dõi, và tên bảng dữ liệu.
+    /// Lex là phần tốn nhất, nên không làm nhiều lượt.
+    ///
+    /// Tên bảng **chỉ** được dò trong chuỗi: `"SELECT ... FROM payments"`,
+    /// `knex('payments')`, `db.collection('payments')`. Lý do ở
+    /// [`find_tables`].
+    pub fn scan_all(self, src: &str, needles: &[&str], tables: &[&str]) -> FileScan {
         let toks = lexer::lex(src, &self.config());
         let imports = match self {
             Lang::TypeScript => ts::extract(&toks),
@@ -106,7 +114,11 @@ impl Lang {
             Lang::Rust => rustlang::extract(&toks),
             Lang::Go => golang::extract(&toks),
         };
-        FileScan { imports, symbols: find_symbols(&toks, needles) }
+        FileScan {
+            imports,
+            symbols: find_symbols(&toks, needles),
+            tables: find_tables(&toks, tables),
+        }
     }
 }
 
@@ -121,6 +133,47 @@ pub struct SymbolHit {
 pub struct FileScan {
     pub imports: Vec<Import>,
     pub symbols: Vec<SymbolHit>,
+    pub tables: Vec<SymbolHit>,
+}
+
+/// Tìm tên bảng, **chỉ trong chuỗi**.
+///
+/// Dò cả trong định danh nghe hấp dẫn hơn — nó sẽ bắt được `prisma.payments`.
+/// Nhưng một trường tên `packets` trong struct cũng khớp, mà đó không phải
+/// truy cập dữ liệu. Phân biệt hai thứ đó cần thông tin kiểu, và đoán sai sẽ
+/// sinh báo động giả ngay trong chính mã của người dùng.
+///
+/// Chuỗi thì gần như không nhập nhằng: SQL thô, query builder và tên
+/// collection đều nằm trong chuỗi. Muốn bắt cả cách truy cập theo thuộc tính
+/// của ORM thì khai báo nó thành một nhóm `api` — cỗ máy đó vốn để dò định
+/// danh.
+fn find_tables(toks: &[Token], needles: &[&str]) -> Vec<SymbolHit> {
+    if needles.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for t in toks {
+        let (Tok::Str(text) | Tok::SystemStr(text)) = &t.tok else { continue };
+        for needle in needles {
+            if in_text(text, needle) {
+                out.push(SymbolHit { symbol: (*needle).to_string(), line: t.line });
+            }
+        }
+    }
+    out
+}
+
+/// Tìm tên bảng trong một chuỗi, theo ranh giới định danh. Nếu không có ranh
+/// giới thì bảng `payments` sẽ khớp nhầm trong `payments_archive`.
+fn in_text(text: &str, needle: &str) -> bool {
+    let bytes = text.as_bytes();
+    let n = needle.len();
+    let boundary = |c: u8| !(c.is_ascii_alphanumeric() || c == b'_');
+    text.match_indices(needle).any(|(at, _)| {
+        let before = at == 0 || boundary(bytes[at - 1]);
+        let after = at + n == bytes.len() || boundary(bytes[at + n]);
+        before && after
+    })
 }
 
 fn find_symbols(toks: &[Token], needles: &[&str]) -> Vec<SymbolHit> {

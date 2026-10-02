@@ -12,6 +12,7 @@ pub mod diff;
 pub mod diag;
 pub mod glob;
 pub mod json;
+pub mod jsonc;
 pub mod model;
 pub mod parser;
 pub mod protocol;

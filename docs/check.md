@@ -6,10 +6,10 @@ Hiện kiểm **luật phụ thuộc giữa component** cho năm ngôn ngữ.
 
 | Ngôn ngữ | Phần mở rộng | Nhận được | Phân giải |
 | --- | --- | --- | --- |
-| TypeScript, JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | `import`, `import type`, `export … from`, `require()`, `import()` | tương đối, `index.*`, `.js`→`.ts` |
+| TypeScript, JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | `import`, `import type`, `export … from`, `require()`, `import()` | tương đối, `index.*`, `.js`→`.ts`, **alias `paths` trong tsconfig** |
 | Python | `.py .pyi` | `import a.b`, `import a as b, c`, `from .x import y` | tương đối theo số dấu chấm; tuyệt đối thử gốc, `src/`, `lib/` |
 | C, C++ | `.c .h .cc .cpp .cxx .hpp .hh .hxx .inl` | `#include "x"`, `#include <x>` | `"…"` theo thư mục file gọi rồi `include/`, `src/`, `lib/` |
-| Rust | `.rs` | `use`, `pub use`, `use a::{b, c}`, `extern crate` | theo cây module, tìm `Cargo.toml` gần nhất để biết gốc crate |
+| Rust | `.rs` | `use`, `pub use`, `use a::{b, c}`, `extern crate` | theo cây module; đọc `Cargo.toml` để biết gốc crate **và các crate anh em trong workspace** |
 | Go | `.go` | `import "x"`, khối `import ( … )` | đọc `module` trong `go.mod` để tách nội bộ với bên ngoài |
 
 Mọi ngôn ngữ dùng chung một lexer cấu hình được. Nó biết bỏ qua chú thích,
@@ -85,7 +85,8 @@ tệ hơn hẳn việc nói thẳng là chưa biết.
 
 | Trường hợp | Xử lý |
 | --- | --- |
-| `@/lib/x`, `~/lib/x` (alias tsconfig) | **báo ra**, chưa hỗ trợ |
+| `@/lib/x` khi có `tsconfig.json` khai báo | phân giải theo `paths`; monorepo thì lấy cấu hình gần file gọi nhất |
+| `@/lib/x` khi không có khai báo nào | **báo ra** |
 | `#include "x.h"` không tìm thấy | **báo ra**, có thể nằm trong include path của build |
 | `use crate::x` không có module | **báo ra** |
 | `from .x import y` không có file | **báo ra** |
@@ -93,15 +94,9 @@ tệ hơn hẳn việc nói thẳng là chưa biết.
 
 ## Giới hạn khác đã biết
 
-- **tsconfig `paths` chưa hỗ trợ.** Dự án TypeScript dùng alias sẽ thấy nhiều
-  dòng "chưa phân giải".
 - **Include path của C/C++ chưa đọc từ build.** CMake, Makefile và
   `compile_commands.json` đều chưa được đọc, nên chỉ xấp xỉ bằng vài thư mục
   thường gặp.
-- **Không có `--changed`.** Quét toàn repo mất khoảng 112ms trên 2000 file. Đủ
-  cho CI, chưa đủ nhanh cho hook mỗi lần lưu file.
-- **`store owned_by` chưa kiểm.** Cần phân tích truy cập database và ORM. Báo
-  cáo đếm số luật loại này và nói rõ là chưa kiểm được.
 - **`flow`, `contract`, `boundary`, `invariant` chưa kiểm.** Đọc được, kiểm
   tham chiếu được, nhưng chưa đối chiếu với mã.
 - **Chỉ thị tiền xử lý không được diễn giải.** Include trong `#ifdef` vẫn được
@@ -110,6 +105,44 @@ tệ hơn hẳn việc nói thẳng là chưa biết.
 - **Bộ quét không phải parser đầy đủ.** Nhận regex bằng suy đoán theo token
   đứng trước, như các bộ minify. Nếu độ chính xác không đủ, thay `scan/` bằng
   tree-sitter — ranh giới module đã được đặt sẵn cho việc đó.
+
+## Phạm vi quét
+
+| Lệnh | Quét gì | Thời gian trên 2000 file |
+| --- | --- | --- |
+| `archctl check` | toàn repo | ~120ms |
+| `archctl check --changed` | file đổi so với HEAD, hỏi git | ~24ms |
+| `archctl check <file>...` | đúng những file đó | ~11ms |
+
+Chia nhỏ được vì luật phụ thuộc, `api` và `store` đều xét **từng file một**.
+Dạng thứ ba dành cho hook: nó đã biết file nào vừa đổi nên không cần hỏi git.
+
+Nếu chính `.arch/system.arch` vừa đổi thì `--changed` tự chuyển sang quét toàn
+bộ — luật đổi thì mọi file đều phải xét lại.
+
+## Truy cập dữ liệu: `store owned_by`
+
+```
+store Captures owned_by Capture at "packets", "sessions"
+```
+
+Chỉ `Capture` được chạm hai bảng đó. Đây là một `deny` **ngầm**: nó không chờ
+component vào diện kiểm, nhưng một `allow` viết tay vẫn thắng được nó.
+
+Tên bảng **chỉ được dò trong chuỗi** — SQL thô, query builder, tên collection:
+
+```
+"SELECT ts FROM packets"      → bắt
+knex('packets')               → bắt
+db.collection('packets')      → bắt
+struct S { packets: u64 }     → KHÔNG, đó là trường struct
+"FROM packets_archive"        → KHÔNG, bảng khác
+```
+
+Dò cả trong định danh sẽ bắt được `prisma.packets`, nhưng cũng bắt nhầm mọi
+biến và trường tên `packets`. Phân biệt hai thứ đó cần thông tin kiểu. Muốn
+bắt cách truy cập theo thuộc tính của ORM thì khai báo nó thành nhóm `api` —
+cỗ máy đó vốn để dò định danh.
 
 ## Mẫu `at` chồng nhau
 

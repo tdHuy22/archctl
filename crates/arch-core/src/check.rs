@@ -39,6 +39,8 @@ pub enum Reason {
     Denied,
     /// Component đã vào diện kiểm nhưng không `allow` nào cho phép quan hệ này.
     NoAllow,
+    /// Chạm vào kho dữ liệu của component khác.
+    NotOwner,
 }
 
 /// Phụ thuộc được phát hiện bằng cách nào.
@@ -48,6 +50,8 @@ pub enum Via {
     Import,
     /// Tên hàm hoặc từ khoá xuất hiện trong mã. Không có vùng mù như import.
     Symbol,
+    /// Tên bảng dữ liệu, tìm trong định danh và trong chuỗi.
+    Table,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,11 +115,11 @@ pub struct Report {
     pub unresolved: Vec<Unresolved>,
     /// File khớp nhiều component một lúc — mẫu `at` chồng nhau.
     pub ambiguous: Vec<(String, Vec<String>)>,
-    /// Luật nhắc tới `store`, cần phân tích truy cập dữ liệu nên chưa kiểm.
-    pub rules_deferred: usize,
     /// Số file đã quét theo từng ngôn ngữ, để biết bộ kiểm chứng thật sự nhìn
     /// thấy những phần nào của repo.
     pub by_lang: Vec<(Lang, usize)>,
+    /// Chỉ quét một phần repo, nên các con số tổng không đầy đủ.
+    pub partial: bool,
 }
 
 impl Report {
@@ -133,11 +137,16 @@ pub fn source_files(root: &Path, extra_ignores: &[String]) -> Vec<String> {
 }
 
 pub fn check(root: &Path, doc: &Document, extra_ignores: &[String]) -> Report {
-    let mut report = Report::default();
-    let mut files = Vec::new();
-    walk(root, "", extra_ignores, &mut files);
+    check_files(root, doc, &source_files(root, extra_ignores), false)
+}
 
-    report.rules_deferred = doc.rules.iter().filter(|r| mentions_store(doc, r)).count();
+/// Kiểm một tập file cho trước. `partial` đánh dấu rằng đây không phải toàn
+/// repo, để báo cáo không in ra những con số tổng gây hiểu nhầm.
+///
+/// Chia nhỏ được vì luật phụ thuộc và luật `api` đều xét **từng file một**:
+/// import của một file không phụ thuộc vào file nào khác.
+pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool) -> Report {
+    let mut report = Report { partial, ..Report::default() };
 
     for (name, _) in classify(doc) {
         if opted_in(doc, &name) {
@@ -153,14 +162,20 @@ pub fn check(root: &Path, doc: &Document, extra_ignores: &[String]) -> Report {
     // Ký hiệu cần tìm, và nhóm api chứa mỗi ký hiệu. Một ký hiệu có thể thuộc
     // nhiều nhóm.
     let watched = doc.watched_symbols();
-    let needles: Vec<&str> = {
-        let mut v: Vec<&str> = watched.iter().map(|(_, s)| *s).collect();
+    let tables = doc.watched_tables();
+    let dedup = |pairs: &[(&str, &str)]| {
+        let mut v: Vec<String> = pairs.iter().map(|(_, s)| (*s).to_string()).collect();
         v.sort_unstable();
         v.dedup();
         v
     };
+    let needles = dedup(&watched);
+    let table_needles = dedup(&tables);
+    fn as_refs(v: &[String]) -> Vec<&str> {
+        v.iter().map(String::as_str).collect()
+    }
 
-    for path in &files {
+    for path in files {
         let Some(lang) = Lang::for_path(path) else {
             continue;
         };
@@ -182,11 +197,12 @@ pub fn check(root: &Path, doc: &Document, extra_ignores: &[String]) -> Report {
         let Ok(src) = std::fs::read_to_string(root.join(path)) else {
             continue;
         };
-        let scan = lang.scan(&src, &needles);
+        let scan = lang.scan_all(&src, &as_refs(&needles), &as_refs(&table_needles));
         for import in &scan.imports {
             inspect(&resolver, doc, lang, path, from, import, &mut report);
         }
-        inspect_symbols(doc, &watched, path, from, &scan.symbols, &mut report);
+        inspect_hits(doc, &watched, path, from, &scan.symbols, Via::Symbol, &mut report);
+        inspect_hits(doc, &tables, path, from, &scan.tables, Via::Table, &mut report);
     }
 
     counts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
@@ -256,12 +272,14 @@ fn inspect(
 /// Mỗi cặp (file, ký hiệu) báo một lần, ở lần gặp đầu tiên, kèm số lần gặp.
 /// In ra từng vị trí một sẽ làm ngập báo cáo khi `strcpy` xuất hiện năm chục
 /// lần trong cùng một file.
-fn inspect_symbols(
+#[allow(clippy::too_many_arguments)]
+fn inspect_hits(
     doc: &Document,
     watched: &[(&str, &str)],
     path: &str,
     from: &str,
     hits: &[crate::scan::SymbolHit],
+    via: Via,
     report: &mut Report,
 ) {
     let mut seen: std::collections::BTreeMap<(&str, &str), (usize, usize)> =
@@ -288,12 +306,12 @@ fn inspect_symbols(
                 file: path.to_string(),
                 line,
                 spec: symbol.to_string(),
-                via: Via::Symbol,
+                via,
                 count,
                 reason,
                 rule,
                 status,
-                hint: hint_for(doc, from, group, reason, Via::Symbol),
+                hint: hint_for(doc, from, group, reason, via),
             });
         }
     }
@@ -314,6 +332,19 @@ fn judge(doc: &Document, from: &str, to: &str) -> Option<(Reason, String, Status
     }
     if matching(doc, RuleKind::Allow, from, to).is_some() {
         return None;
+    }
+    // Quyền sở hữu kho dữ liệu là một `deny` ngầm, nhưng yếu hơn luật viết
+    // tay: `allow` ở trên đã kịp cho qua. Nó cũng không chờ component vào
+    // diện kiểm — chạm dữ liệu của người khác luôn là vi phạm.
+    if let Some(store) = doc.store(to) {
+        if store.owned_by == from {
+            return None;
+        }
+        return Some((
+            Reason::NotOwner,
+            format!("store {to} owned_by {}", store.owned_by),
+            store.meta.status,
+        ));
     }
     if !opted_in(doc, from) {
         return None;
@@ -357,11 +388,16 @@ fn hint_for(doc: &Document, from: &str, to: &str, reason: Reason, via: Via) -> S
     {
         return match via {
             Via::Import => format!("gọi {only} thay vì truy cập thẳng {to}"),
-            Via::Symbol => format!("chỉ {only} được dùng nhóm {to}"),
+            Via::Symbol | Via::Table => format!("chỉ {only} được dùng {to}"),
         };
     }
-    if via == Via::Symbol {
-        return format!("{from} chưa được phép dùng nhóm {to}");
+    if reason == Reason::NotOwner
+        && let Some(store) = doc.store(to)
+    {
+        return format!("gọi {} thay vì chạm thẳng vào dữ liệu của nó", store.owned_by);
+    }
+    if via != Via::Import {
+        return format!("{from} chưa được phép dùng {to}");
     }
     let allowed = allowed_targets(doc, from);
     if allowed.is_empty() {
@@ -426,11 +462,6 @@ fn external_named(doc: &Document, package: &str) -> Option<String> {
                 || c.name.eq_ignore_ascii_case(package)
         })
         .map(|c| c.name.clone())
-}
-
-fn mentions_store(doc: &Document, rule: &Rule) -> bool {
-    let is_store = |t: &Target| matches!(t, Target::Named(n) if doc.store(n).is_some());
-    is_store(&rule.from) || rule.to.iter().any(is_store)
 }
 
 fn describe(rule: &Rule) -> String {

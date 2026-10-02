@@ -233,6 +233,14 @@ impl Document {
         self.apis.iter().find(|a| a.name == name)
     }
 
+    /// Mọi tên bảng cần tìm trong mã, kèm kho dữ liệu chứa nó.
+    pub fn watched_tables(&self) -> Vec<(&str, &str)> {
+        self.stores
+            .iter()
+            .flat_map(|s| s.tables.iter().map(move |t| (s.name.as_str(), t.as_str())))
+            .collect()
+    }
+
     /// Mọi ký hiệu cần tìm trong mã, kèm nhóm chứa nó.
     pub fn watched_symbols(&self) -> Vec<(&str, &str)> {
         self.apis

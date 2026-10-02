@@ -1,0 +1,10 @@
+# archctl sinh tự động. Không cần đưa vào git.
+arch_hash ab4df278
+attempt Capture->Report|src/capture/mod.rs 4
+attempt Capture->RustUnsafe|src/capture/mod.rs 4
+attempt Native->LibPcap|native/parser.c 4
+attempt Native->Unsafe|native/parser.c 4
+attempt Stream->Ctl|internal/stream/stream.go 4
+attempt Tools->Danger|tools/analyze.py 4
+attempt ToolsLib->Captures|tools/lib/io.py 4
+attempt ToolsLib->Tools|tools/lib/io.py 4

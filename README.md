@@ -27,7 +27,7 @@ Giai đoạn 1 đang làm. Đã có **parser DSL** và **kiểm luật phụ thu
 **TypeScript, Python, C/C++, Rust và Go**.
 
 ```bash
-cargo test                                   # 136 test
+cargo test                                   # 154 test
 cargo run -p archctl -- check --root examples/sensor
 ```
 
@@ -77,7 +77,10 @@ chuỗi, char literal, raw string, docstring và regex theo từng ngôn ngữ. 
 hàm, IPC — không xuất hiện trong bất kỳ câu lệnh import nào nên không bị bắt.
 Ngữ nghĩa và giới hạn đầy đủ: [docs/check.md](docs/check.md).
 
-Chưa có: tsconfig `paths`, `--changed`, kiểm `store owned_by`, `serve`.
+`archctl check <file>...` quét đúng những file được nêu, mất ~11ms trên dự án
+2000 file — đủ nhanh để chạy trong hook sau mỗi lần agent lưu file.
+
+Chưa có: kiểm `flow`, `contract`, `boundary`, `invariant`; xuất sơ đồ.
 
 ## Ghi công
 

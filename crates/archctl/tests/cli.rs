@@ -303,3 +303,70 @@ fn baseline_siet_lai_khi_vi_pham_cu_duoc_sua() {
     assert!(text(&out).contains("không quay lại được"), "{}", text(&out));
     assert!(text(&out).contains("Không còn vi phạm nào"), "{}", text(&out));
 }
+
+// ---------- quét một phần ----------
+
+#[test]
+fn cho_thang_duong_dan_thi_chi_quet_file_do() {
+    let p = Project::new("only");
+    std::fs::create_dir_all(p.0.join("src/report")).unwrap();
+    std::fs::write(p.0.join("src/report/x.ts"), "export const r = 1\n").unwrap();
+    std::fs::write(p.0.join("src/web/bad.ts"), "import { r } from '../report/x'\n").unwrap();
+    std::fs::write(p.0.join("src/web/ok.ts"), "export const o = 1\n").unwrap();
+
+    let said = text(&p.run(&["check", "src/web/ok.ts"]));
+    assert!(said.contains("chỉ quét 1 file"), "{said}");
+    assert!(!said.contains("VI PHẠM"), "file sạch thì không báo gì: {said}");
+    assert_eq!(code(&p.run(&["check", "src/web/ok.ts"])), 0);
+
+    let bad = p.0.join("src/web/bad.ts");
+    assert_eq!(code(&p.run(&["check", bad.to_str().unwrap()])), 1, "đường dẫn tuyệt đối");
+}
+
+#[test]
+fn quet_mot_phan_khong_in_con_so_tong_gay_hieu_nham() {
+    let p = Project::new("partial");
+    let said = text(&p.run(&["check", "src/web/page.ts"]));
+    assert!(!said.contains("component trong diện kiểm"), "{said}");
+    assert!(!said.contains("CHƯA KIỂM"), "{said}");
+}
+
+// ---------- tsconfig paths ----------
+
+#[test]
+fn alias_tsconfig_duoc_phan_giai() {
+    let p = Project::new("tsconfig");
+    std::fs::write(
+        p.0.join("tsconfig.json"),
+        "{\n  // có chú thích\n  \"compilerOptions\": { \"baseUrl\": \".\", \"paths\": { \"@/*\": [\"./src/*\"] } },\n}\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(p.0.join("src/order")).unwrap();
+    std::fs::write(p.0.join("src/order/create.ts"), "export const c = 1\n").unwrap();
+    std::fs::write(p.0.join("src/web/page.ts"), "import { c } from '@/order/create'\n").unwrap();
+
+    let said = text(&p.run(&["check"]));
+    assert!(!said.contains("CHƯA PHÂN GIẢI"), "alias phải phân giải được: {said}");
+    assert_eq!(code(&p.run(&["check"])), 0, "Web -> Order được allow: {said}");
+}
+
+#[test]
+fn alias_tro_toi_cho_khong_co_that_thi_bao_ra() {
+    let p = Project::new("tsconfig-missing");
+    std::fs::write(
+        p.0.join("tsconfig.json"),
+        "{ \"compilerOptions\": { \"paths\": { \"@/*\": [\"./src/*\"] } } }",
+    )
+    .unwrap();
+    std::fs::write(p.0.join("src/web/page.ts"), "import { x } from '@/khong/co'\n").unwrap();
+    let said = text(&p.run(&["check"]));
+    assert!(said.contains("CHƯA PHÂN GIẢI"), "{said}");
+    assert!(said.contains("@/khong/co"), "{said}");
+}
+
+#[test]
+fn khong_co_tsconfig_thi_alias_van_duoc_bao_la_chua_ho_tro() {
+    let p = Project::new("no-tsconfig");
+    std::fs::write(p.0.join("src/web/page.ts"), "import { x } from '@/bat/ky'\n").unwrap();
+    assert!(text(&p.run(&["check"])).contains("alias"), "phải nói rõ vì sao");
+}

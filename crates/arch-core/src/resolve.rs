@@ -5,6 +5,7 @@
 //! không im lặng bỏ qua. Bỏ sót âm thầm làm người dùng tin rằng không có vi
 //! phạm, tệ hơn hẳn việc nói thẳng là chưa biết.
 
+use crate::jsonc;
 use crate::scan::{Import, Lang};
 use std::path::{Path, PathBuf};
 
@@ -35,6 +36,19 @@ pub struct Resolver {
     /// Thiếu bản đồ này thì mọi phụ thuộc giữa các crate anh em đều bị coi là
     /// gói ngoài, và Rust workspace nào cũng hiện ra là không có quan hệ nào.
     rust_crates: Vec<(String, String)>,
+    /// Mọi `tsconfig.json` trong dự án, gần nhất trước. Monorepo có nhiều cấu
+    /// hình, và alias chỉ có hiệu lực trong phạm vi cấu hình chứa file gọi.
+    ts_configs: Vec<TsConfig>,
+}
+
+/// Phần `paths` của một `tsconfig.json`, đã mở sẵn `extends`.
+struct TsConfig {
+    /// Thư mục chứa file cấu hình, tương đối so với gốc dự án.
+    dir: String,
+    /// Nơi các mẫu trong `paths` được tính từ đó.
+    base: String,
+    /// Mẫu đã tách quanh dấu `*`: tiền tố, hậu tố, danh sách đích.
+    patterns: Vec<(String, String, Vec<String>)>,
 }
 
 impl Resolver {
@@ -43,6 +57,7 @@ impl Resolver {
             root: root.to_path_buf(),
             go_module: read_go_module(root),
             rust_crates: find_rust_crates(root),
+            ts_configs: find_ts_configs(root),
         }
     }
 
@@ -82,7 +97,11 @@ impl Resolver {
             candidates.extend(TS_EXTENSIONS.iter().map(|e| format!("{base}/index.{e}")));
             return self.first_file(candidates).map_or(Resolved::Missing, Resolved::Path);
         }
-        // Gói có phạm vi luôn là `@scope/name`, nên phạm vi rỗng là alias.
+        if let Some(found) = self.ts_alias(importer, spec) {
+            return found;
+        }
+        // Gói có phạm vi luôn là `@scope/name`, nên phạm vi rỗng là alias —
+        // tới đây nghĩa là không có `tsconfig.json` nào khai báo nó.
         if spec.starts_with("@/") || spec.starts_with("~/") || spec.starts_with('#') {
             return Resolved::Alias;
         }
@@ -90,6 +109,30 @@ impl Resolver {
             return Resolved::Alias;
         }
         Resolved::Package(npm_package(spec))
+    }
+
+    /// Thử các mẫu trong `tsconfig.json` gần file gọi nhất. `None` nghĩa là
+    /// không mẫu nào khớp, để nơi gọi xét tiếp như gói thường.
+    fn ts_alias(&self, importer: &str, spec: &str) -> Option<Resolved> {
+        for config in self.ts_configs.iter().filter(|c| within(&c.dir, importer)) {
+            for (prefix, suffix, targets) in &config.patterns {
+                let Some(captured) = capture(spec, prefix, suffix) else { continue };
+                for target in targets {
+                    let filled = target.replace('*', captured);
+                    let Some(base) = join(&config.base, &filled) else { continue };
+                    let mut candidates = vec![base.clone()];
+                    candidates.extend(TS_EXTENSIONS.iter().map(|e| format!("{base}.{e}")));
+                    candidates
+                        .extend(TS_EXTENSIONS.iter().map(|e| format!("{base}/index.{e}")));
+                    if let Some(found) = self.first_file(candidates) {
+                        return Some(Resolved::Path(found));
+                    }
+                }
+                // Mẫu khớp nhưng không ra file: alias có thật, đích thì không.
+                return Some(Resolved::Missing);
+            }
+        }
+        None
     }
 
     // ---- Python ----
@@ -308,6 +351,110 @@ fn package_name(manifest: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Phần giữa mà `*` bắt được. Mẫu không có `*` thì phải khớp đúng y nguyên.
+fn capture<'a>(spec: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
+    if prefix.len() + suffix.len() > spec.len() {
+        return None;
+    }
+    spec.strip_prefix(prefix)?.strip_suffix(suffix)
+}
+
+/// File có nằm trong phạm vi của thư mục cấu hình không.
+fn within(dir: &str, path: &str) -> bool {
+    dir.is_empty() || path.starts_with(&format!("{dir}/"))
+}
+
+fn find_ts_configs(root: &Path) -> Vec<TsConfig> {
+    let mut dirs = Vec::new();
+    collect_dirs_with(root, "", 0, "tsconfig.json", &mut dirs);
+    let mut out: Vec<TsConfig> =
+        dirs.iter().filter_map(|dir| read_ts_config(root, dir)).collect();
+    // Gần nhất trước: thư mục sâu hơn thắng thư mục nông hơn.
+    out.sort_by_key(|c| std::cmp::Reverse(c.dir.len()));
+    out
+}
+
+fn read_ts_config(root: &Path, dir: &str) -> Option<TsConfig> {
+    const MAX_EXTENDS: usize = 4;
+
+    // `extends` tạo chuỗi cấu hình; con thắng cha. Đi từ gốc chuỗi xuống.
+    let mut chain: Vec<jsonc::Value> = Vec::new();
+    let mut current = dir.to_string();
+    for _ in 0..MAX_EXTENDS {
+        let path = if current.is_empty() {
+            "tsconfig.json".to_string()
+        } else {
+            format!("{current}/tsconfig.json")
+        };
+        let Some(value) = std::fs::read_to_string(root.join(&path)).ok().and_then(|s| jsonc::parse(&s))
+        else {
+            break;
+        };
+        let parent = value.get("extends").and_then(jsonc::Value::as_str).map(str::to_string);
+        chain.push(value);
+        match parent.and_then(|p| join(&current, p.trim_end_matches(".json"))) {
+            Some(next) => current = next.rsplit_once('/').map_or(String::new(), |(d, _)| d.to_string()),
+            None => break,
+        }
+    }
+
+    let mut base = dir.to_string();
+    let mut patterns = Vec::new();
+    for value in chain.iter().rev() {
+        if let Some(url) = value.get_path(&["compilerOptions", "baseUrl"]).and_then(jsonc::Value::as_str)
+            && let Some(joined) = join(dir, url)
+        {
+            base = joined;
+        }
+        if let Some(fields) =
+            value.get_path(&["compilerOptions", "paths"]).and_then(jsonc::Value::as_object)
+        {
+            patterns.clear();
+            for (pattern, targets) in fields {
+                let (prefix, suffix) = match pattern.split_once('*') {
+                    Some((p, s)) => (p.to_string(), s.to_string()),
+                    None => (pattern.clone(), String::new()),
+                };
+                let targets: Vec<String> = targets
+                    .as_array()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|t| t.as_str().map(str::to_string))
+                    .collect();
+                if !targets.is_empty() {
+                    patterns.push((prefix, suffix, targets));
+                }
+            }
+        }
+    }
+    (!patterns.is_empty()).then_some(TsConfig { dir: dir.to_string(), base, patterns })
+}
+
+/// Thư mục chứa một file tên cho trước, quét tới độ sâu giới hạn.
+fn collect_dirs_with(root: &Path, prefix: &str, depth: usize, name: &str, out: &mut Vec<String>) {
+    const MAX_DEPTH: usize = 4;
+    const SKIP: &[&str] = &["target", "node_modules", ".git", ".arch", "vendor", "dist"];
+
+    if depth > MAX_DEPTH {
+        return;
+    }
+    let dir = if prefix.is_empty() { root.to_path_buf() } else { root.join(prefix) };
+    if dir.join(name).is_file() {
+        out.push(prefix.to_string());
+    }
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    for entry in entries.flatten() {
+        let Ok(child) = entry.file_name().into_string() else { continue };
+        if SKIP.contains(&child.as_str()) || child.starts_with('.') {
+            continue;
+        }
+        if entry.path().is_dir() {
+            let next = if prefix.is_empty() { child } else { format!("{prefix}/{child}") };
+            collect_dirs_with(root, &next, depth + 1, name, out);
+        }
+    }
 }
 
 fn read_go_module(root: &Path) -> Option<String> {
