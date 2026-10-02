@@ -164,6 +164,60 @@ fn append_gitignore(root: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
+pub fn cmd_export(args: &[String]) -> ExitCode {
+    let parsed = match parse_args(args, &["root", "view", "out"], &["violations"]) {
+        Ok(a) => a,
+        Err(e) => return fail(&e, exit::USAGE),
+    };
+    let start = parsed.flags.get("root").map_or_else(|| PathBuf::from("."), PathBuf::from);
+    let Some(root) = arch_core::find_root(&start) else {
+        return fail(&format!("không tìm thấy `{ARCH_FILE}`"), exit::USAGE);
+    };
+
+    let src = std::fs::read_to_string(root.join(ARCH_FILE)).unwrap_or_default();
+    let (doc, diags) = arch_core::load(&src);
+    if let Some(d) = diags.iter().find(|d| d.severity == arch_core::Severity::Error) {
+        return fail(&format!("`{ARCH_FILE}` có lỗi: {}", d.msg), exit::DSL_INVALID);
+    }
+    if let Some(name) = parsed.flags.get("view")
+        && !doc.views.iter().any(|v| &v.name == name)
+    {
+        return fail(&format!("không có view nào tên `{name}`"), exit::USAGE);
+    }
+
+    let report = parsed.has("violations").then(|| {
+        let ignores = arch_core::read_ignores(&root);
+        arch_core::check::check(&root, &doc, &ignores)
+    });
+    let options = arch_core::export::Options {
+        view: parsed.flags.get("view").map(String::as_str),
+        violations: report.as_ref().map_or(&[][..], |r| &r.violations),
+    };
+
+    let hash = arch_core::arch_hash(&doc);
+    let today = arch_core::protocol::today();
+    match parsed.flags.get("out") {
+        Some(out) => {
+            // Đuôi `.md` thì bọc trong khối mã để GitHub render được.
+            let body = if out.ends_with(".md") {
+                arch_core::export::markdown(&doc, &options, &hash, &today)
+            } else {
+                arch_core::export::mermaid(&doc, &options)
+            };
+            let path = root.join(out);
+            if let Err(e) = std::fs::write(&path, body) {
+                return fail(&format!("không ghi được `{out}`: {e}"), exit::USAGE);
+            }
+            crate::say!("Đã ghi {out}");
+            if let Some(r) = &report {
+                crate::say!("{} vi phạm được phủ lên sơ đồ.", r.violations.len());
+            }
+        }
+        None => crate::say_inline!("{}", arch_core::export::mermaid(&doc, &options)),
+    }
+    ExitCode::from(exit::OK)
+}
+
 pub fn cmd_baseline(args: &[String]) -> ExitCode {
     let parsed = match parse_args(args, &["root"], &[]) {
         Ok(a) => a,

@@ -64,6 +64,7 @@ fn main() -> ExitCode {
         "proposals" => proto::cmd_proposals(&args[1..]),
         "init" => setup::cmd_init(&args[1..]),
         "baseline" => setup::cmd_baseline(&args[1..]),
+        "export" => setup::cmd_export(&args[1..]),
         "help" | "-h" | "--help" => {
             print_usage();
             ExitCode::from(exit::OK)
@@ -95,6 +96,9 @@ Lệnh chung:
   archctl diff [<git-ref>] [--root <dir>] So luật hiện tại với một bản trước
   archctl parse <file.arch>               Chỉ đọc và kiểm tra file luật
   archctl proposals                       Liệt kê đề xuất đang chờ
+  archctl export [--view <tên>] [--violations] [--out <file>]
+                                          Xuất sơ đồ Mermaid. Đuôi .md thì
+                                          bọc sẵn để GitHub render được.
 
 Lệnh của agent:
   archctl propose '<luật>' --reason \"...\"  Đề xuất thêm một luật

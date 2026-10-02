@@ -8,6 +8,7 @@
 pub mod baseline;
 pub mod check;
 pub mod discover;
+pub mod export;
 pub mod diff;
 pub mod diag;
 pub mod glob;
