@@ -1,6 +1,38 @@
 # `archctl check` — ngữ nghĩa và giới hạn
 
-Hiện chỉ kiểm **luật phụ thuộc giữa component** cho TypeScript và JavaScript.
+Hiện kiểm **luật phụ thuộc giữa component** cho năm ngôn ngữ.
+
+## Ngôn ngữ đã hỗ trợ
+
+| Ngôn ngữ | Phần mở rộng | Nhận được | Phân giải |
+| --- | --- | --- | --- |
+| TypeScript, JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | `import`, `import type`, `export … from`, `require()`, `import()` | tương đối, `index.*`, `.js`→`.ts` |
+| Python | `.py .pyi` | `import a.b`, `import a as b, c`, `from .x import y` | tương đối theo số dấu chấm; tuyệt đối thử gốc, `src/`, `lib/` |
+| C, C++ | `.c .h .cc .cpp .cxx .hpp .hh .hxx .inl` | `#include "x"`, `#include <x>` | `"…"` theo thư mục file gọi rồi `include/`, `src/`, `lib/` |
+| Rust | `.rs` | `use`, `pub use`, `use a::{b, c}`, `extern crate` | theo cây module, tìm `Cargo.toml` gần nhất để biết gốc crate |
+| Go | `.go` | `import "x"`, khối `import ( … )` | đọc `module` trong `go.mod` để tách nội bộ với bên ngoài |
+
+Mọi ngôn ngữ dùng chung một lexer cấu hình được. Nó biết bỏ qua chú thích,
+chuỗi, char literal, raw string, docstring và regex theo từng ngôn ngữ — đó là
+chỗ dễ sai nhất, nên chỉ viết một lần.
+
+## Giới hạn lớn nhất: cạnh liên ngôn ngữ vô hình
+
+Phân tích import chỉ thấy được phụ thuộc **trong cùng một ngôn ngữ**. Các loại
+sau không xuất hiện ở bất kỳ câu lệnh import nào, nên bộ kiểm chứng không thấy:
+
+- **FFI** — Rust gọi C qua `extern "C"`, Python gọi qua `ctypes` hay `cffi`
+- **Liên kết** — thư viện tĩnh và động, kể cả `dlopen`
+- **Con trỏ hàm và vtable**
+- **Tiến trình con, syscall, IPC, mạng**
+
+Trong `examples/sensor`, cạnh `Decode -> Native` là FFI nên không bị bắt. Có
+hẳn một test khoá lại điều đó, để giới hạn này không bị quên.
+
+**Hệ quả cho mã hệ thống và bảo mật:** với C/C++, `#include` là điều kiện cần
+nhưng rất xa điều kiện đủ. Loại luật phù hợp hơn cho các mảng đó là **hàm bị
+cấm** (`api Unsafe at "strcpy", "gets"`), kiểm được hoàn toàn bằng từ vựng và
+không có vùng mù như đồ thị include. Đó là việc tiếp theo.
 
 ## Cách một component vào diện kiểm
 
@@ -28,49 +60,56 @@ Luật cấm không nên phải chờ ai bật.
 4. Còn lại → chưa kiểm
 
 `deny` thắng `allow` khi cả hai cùng khớp. `except` miễn trừ cho **nguồn**:
-`deny * -> PaymentDB except Payment` nghĩa là chỉ Payment được chạm PaymentDB.
+`deny * -> LibPcap except Capture` nghĩa là chỉ Capture được chạm libpcap.
 
 Luật `#draft` và `#proposed` không có hiệu lực, nên cũng **không cấp quyền**.
 
-## Gói bên ngoài
+## Thư viện bên ngoài
 
-Gói npm chỉ tham gia luật khi được khai báo `external`, với tên gói trong `at`:
+Chỉ tham gia luật khi được khai báo `external`, với tên định danh trong `at`:
 
 ```
-external Stripe at "stripe"
-deny * -> Stripe except Payment
+external Stripe  at "stripe"                  # gói npm
+external NumPy   at "numpy"                   # gói Python
+external LibPcap at "pcap.h"                  # header hệ thống C
+external GoNet   at "net"                     # gói chuẩn Go
 ```
 
-Gói không khai báo thì bị bỏ qua. Bắt khai báo mọi gói npm sẽ khiến file luật
-dài vô ích.
+Thứ không khai báo thì bị bỏ qua. Bắt khai báo mọi gói npm hay mọi header hệ
+thống sẽ khiến file luật dài vô ích.
 
-## Phân giải module
+## Thứ không phân giải được thì báo ra
 
-| Dạng | Xử lý |
+Quyết định có chủ ý. Bỏ sót âm thầm làm người dùng tin rằng không có vi phạm,
+tệ hơn hẳn việc nói thẳng là chưa biết.
+
+| Trường hợp | Xử lý |
 | --- | --- |
-| `./x`, `../x` | Thử `.ts .tsx .mts .cts .js .jsx .d.ts`, rồi `x/index.*` |
-| `./x.js` | Thử cả `./x.ts` — cách viết ESM của TypeScript |
-| `stripe`, `@scope/pkg` | Tên gói |
-| `@/lib/x`, `~/lib/x`, `/abs` | **Chưa hỗ trợ**, báo ra |
-| Tương đối nhưng không có file | **Báo ra** |
+| `@/lib/x`, `~/lib/x` (alias tsconfig) | **báo ra**, chưa hỗ trợ |
+| `#include "x.h"` không tìm thấy | **báo ra**, có thể nằm trong include path của build |
+| `use crate::x` không có module | **báo ra** |
+| `from .x import y` không có file | **báo ra** |
+| `import numpy` không có trong dự án | coi là gói — với import tuyệt đối của Python, không phân biệt được |
 
-Hai dòng cuối là quyết định có chủ ý: thứ nào không phân giải được thì nói
-thẳng. Bỏ sót âm thầm làm người dùng tin rằng không có vi phạm, tệ hơn hẳn.
+## Giới hạn khác đã biết
 
-## Giới hạn đã biết
-
-- **tsconfig `paths` chưa hỗ trợ.** Dự án dùng alias `@/...` sẽ thấy nhiều dòng
-  "chưa phân giải". Đây là việc tiếp theo.
-- **Không có `--changed`.** Quét toàn repo mất 123ms trên 2000 file. Đủ cho CI,
-  chưa đủ nhanh cho hook mỗi lần lưu file.
+- **tsconfig `paths` chưa hỗ trợ.** Dự án TypeScript dùng alias sẽ thấy nhiều
+  dòng "chưa phân giải".
+- **Include path của C/C++ chưa đọc từ build.** CMake, Makefile và
+  `compile_commands.json` đều chưa được đọc, nên chỉ xấp xỉ bằng vài thư mục
+  thường gặp.
+- **Không có `--changed`.** Quét toàn repo mất khoảng 112ms trên 2000 file. Đủ
+  cho CI, chưa đủ nhanh cho hook mỗi lần lưu file.
 - **`store owned_by` chưa kiểm.** Cần phân tích truy cập database và ORM. Báo
-  cáo đếm số luật thuộc loại này và nói rõ là chưa kiểm được.
+  cáo đếm số luật loại này và nói rõ là chưa kiểm được.
 - **`flow`, `contract`, `boundary`, `invariant` chưa kiểm.** Đọc được, kiểm
   tham chiếu được, nhưng chưa đối chiếu với mã.
-- **Bộ quét import không phải parser đầy đủ.** Nhận regex bằng suy đoán theo
-  token đứng trước, như các bộ minify. Biểu thức trong template literal bị bỏ
-  qua. Nếu độ chính xác không đủ, thay `scan.rs` bằng tree-sitter.
-- **Chỉ TypeScript và JavaScript.** Python và JVM chưa có.
+- **Chỉ thị tiền xử lý không được diễn giải.** Include trong `#ifdef` vẫn được
+  tính. Có chủ ý: đoán nhánh nào được biên dịch cần biết toàn bộ cờ build, và
+  phân tích phụ thuộc nên thận trọng.
+- **Bộ quét không phải parser đầy đủ.** Nhận regex bằng suy đoán theo token
+  đứng trước, như các bộ minify. Nếu độ chính xác không đủ, thay `scan/` bằng
+  tree-sitter — ranh giới module đã được đặt sẵn cho việc đó.
 
 ## Mẫu `at` chồng nhau
 

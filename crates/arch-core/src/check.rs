@@ -10,8 +10,8 @@
 
 use crate::glob;
 use crate::model::*;
-use crate::resolve::{self, Resolved};
-use crate::scan;
+use crate::resolve::{Resolved, Resolver};
+use crate::scan::{self, Lang};
 use std::path::Path;
 
 /// Thư mục không bao giờ quét. Không cấu hình được, vì quét chúng chỉ tốn thời
@@ -57,17 +57,23 @@ pub struct Violation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnresolvedReason {
-    /// Trông như alias của tsconfig `paths` — chưa hỗ trợ.
+    /// Cần cấu hình build mà bộ kiểm chứng chưa đọc.
     Alias,
-    /// Đường dẫn tương đối nhưng không có file nào ở đó.
+    /// Đường dẫn trông đúng dạng nhưng không có gì ở đó.
     Missing,
 }
 
 impl UnresolvedReason {
-    pub fn describe(self) -> &'static str {
-        match self {
-            UnresolvedReason::Alias => "alias tsconfig paths chưa được hỗ trợ",
-            UnresolvedReason::Missing => "không tìm thấy file nào ở đường dẫn này",
+    pub fn describe(self, lang: Lang) -> &'static str {
+        match (self, lang) {
+            (UnresolvedReason::Alias, _) => "alias cần cấu hình build, chưa được hỗ trợ",
+            (UnresolvedReason::Missing, Lang::C) => {
+                "không tìm thấy header, có thể nằm trong include path của build"
+            }
+            (UnresolvedReason::Missing, Lang::Rust) => {
+                "không tìm thấy module này trong crate"
+            }
+            (UnresolvedReason::Missing, _) => "không tìm thấy file nào ở đường dẫn này",
         }
     }
 }
@@ -77,6 +83,7 @@ pub struct Unresolved {
     pub file: String,
     pub line: usize,
     pub spec: String,
+    pub lang: Lang,
     pub reason: UnresolvedReason,
 }
 
@@ -94,6 +101,9 @@ pub struct Report {
     pub ambiguous: Vec<(String, Vec<String>)>,
     /// Luật nhắc tới `store`, cần phân tích truy cập dữ liệu nên chưa kiểm.
     pub rules_deferred: usize,
+    /// Số file đã quét theo từng ngôn ngữ, để biết bộ kiểm chứng thật sự nhìn
+    /// thấy những phần nào của repo.
+    pub by_lang: Vec<(Lang, usize)>,
 }
 
 impl Report {
@@ -117,11 +127,18 @@ pub fn check(root: &Path, doc: &Document, extra_ignores: &[String]) -> Report {
         }
     }
 
+    let resolver = Resolver::new(root);
+    let mut counts: Vec<(Lang, usize)> = Vec::new();
+
     for path in &files {
-        if !scan::is_supported(path) {
+        let Some(lang) = Lang::for_path(path) else {
             continue;
-        }
+        };
         report.files_scanned += 1;
+        match counts.iter_mut().find(|(l, _)| *l == lang) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((lang, 1)),
+        }
 
         let owners = owners_of(doc, path);
         if owners.len() > 1 {
@@ -135,53 +152,53 @@ pub fn check(root: &Path, doc: &Document, extra_ignores: &[String]) -> Report {
         let Ok(src) = std::fs::read_to_string(root.join(path)) else {
             continue;
         };
-        for import in scan::imports(&src) {
-            inspect(root, doc, path, from, &import, &mut report);
+        for import in lang.imports(&src) {
+            inspect(&resolver, doc, lang, path, from, &import, &mut report);
         }
     }
+
+    counts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    report.by_lang = counts;
 
     report.violations.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
     report.unresolved.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
     report
 }
 
+#[allow(clippy::too_many_arguments)]
 fn inspect(
-    root: &Path,
+    resolver: &Resolver,
     doc: &Document,
+    lang: Lang,
     path: &str,
     from: &str,
     import: &scan::Import,
     report: &mut Report,
 ) {
-    let to = match resolve::resolve(root, path, &import.spec) {
-        Resolved::File(target) => match owners_of(doc, &target).first() {
+    let mut unresolved = |reason| {
+        report.unresolved.push(Unresolved {
+            file: path.to_string(),
+            line: import.line,
+            spec: import.spec.clone(),
+            lang,
+            reason,
+        });
+    };
+
+    let to = match resolver.resolve(lang, path, import) {
+        Resolved::Path(target) => match owners_of(doc, &target).first() {
             Some(name) => name.clone(),
             None => return,
         },
-        // Gói không được khai báo `external` thì không tham gia luật. Bắt khai
-        // báo mọi gói npm sẽ khiến file luật dài vô ích.
+        // Thư viện không được khai báo `external` thì không tham gia luật. Bắt
+        // khai báo mọi gói npm hay mọi header hệ thống sẽ khiến file luật dài
+        // vô ích.
         Resolved::Package(pkg) => match external_named(doc, &pkg) {
             Some(name) => name,
             None => return,
         },
-        Resolved::Alias => {
-            report.unresolved.push(Unresolved {
-                file: path.to_string(),
-                line: import.line,
-                spec: import.spec.clone(),
-                reason: UnresolvedReason::Alias,
-            });
-            return;
-        }
-        Resolved::Missing => {
-            report.unresolved.push(Unresolved {
-                file: path.to_string(),
-                line: import.line,
-                spec: import.spec.clone(),
-                reason: UnresolvedReason::Missing,
-            });
-            return;
-        }
+        Resolved::Alias => return unresolved(UnresolvedReason::Alias),
+        Resolved::Missing => return unresolved(UnresolvedReason::Missing),
     };
 
     if to == from {

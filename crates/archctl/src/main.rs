@@ -142,9 +142,12 @@ fn cmd_check(args: &[String]) -> ExitCode {
 
 fn print_human(hash: &str, report: &Report) {
     let total = report.checked.len() + report.unchecked.len();
+    let langs: Vec<String> =
+        report.by_lang.iter().map(|(l, n)| format!("{n} {}", l.name())).collect();
     println!(
-        "kiến trúc {hash} · {} file quét · {}/{total} component trong diện kiểm\n",
+        "kiến trúc {hash} · {} file quét ({}) · {}/{total} component trong diện kiểm\n",
         report.files_scanned,
+        if langs.is_empty() { "không có file nào hỗ trợ".to_string() } else { langs.join(", ") },
         report.checked.len(),
     );
 
@@ -161,7 +164,7 @@ fn print_human(hash: &str, report: &Report) {
 
     for u in &report.unresolved {
         println!("⚠ CHƯA PHÂN GIẢI  '{}'", u.spec);
-        println!("  {}:{}  — {}\n", u.file, u.line, u.reason.describe());
+        println!("  {}:{}  — {}\n", u.file, u.line, u.reason.describe(u.lang));
     }
 
     for (file, owners) in &report.ambiguous {
@@ -220,11 +223,12 @@ fn print_json(hash: &str, report: &Report) {
         .iter()
         .map(|u| {
             format!(
-                r#"{{"file":{},"line":{},"spec":{},"reason":{}}}"#,
+                r#"{{"file":{},"line":{},"spec":{},"reason":{},"lang":{}}}"#,
                 json::string(&u.file),
                 u.line,
                 json::string(&u.spec),
-                json::string(u.reason.describe()),
+                json::string(u.reason.describe(u.lang)),
+                json::string(u.lang.name()),
             )
         })
         .collect();

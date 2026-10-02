@@ -1,0 +1,27 @@
+# Công cụ phân tích gói tin, bốn ngôn ngữ trong một repo.
+# Cố ý chứa bốn vi phạm, mỗi ngôn ngữ một cái.
+
+component Capture  at src/capture/**, src/main.rs   @human #locked
+component Decode   at src/decode/**                 @human #accepted
+component Report   at src/report.rs                 @human #accepted
+component Native   at native/**                     @human #locked
+component Tools    at tools/*.py                    @human #accepted
+component ToolsLib at tools/lib/**                  @human #accepted
+component Ctl      at cmd/**                        @human #accepted
+component Stream   at internal/**                   @human #accepted
+
+external LibPcap at "pcap.h"                        @human #locked
+external LibC    at "stdio.h", "string.h"           @human #accepted
+external NumPy   at "numpy"                         @human #accepted
+external GoNet   at "net"                           @human #accepted
+
+allow Capture  -> Decode, LibPcap
+allow Decode   -> Report
+allow Native   -> LibC
+allow Tools    -> ToolsLib, NumPy
+allow ToolsLib -> NumPy
+allow Ctl      -> Stream
+allow Stream   -> GoNet
+
+# Chỉ Capture được chạm libpcap. Mọi nơi khác phải đi qua nó.
+deny * -> LibPcap except Capture
