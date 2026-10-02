@@ -139,6 +139,40 @@ Những lỗi này bắt được ngay khi đọc file, không cần nhìn mã:
 Cái thứ hai đáng chú ý: `retry` mà không có `idempotent_by` là cách tạo ra lỗi
 trừ tiền hai lần.
 
+## Khai báo nói nhiều hơn một lần gặp
+
+Bộ quét phân biệt được **chỗ đặt ra một cái tên** với chỗ dùng nó, bằng cách
+nhìn token đứng ngay trước: `fn`, `def`, `function`, `func`, `class`, `type`,
+`const`… và dạng `func (r *T) Name` của Go.
+
+Khác biệt này quan trọng hơn vẻ ngoài của nó:
+
+```
+⚠ KHAI BÁO LẠC HẬU  năng lực trong contract Web.charge `charge`
+  — `charge` chỉ khai báo trong Payment, lẽ ra phải có trong Web
+```
+
+Trước đây việc này **pass**, vì Web có `import { charge }` rồi gọi `charge()`
+nên cái tên *xuất hiện* trong Web. Nhưng `contract Web.charge` nói rằng Web
+**có** năng lực đó, mà gọi sang chỗ khác thì không phải là có.
+
+Nó cũng làm phép đo "không kết luận được" sắc hơn nhiều. Trên 43 file Rust
+của chính repo này:
+
+| tên | có mặt | được khai báo |
+| --- | --- | --- |
+| `check` | 20/43 file | 1/43 |
+| `join` | 26/43 | 1/43 |
+
+Một cái tên bị gọi khắp nơi nhưng chỉ được đặt ra ở một chỗ thì kiểm tồn tại
+vẫn kết luận được.
+
+**Không nhận ra dạng khai báo thì quay về cách đếm cũ.** Không phải khai báo
+nào cũng có từ khoá — `Declined` có thể là một khoá trong object literal.
+Đòi một bằng chứng mình không biết cách tìm là tự sinh báo động giả, nên ở đó
+hệ thống nới ra và chỉ đếm số lần gặp như trước. Thông báo nói rõ đang dùng
+loại bằng chứng nào: *được khai báo trong* hay *được nhắc tới trong*.
+
 ## Cách tìm tên
 
 Giống hệt `api`: tra trên **dòng token**, nên tên nằm trong chú thích hay trong

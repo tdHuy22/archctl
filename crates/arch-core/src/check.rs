@@ -127,6 +127,10 @@ pub struct Vacuous {
     /// Số file có tên này, trên tổng số file đã dò ký hiệu.
     pub files: usize,
     pub of: usize,
+    /// Con số trên đếm chỗ **khai báo**, không phải mọi lần gặp. Khi đúng thì
+    /// cảnh báo nặng hơn: cái tên này được đặt ra ở khắp nơi, chứ không chỉ
+    /// được nhắc tới ở khắp nơi.
+    pub by_declaration: bool,
 }
 
 /// Tên có mặt ở từ `1/4` số file trở lên thì coi như không mang thông tin.
@@ -228,7 +232,7 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
         needles.iter().map(String::as_str).collect();
     needle_set.extend(expectations.iter().map(|e| e.name.as_str()));
     // Tên nào xuất hiện ở component nào, để biết cái gì thiếu và cái gì lọt ra.
-    let mut sightings: std::collections::BTreeMap<&str, Vec<(String, String, usize)>> =
+    let mut sightings: std::collections::BTreeMap<&str, Vec<Sighting>> =
         std::collections::BTreeMap::new();
     // Mẫu số cho việc xét một cái tên có quá phổ biến để nói lên điều gì không.
     let mut symbol_scanned = 0usize;
@@ -272,11 +276,12 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
 
         for hit in &scan.symbols {
             if let Some(name) = needle_set.get(hit.symbol.as_str()) {
-                sightings.entry(*name).or_default().push((
-                    from.clone(),
-                    path.clone(),
-                    hit.line,
-                ));
+                sightings.entry(*name).or_default().push(Sighting {
+                    component: from.clone(),
+                    file: path.clone(),
+                    line: hit.line,
+                    defines: hit.defines,
+                });
             }
         }
     }
@@ -292,11 +297,20 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
     report
 }
 
+/// Một lần gặp một cái tên trong mã.
+struct Sighting {
+    component: String,
+    file: String,
+    line: usize,
+    /// Đây là chỗ đặt ra cái tên, không phải chỗ dùng nó.
+    defines: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Đối chiếu kỳ vọng với những gì thật sự thấy trong mã.
 fn judge_expectations(
     expectations: &[crate::model::Expectation],
-    sightings: &std::collections::BTreeMap<&str, Vec<(String, String, usize)>>,
+    sightings: &std::collections::BTreeMap<&str, Vec<Sighting>>,
     scanned: usize,
     report: &mut Report,
 ) {
@@ -306,14 +320,29 @@ fn judge_expectations(
         let seen = sightings.get(want.name.as_str()).map(Vec::as_slice).unwrap_or_default();
         match &want.expect {
             Expect::Exists { within } => {
-                let ok = seen
+                // Chỗ **khai báo** là bằng chứng mạnh hơn hẳn một lần gặp bất
+                // kỳ: `charge` được định nghĩa trong Payment nói rằng Payment
+                // có năng lực đó, còn `charge` xuất hiện trong Payment có thể
+                // chỉ là một lời gọi sang chỗ khác.
+                //
+                // Nhưng chỉ dùng được khi tìm thấy khai báo. Bộ quét nhận
+                // dạng khai báo theo từ khoá, mà không phải dạng nào cũng có
+                // từ khoá — `errors Timeout` có thể là một hằng chuỗi. Không
+                // thấy khai báo nào thì quay về cách đếm cũ, vì đòi hỏi một
+                // bằng chứng mình không biết cách tìm là tự sinh báo động giả.
+                let declared: Vec<&Sighting> = seen.iter().filter(|s| s.defines).collect();
+                let by_declaration = !declared.is_empty();
+                let evidence: Vec<&Sighting> =
+                    if by_declaration { declared } else { seen.iter().collect() };
+
+                let ok = evidence
                     .iter()
-                    .any(|(owner, _, _)| within.is_empty() || within.contains(owner));
+                    .any(|s| within.is_empty() || within.contains(&s.component));
                 if ok {
                     // Pass rồi, nhưng pass vì cái tên có mặt khắp nơi thì
                     // không chứng minh được gì. Phải nói ra, vì im lặng ở đây
                     // bị đọc là "đã kiểm, không sao".
-                    let mut files: Vec<&str> = seen.iter().map(|(_, f, _)| f.as_str()).collect();
+                    let mut files: Vec<&str> = evidence.iter().map(|s| s.file.as_str()).collect();
                     files.sort_unstable();
                     files.dedup();
                     let (num, den) = VACUOUS_SHARE;
@@ -324,21 +353,26 @@ fn judge_expectations(
                             line: want.line,
                             files: files.len(),
                             of: scanned,
+                            by_declaration,
                         });
                     }
                     continue;
                 }
+
+                let what = if by_declaration { "khai báo" } else { "thấy" };
                 let hint = if within.is_empty() {
                     format!("`{}` không có trong mã — sửa mã, hoặc sửa khai báo", want.name)
-                } else if seen.is_empty() {
+                } else if evidence.is_empty() {
                     format!("`{}` không có trong mã", want.name)
                 } else {
                     // Có thật nhưng nằm sai chỗ: thông tin này cụ thể hơn hẳn
                     // "không tìm thấy", nên nói ra.
-                    let elsewhere: Vec<&str> =
-                        seen.iter().map(|(owner, _, _)| owner.as_str()).collect();
+                    let mut elsewhere: Vec<&str> =
+                        evidence.iter().map(|s| s.component.as_str()).collect();
+                    elsewhere.sort_unstable();
+                    elsewhere.dedup();
                     format!(
-                        "`{}` chỉ thấy trong {}, lẽ ra phải có trong {}",
+                        "`{}` chỉ {what} trong {}, lẽ ra phải có trong {}",
                         want.name,
                         elsewhere.join(", "),
                         within.join(", ")
@@ -356,14 +390,16 @@ fn judge_expectations(
                 // trí một sẽ làm ngập báo cáo.
                 let mut per_file: std::collections::BTreeMap<(&str, &str), (usize, usize)> =
                     std::collections::BTreeMap::new();
-                for (owner, file, line) in seen {
-                    if to.contains(owner) {
+                // Ở đây dùng **mọi** lần gặp chứ không riêng chỗ khai báo:
+                // `contain` nói rằng tên này không được *dùng* ngoài vùng.
+                for s in seen {
+                    if to.contains(&s.component) {
                         continue;
                     }
                     per_file
-                        .entry((owner, file))
+                        .entry((s.component.as_str(), s.file.as_str()))
                         .and_modify(|(_, n)| *n += 1)
-                        .or_insert((*line, 1));
+                        .or_insert((s.line, 1));
                 }
                 for ((owner, file), (line, count)) in per_file {
                     report.violations.push(Violation {

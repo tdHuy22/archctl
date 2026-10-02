@@ -495,7 +495,7 @@ function renderStale() {
     <div class="card">
       <h4>${esc(v.source)} <span class="mono">${esc(v.name)}</span></h4>
       <p class="where mono">system.arch:${v.line}</p>
-      <p class="hint">có trong ${v.files}/${v.of} file nên tìm thấy nó không nói lên điều gì
+      <p class="hint">được ${v.byDeclaration ? "khai báo" : "nhắc tới"} trong ${v.files}/${v.of} file nên tìm thấy nó không nói lên điều gì
         → đổi sang một tên chỉ thuộc về bước này</p>
     </div>`).join("");
   box.innerHTML = stale + vague

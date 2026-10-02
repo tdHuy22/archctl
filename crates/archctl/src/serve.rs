@@ -388,12 +388,13 @@ fn model_json(root: &Path) -> String {
         .iter()
         .map(|v| {
             format!(
-                r#"{{"name":{},"source":{},"line":{},"files":{},"of":{}}}"#,
+                r#"{{"name":{},"source":{},"line":{},"files":{},"of":{},"byDeclaration":{}}}"#,
                 json::string(&v.name),
                 json::string(&v.source),
                 v.line,
                 v.files,
                 v.of,
+                v.by_declaration,
             )
         })
         .collect();

@@ -122,7 +122,7 @@ impl Lang {
         };
         FileScan {
             imports,
-            symbols: find_symbols(&toks, needles),
+            symbols: find_symbols(&toks, needles, self),
             tables: find_tables(&toks, tables),
         }
     }
@@ -133,6 +133,13 @@ impl Lang {
 pub struct SymbolHit {
     pub symbol: String,
     pub line: usize,
+    /// Đây là chỗ **đặt ra** cái tên, không phải chỗ dùng nó.
+    ///
+    /// Khác biệt này quan trọng hơn vẻ ngoài của nó: `charge` được định nghĩa
+    /// trong Payment là bằng chứng Payment có năng lực đó, còn `charge` xuất
+    /// hiện trong Payment có thể chỉ là một lời gọi sang chỗ khác. Luôn
+    /// `false` với tên bảng dữ liệu, vì chúng được dò trong chuỗi.
+    pub defines: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -162,7 +169,11 @@ fn find_tables(toks: &[Token], needles: &[&str]) -> Vec<SymbolHit> {
         let (Tok::Str(text) | Tok::SystemStr(text)) = &t.tok else { continue };
         for needle in needles {
             if in_text(text, needle) {
-                out.push(SymbolHit { symbol: (*needle).to_string(), line: t.line });
+                out.push(SymbolHit {
+                    symbol: (*needle).to_string(),
+                    line: t.line,
+                    defines: false,
+                });
             }
         }
     }
@@ -182,27 +193,85 @@ fn in_text(text: &str, needle: &str) -> bool {
     })
 }
 
-fn find_symbols(toks: &[Token], needles: &Needles) -> Vec<SymbolHit> {
+fn find_symbols(toks: &[Token], needles: &Needles, lang: Lang) -> Vec<SymbolHit> {
     if needles.is_empty() {
         return Vec::new();
     }
     let mut out = Vec::new();
-    for t in toks {
+    for (i, t) in toks.iter().enumerate() {
         let Tok::Word(word) = &t.tok else { continue };
         // Tra bảng băm thay vì duyệt từng tên: với vài chục tên và vài triệu
         // token thì duyệt tuyến tính là không chạy nổi.
         if let Some(found) = needles.get(word.as_str()) {
-            out.push(SymbolHit { symbol: (*found).to_string(), line: t.line });
+            out.push(SymbolHit {
+                symbol: (*found).to_string(),
+                line: t.line,
+                defines: declares(toks, i, lang),
+            });
             continue;
         }
-        // `builtins.eval` khớp `eval`, `std::ptr::copy` khớp `copy`.
+        // `builtins.eval` khớp `eval`, `std::ptr::copy` khớp `copy`. Tên có
+        // đường dẫn phía trước thì không bao giờ là chỗ khai báo.
         if let Some(tail) = last_segment(word)
             && let Some(found) = needles.get(tail)
         {
-            out.push(SymbolHit { symbol: (*found).to_string(), line: t.line });
+            out.push(SymbolHit { symbol: (*found).to_string(), line: t.line, defines: false });
         }
     }
     out
+}
+
+/// Từ khoá mở đầu một khai báo: token ngay sau chúng là tên vừa được đặt ra.
+///
+/// Danh sách cố ý hẹp. Nhận sót một dạng khai báo thì chỉ mất độ chặt, vì nơi
+/// gọi quay về cách đếm cũ; nhận nhầm một lời gọi thành khai báo thì sinh báo
+/// động giả ngay trong mã của người dùng.
+fn declaring_keywords(lang: Lang) -> &'static [&'static str] {
+    match lang {
+        Lang::TypeScript => {
+            &["function", "class", "interface", "type", "enum", "const", "let", "var", "namespace"]
+        }
+        Lang::Python => &["def", "class"],
+        // Hàm C không có từ khoá mở đầu, nên chỉ nhận được các kiểu dữ liệu.
+        Lang::C => &["struct", "union", "enum", "typedef", "class", "namespace"],
+        Lang::Rust => &[
+            "fn", "struct", "enum", "trait", "type", "const", "static", "union", "mod",
+            "macro_rules",
+        ],
+        Lang::Go => &["func", "type", "const", "var", "package"],
+    }
+}
+
+/// Token thứ `at` có phải là một cái tên vừa được đặt ra không.
+fn declares(toks: &[Token], at: usize, lang: Lang) -> bool {
+    let Some(prev) = at.checked_sub(1).and_then(|i| toks.get(i)) else { return false };
+    match &prev.tok {
+        Tok::Word(keyword) => declaring_keywords(lang).contains(&keyword.as_str()),
+        // `func (r *Repo) Save()` — tên phương thức nằm sau ngoặc nhận.
+        Tok::Punct(')') => lang == Lang::Go && after_go_receiver(toks, at - 1),
+        _ => false,
+    }
+}
+
+/// Dấu `)` ở vị trí `close` có đóng lại ngoặc nhận của một `func` không.
+fn after_go_receiver(toks: &[Token], close: usize) -> bool {
+    let mut depth = 0usize;
+    for i in (0..=close).rev() {
+        match toks[i].tok {
+            Tok::Punct(')') => depth += 1,
+            Tok::Punct('(') => {
+                depth -= 1;
+                if depth == 0 {
+                    return matches!(
+                        i.checked_sub(1).map(|p| &toks[p].tok),
+                        Some(Tok::Word(w)) if w == "func"
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn last_segment(word: &str) -> Option<&str> {

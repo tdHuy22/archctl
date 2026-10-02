@@ -123,3 +123,83 @@ fn repo_nho_thi_khong_ket_luan_gi_ve_do_pho_bien() {
     repo.write("src/web/b.ts", "export function run() {}\n");
     assert_eq!(repo.judge(), (vec![], vec![]));
 }
+
+/// Chỗ **khai báo** là bằng chứng mạnh hơn hẳn một lần gặp bất kỳ. `charge`
+/// được định nghĩa trong Payment nói rằng Payment có năng lực đó; `charge`
+/// xuất hiện trong Web có thể chỉ là một lời gọi sang Payment.
+mod khai_bao {
+    use super::*;
+
+    const ARCH: &str = "\
+component Web     at src/web/**     @human #accepted
+component Payment at src/payment/** @human #accepted
+allow Web -> Payment
+";
+
+    #[test]
+    fn nang_luc_phai_duoc_dinh_nghia_dung_cho_chu_khong_chi_duoc_goi() {
+        let repo = Repo::new(
+            "declared",
+            &format!("{ARCH}\ncontract Web.charge:  @human #accepted\n  verify x\n"),
+        );
+        repo.write("src/payment/pay.ts", "export function charge() {}\n");
+        // Web import và gọi `charge`, nên nó *xuất hiện* ở đây — nhưng năng
+        // lực thì nằm ở Payment.
+        repo.write(
+            "src/web/page.ts",
+            "import { charge } from '../payment/pay'\nexport function checkout() { return charge() }\n",
+        );
+        let (missing, _) = repo.judge();
+        assert_eq!(missing, ["charge"], "chỉ gọi thì không phải là có năng lực đó");
+    }
+
+    #[test]
+    fn dinh_nghia_dung_cho_thi_khong_bi_bao() {
+        let repo = Repo::new(
+            "declared-ok",
+            &format!("{ARCH}\ncontract Payment.charge:  @human #accepted\n  verify x\n"),
+        );
+        repo.write("src/payment/pay.ts", "export function charge() {}\n");
+        repo.write("src/web/page.ts", "import { charge } from '../payment/pay'\n");
+        assert_eq!(repo.judge(), (vec![], vec![]));
+    }
+
+    #[test]
+    fn khong_nhan_ra_dang_khai_bao_thi_quay_ve_cach_dem_cu() {
+        // `Declined` là một khoá trong object literal: nó là định danh thật,
+        // nhưng không có từ khoá khai báo nào đứng trước. Đòi một bằng chứng
+        // mình không biết cách tìm là tự sinh báo động giả, nên phải nới ra.
+        let repo = Repo::new(
+            "no-decl-form",
+            &format!("{ARCH}\ncontract Web.checkout:  @human #accepted\n  errors Declined\n  verify x\n"),
+        );
+        repo.write("src/web/page.ts", "export function checkout() {}\n");
+        repo.write("src/web/errors.ts", "export const codes = { Declined: 402 }\n");
+        assert_eq!(repo.judge(), (vec![], vec![]));
+    }
+
+    #[test]
+    fn ten_khai_bao_khap_noi_van_la_khong_ket_luan_duoc() {
+        let repo = Repo::new("decl-vacuous", &format!("{ARCH}\nflow F:\n  Web -> Payment.run\n"));
+        for i in 0..6 {
+            repo.write(&format!("src/payment/f{i}.ts"), "export function run() {}\n");
+            repo.write(&format!("src/web/f{i}.ts"), "export function run() {}\n");
+        }
+        let (_, vacuous) = repo.judge();
+        assert_eq!(vacuous, ["run"]);
+    }
+
+    #[test]
+    fn goi_khap_noi_nhung_dinh_nghia_mot_cho_thi_ket_luan_duoc() {
+        // Đây là chỗ bằng chứng khai báo thắng hẳn: `run` bị gọi trong mọi
+        // file, nhưng chỉ được đặt ra ở một chỗ.
+        let repo = Repo::new("decl-sharp", &format!("{ARCH}\nflow F:\n  Web -> Payment.run\n"));
+        repo.write("src/payment/core.ts", "export function run() {}\n");
+        for i in 0..6 {
+            repo.write(&format!("src/web/f{i}.ts"), "import { run } from '../payment/core'\nexport const a{i} = run()\n".replace("{i}", &i.to_string()).as_str());
+        }
+        let (missing, vacuous) = repo.judge();
+        assert!(missing.is_empty(), "{missing:?}");
+        assert!(vacuous.is_empty(), "chỉ một chỗ khai báo thì không thể vô nghĩa: {vacuous:?}");
+    }
+}

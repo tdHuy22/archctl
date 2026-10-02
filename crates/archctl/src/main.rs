@@ -373,10 +373,11 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
     for v in &report.vacuous {
         crate::say!("⚠ KIỂM KHÔNG KẾT LUẬN  {} `{}`", v.source, v.name);
         crate::say!(
-            "  {}:{}  — `{}` có trong {}/{} file nên tìm thấy nó không nói lên điều gì",
+            "  {}:{}  — `{}` được {} trong {}/{} file nên tìm thấy nó không nói lên điều gì",
             arch_core::ARCH_FILE,
             v.line,
             v.name,
+            if v.by_declaration { "khai báo" } else { "nhắc tới" },
             v.files,
             v.of
         );
@@ -502,12 +503,13 @@ fn print_json(hash: &str, report: &Report) {
         .iter()
         .map(|v| {
             format!(
-                r#"{{"name":{},"source":{},"line":{},"files":{},"of":{}}}"#,
+                r#"{{"name":{},"source":{},"line":{},"files":{},"of":{},"byDeclaration":{}}}"#,
                 json::string(&v.name),
                 json::string(&v.source),
                 v.line,
                 v.files,
                 v.of,
+                v.by_declaration,
             )
         })
         .collect();
