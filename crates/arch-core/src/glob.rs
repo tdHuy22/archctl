@@ -15,15 +15,52 @@ pub fn matches_any(patterns: &[String], path: &str) -> bool {
     patterns.iter().any(|p| matches(p, path))
 }
 
+/// Khớp tiến dần, chỉ giữ **một** điểm quay lui: điểm sao gần nhất.
+///
+/// Thử mọi cách chia như cách viết đệ quy tự nhiên thì số nhánh tăng theo hàm
+/// mũ: `*a*a*a*a*a*a*a*a*a*a*a*a*b` đối với bốn mươi chữ `a` chạy quá mười
+/// lăm giây. Mẫu là do người dùng — hoặc agent, qua `accept` — viết ra, nên
+/// một mẫu vô tình treo cả `archctl check` trong vòng lặp của agent.
+///
+/// Một điểm quay lui là đủ, vì giữa hai dấu sao mọi thứ phải khớp đúng một
+/// đoạn liên tiếp: chỉ còn một ẩn số là dấu sao trước đó ăn tới đâu.
+macro_rules! wildcard_match {
+    ($pat:expr, $input:expr, $star:expr, $eq:expr) => {{
+        let (pat, input) = ($pat, $input);
+        let (mut p, mut i) = (0usize, 0usize);
+        // `(vị trí sao trong mẫu, vị trí đã thử trong đầu vào)`
+        let mut backtrack: Option<(usize, usize)> = None;
+        loop {
+            if i < input.len() && p < pat.len() && $eq(&pat[p], &input[i]) {
+                p += 1;
+                i += 1;
+            } else if p < pat.len() && $star(&pat[p]) {
+                backtrack = Some((p, i));
+                p += 1;
+            } else if let Some((sp, si)) = backtrack
+                && si < input.len()
+            {
+                // Cho dấu sao ăn thêm một đơn vị rồi thử lại từ sau nó.
+                backtrack = Some((sp, si + 1));
+                p = sp + 1;
+                i = si + 1;
+            } else {
+                return false;
+            }
+            if i == input.len() {
+                return pat[p..].iter().all(|x| $star(x));
+            }
+        }
+    }};
+}
+
 fn match_segments(pat: &[&str], path: &[&str]) -> bool {
-    match pat.split_first() {
-        None => path.is_empty(),
-        Some((&"**", rest)) => (0..=path.len()).any(|skip| match_segments(rest, &path[skip..])),
-        Some((head, rest)) => match path.split_first() {
-            Some((first, tail)) => match_one(head, first) && match_segments(rest, tail),
-            None => false,
-        },
+    // `**` khớp cả khi không có đoạn nào, nên đường dẫn rỗng vẫn có thể khớp.
+    if path.is_empty() {
+        return pat.iter().all(|p| *p == "**");
     }
+    wildcard_match!(pat, path, |p: &&str| *p == "**", |p: &&str, s: &&str| *p != "**"
+        && match_one(p, s))
 }
 
 fn match_one(pattern: &str, segment: &str) -> bool {
@@ -33,15 +70,10 @@ fn match_one(pattern: &str, segment: &str) -> bool {
 }
 
 fn match_chars(pat: &[char], s: &[char]) -> bool {
-    match pat.split_first() {
-        None => s.is_empty(),
-        Some(('*', rest)) => (0..=s.len()).any(|i| match_chars(rest, &s[i..])),
-        Some(('?', rest)) => !s.is_empty() && match_chars(rest, &s[1..]),
-        Some((c, rest)) => match s.split_first() {
-            Some((first, tail)) if first == c => match_chars(rest, tail),
-            _ => false,
-        },
+    if s.is_empty() {
+        return pat.iter().all(|c| *c == '*');
     }
+    wildcard_match!(pat, s, |c: &char| *c == '*', |c: &char, x: &char| *c == '?' || c == x)
 }
 
 #[cfg(test)]
