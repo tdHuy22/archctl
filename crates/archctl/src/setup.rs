@@ -10,6 +10,32 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const ARCHITECTURE_MD: &str = include_str!("../../../templates/ARCHITECTURE.md");
+
+/// Hook chạy sau mỗi lần agent sửa file. Cho thẳng đường dẫn vào `check` nên
+/// chỉ mất khoảng 10ms — đủ nhanh để agent không có cớ bỏ qua.
+const CLAUDE_SETTINGS: &str = r#"{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "archctl check --changed" }
+        ]
+      }
+    ]
+  }
+}
+"#;
+
+const CI_SNIPPET: &str = r#"
+Chạy trong CI để vi phạm mới chặn được pull request:
+
+  - run: archctl check --strict
+
+Và khoá file luật lại bằng CODEOWNERS, để agent không tự duyệt được:
+
+  .arch/**  @ten-cua-ban
+"#;
 const POINTER: &str = "Kiến trúc dự án: đọc `.arch/ARCHITECTURE.md` trước khi viết mã.";
 
 const EMPTY_LAW: &str = "\
@@ -27,7 +53,7 @@ const EMPTY_LAW: &str = "\
 ";
 
 pub fn cmd_init(args: &[String]) -> ExitCode {
-    let parsed = match parse_args(args, &["root"], &["from-code", "force"]) {
+    let parsed = match parse_args(args, &["root"], &["from-code", "force", "no-hooks"]) {
         Ok(a) => a,
         Err(e) => return fail(&e, exit::USAGE),
     };
@@ -85,6 +111,14 @@ pub fn cmd_init(args: &[String]) -> ExitCode {
         crate::say!("  tạo  {rel}");
     }
 
+    if !parsed.has("no-hooks") {
+        match write_hook(&root) {
+            Ok(true) => crate::say!("  tạo  .claude/settings.json  (hook tự kiểm sau mỗi lần sửa)"),
+            Ok(false) => {}
+            Err(e) => eprintln!("  ⚠ .claude/settings.json: {e}"),
+        }
+    }
+
     for pointer in ["AGENTS.md", "CLAUDE.md"] {
         match append_pointer(&root, pointer) {
             Ok(true) => crate::say!("  sửa  {pointer}"),
@@ -106,7 +140,21 @@ pub fn cmd_init(args: &[String]) -> ExitCode {
         crate::say!("  1. Khai báo component trong `{ARCH_FILE}`");
         crate::say!("  2. archctl check");
     }
+    crate::say!("  ·  archctl serve  — xem và sửa trên sơ đồ");
+    crate::say!("{CI_SNIPPET}");
     ExitCode::from(exit::OK)
+}
+
+/// Chỉ tạo khi chưa có file cấu hình. Gộp vào cấu hình sẵn có là việc rủi ro —
+/// đó là file của người dùng, hỏng nó thì hỏng cả phiên làm việc của họ.
+fn write_hook(root: &Path) -> Result<bool, String> {
+    let path = root.join(".claude/settings.json");
+    if path.exists() {
+        return Ok(false);
+    }
+    std::fs::create_dir_all(root.join(".claude")).map_err(|e| e.to_string())?;
+    std::fs::write(&path, CLAUDE_SETTINGS).map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 fn report_discovery(found: &discover::Discovery) {

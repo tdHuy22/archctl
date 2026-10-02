@@ -88,13 +88,14 @@ fn print_usage() {
         "archctl {VERSION} — sơ đồ kiến trúc là luật
 
 Bắt đầu:
-  archctl init [--from-code]              Dựng .arch/ cho dự án
+  archctl init [--from-code] [--no-hooks] Dựng .arch/ cho dự án
   archctl baseline                        Tha vi phạm có sẵn, chỉ chặn cái mới
 
 Lệnh chung:
-  archctl check [--root <dir>] [--json] [--changed] [<file>...]
+  archctl check [--root <dir>] [--json] [--changed] [--strict] [<file>...]
                                           Đối chiếu mã nguồn với luật.
                                           Cho thẳng đường dẫn thì nhanh nhất.
+                                          --strict coi cảnh báo là vi phạm.
   archctl diff [<git-ref>] [--root <dir>] So luật hiện tại với một bản trước
   archctl parse <file.arch>               Chỉ đọc và kiểm tra file luật
   archctl proposals                       Liệt kê đề xuất đang chờ
@@ -152,6 +153,7 @@ fn load_arch(root: &Path, as_json: bool) -> Option<(Document, String)> {
 fn cmd_check(args: &[String]) -> ExitCode {
     let mut as_json = false;
     let mut changed_only = false;
+    let mut strict = false;
     let mut only: Vec<String> = Vec::new();
     let mut root_arg: Option<PathBuf> = None;
     let mut i = 0;
@@ -159,6 +161,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
         match args[i].as_str() {
             "--json" => as_json = true,
             "--changed" => changed_only = true,
+            "--strict" => strict = true,
             "--root" => match args.get(i + 1) {
                 Some(p) => {
                     root_arg = Some(PathBuf::from(p));
@@ -214,7 +217,17 @@ fn cmd_check(args: &[String]) -> ExitCode {
     }
 
     let fresh = arch_core::baseline::split(&report.violations, &memory.baseline).fresh.len();
-    ExitCode::from(if fresh > 0 { exit::VIOLATION } else { exit::OK })
+    // `--strict` coi cảnh báo là vi phạm. Dành cho CI: một import không phân
+    // giải được nghĩa là có một phần mã đang không được kiểm, và trên nhánh
+    // chính thì đó không nên là chuyện bỏ qua được.
+    let unchecked = report.unresolved.len() + report.ambiguous.len();
+    let failed = fresh > 0 || (strict && unchecked > 0);
+    if strict && fresh == 0 && unchecked > 0 {
+        crate::say!(
+            "\n--strict: {unchecked} chỗ không phân giải được, coi như vi phạm"
+        );
+    }
+    ExitCode::from(if failed { exit::VIOLATION } else { exit::OK })
 }
 
 /// Những gì `check` nhớ giữa các lần chạy: kiến trúc có đổi không, và mỗi vi

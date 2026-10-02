@@ -370,3 +370,49 @@ fn khong_co_tsconfig_thi_alias_van_duoc_bao_la_chua_ho_tro() {
     std::fs::write(p.0.join("src/web/page.ts"), "import { x } from '@/bat/ky'\n").unwrap();
     assert!(text(&p.run(&["check"])).contains("alias"), "phải nói rõ vì sao");
 }
+
+#[test]
+fn init_sinh_hook_cho_agent() {
+    let p = Project::new("hooks");
+    std::fs::remove_dir_all(p.0.join(".arch")).unwrap();
+    assert_eq!(code(&p.run(&["init"])), 0);
+    let settings = p.read(".claude/settings.json");
+    assert!(settings.contains("PostToolUse"), "{settings}");
+    assert!(settings.contains("archctl check --changed"), "{settings}");
+}
+
+/// Cấu hình sẵn có là file của người dùng; gộp vào đó là việc rủi ro.
+#[test]
+fn init_khong_dung_vao_cau_hinh_da_co() {
+    let p = Project::new("hooks-keep");
+    std::fs::remove_dir_all(p.0.join(".arch")).unwrap();
+    std::fs::create_dir_all(p.0.join(".claude")).unwrap();
+    std::fs::write(p.0.join(".claude/settings.json"), "{ \"cua-toi\": true }").unwrap();
+    p.run(&["init"]);
+    assert_eq!(p.read(".claude/settings.json"), "{ \"cua-toi\": true }");
+}
+
+#[test]
+fn init_bo_qua_hook_khi_duoc_yeu_cau() {
+    let p = Project::new("no-hooks");
+    std::fs::remove_dir_all(p.0.join(".arch")).unwrap();
+    p.run(&["init", "--no-hooks"]);
+    assert!(!p.0.join(".claude/settings.json").exists());
+}
+
+/// Đoạn CI mà `init` in ra có dùng `--strict`, nên nó phải chạy thật.
+#[test]
+fn strict_coi_import_khong_phan_giai_duoc_la_vi_pham() {
+    let p = Project::new("strict");
+    std::fs::write(p.0.join("src/web/page.ts"), "import { x } from '@/khong/co'\n").unwrap();
+    assert_eq!(code(&p.run(&["check"])), 0, "bình thường chỉ là cảnh báo");
+    let out = p.run(&["check", "--strict"]);
+    assert_eq!(code(&out), 1, "{}", text(&out));
+    assert!(text(&out).contains("--strict"), "{}", text(&out));
+}
+
+#[test]
+fn strict_khong_lam_hong_du_an_sach() {
+    let p = Project::new("strict-clean");
+    assert_eq!(code(&p.run(&["check", "--strict"])), 0);
+}

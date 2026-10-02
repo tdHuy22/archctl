@@ -2,106 +2,150 @@
 
 Sơ đồ kiến trúc là **luật**. AI viết mã. Bộ kiểm chứng đứng giữa.
 
-Con người vẽ kiến trúc, luồng dữ liệu, thuật toán và ràng buộc. Agent lập trình
-có sẵn (Claude Code, opencode, Codex) tự do viết mã, miễn không vi phạm. `archctl`
+Con người vẽ kiến trúc, luồng dữ liệu và ràng buộc. Agent lập trình có sẵn
+(Claude Code, opencode, Codex) tự do viết mã, miễn không vi phạm. `archctl`
 đối chiếu mã với sơ đồ và báo mọi chỗ đi chệch.
 
-## Ba thành phần
-
-| Thành phần | Dạng | Vai trò |
-| --- | --- | --- |
-| `.arch/` | Thư mục file text trong repo người dùng | Nguồn sự thật duy nhất về kiến trúc |
-| `archctl` | CLI | Phân tích mã, đối chiếu luật, báo vi phạm |
-| `archctl serve` | Web app cục bộ | Vẽ sơ đồ, cho người sửa và duyệt |
-
-Không có backend, không API key, không dữ liệu rời khỏi máy.
-
-## Đặc tả
-
-Bản đặc tả đầy đủ (14 mục):
-https://claude.ai/code/artifact/2b26df5d-d6b0-40d0-a398-7e574c7d1387
-
-## Trạng thái
-
-Giai đoạn 1 đang làm. Đã có **parser DSL** và **kiểm luật phụ thuộc** cho
-**TypeScript, Python, C/C++, Rust và Go**.
-
 ```bash
-cargo test                                   # 183 test
-cargo run -p archctl -- check --root examples/sensor
+archctl init --from-code    # dựng bản nháp kiến trúc từ mã đã có
+archctl check               # đối chiếu mã với luật
+archctl serve               # mở sơ đồ tương tác ở 127.0.0.1:4000
 ```
 
-**Áp lên dự án đã có mã:** `archctl init --from-code` đọc repo và dựng bản nháp
-kiến trúc từ import thật — 2000 file mất 190ms. Mọi thứ ở `#draft` nên chưa gì
-bị cưỡng chế; nâng dần từng component lên `#accepted`. `archctl baseline` tha
-vi phạm có sẵn và chỉ chặn vi phạm mới, như cách áp `strict` của TypeScript lên
-dự án đang chạy. Xem [docs/adopt.md](docs/adopt.md).
+## Nó bắt được gì
 
 ```
-kiến trúc d832ca07 · 15 file quét (5 Rust, 4 C/C++, 4 Python, 2 Go) · 7/8 component trong diện kiểm
+kiến trúc c8bd3bd9 · 15 file quét (5 Rust, 4 C/C++, 4 Python, 2 Go) · 7/8 component trong diện kiểm
 
-✗ VI PHẠM  Native -> LibPcap  (bị cấm, #accepted)
+✗ VI PHẠM  Native -> LibPcap  (bị cấm, #locked)
   native/parser.c:6  import 'pcap.h'
   luật: deny * -> LibPcap except Capture
   → gọi Capture thay vì truy cập thẳng LibPcap
 
-✗ VI PHẠM  Capture -> Report  (không được phép, #accepted)
-  src/capture/mod.rs:4  import 'crate::report::Summary'
-  luật: không có allow nào cho Capture -> Report
-  → Capture chỉ được gọi: Decode, LibPcap
+✗ VI PHẠM  Native -> Unsafe  (bị cấm, #locked)
+  native/parser.c:18  dùng `strcpy` (2 lần trong file)
+  → Native chưa được phép dùng nhóm Unsafe
+
+✗ VI PHẠM  ToolsLib -> Captures  (không phải chủ sở hữu, #locked)
+  tools/lib/io.py:8  chạm bảng `packets`
+  → gọi Capture thay vì chạm thẳng vào dữ liệu của nó
 ```
 
-`--json` cho agent đọc. Mã thoát 1 khi có vi phạm, nên dùng được trong CI ngay.
+Bốn loại luật, **năm ngôn ngữ**: TypeScript/JavaScript, Python, C/C++, Rust, Go.
 
-**`archctl serve`** mở sơ đồ tương tác ở `127.0.0.1:4000`: kéo thả, khoá luật
-bằng một cú bấm, duyệt đề xuất tại chỗ, và **tự cập nhật** khi agent sửa mã —
-nhìn sơ đồ là biết nó đang làm tới đâu. Giao diện là một file HTML tự chứa, tự
-vẽ SVG, không framework và không gọi mạng. Xem [docs/serve.md](docs/serve.md).
+| Luật | Kiểm bằng |
+| --- | --- |
+| `allow` / `deny` giữa component | đồ thị import, phân giải theo từng ngôn ngữ |
+| `api` — hàm và từ khoá bị cấm | dò định danh trên dòng token |
+| `store owned_by` — truy cập dữ liệu | dò tên bảng trong chuỗi |
+| trạng thái `#draft`…`#locked` | quyết định luật nào đang có hiệu lực |
 
-`archctl export` xuất sơ đồ Mermaid tĩnh, tuỳ chọn `--violations` phủ vi phạm
-thật lên trên — để commit vào repo hoặc dán vào mô tả pull request.
+## Sơ đồ để thao tác, không chỉ để nhìn
 
-`api` khai báo nhóm hàm và từ khoá bị cấm — `strcpy`, `eval`, `unsafe`. Loại
-luật này **không có vùng mù FFI** như đồ thị import, và vì chạy trên dòng token
-nên chú thích và chuỗi không bao giờ gây báo động giả: trong `examples/sensor`,
-`grep -c strcpy` ra 4, `archctl` báo đúng 2. Xem [docs/api.md](docs/api.md).
+`archctl serve` mở sơ đồ ở `127.0.0.1:4000`: kéo thả, khoá luật bằng một cú
+bấm, duyệt đề xuất tại chỗ. Sơ đồ **tự cập nhật** khi agent sửa mã — nhìn là
+biết nó đang làm tới đâu và chỗ nào đang hỏng.
 
-**Giao thức agent–người** cho agent một lối ra khi gặp luật sai, thay vì chỉ
-có lách hoặc kẹt: `propose` đề xuất thêm luật, `block` báo bế tắc, rồi người
-`accept` hoặc `reject`. Mọi quyết định vào `decisions.md` — và vì agent không
-có trí nhớ giữa các phiên, file đó chặn nó đề xuất lại thứ đã bị từ chối. Xem
-[docs/protocol.md](docs/protocol.md).
+Giao diện là một file HTML tự chứa, tự vẽ SVG, không framework và không gọi
+mạng. Người dùng cuối chỉ cần đúng một binary.
 
-`archctl diff` so luật hiện tại với một bản trước, và **tách thay đổi kiến trúc
-khỏi thay đổi chỉ xê dịch chữ trong file** — người duyệt biết ngay chỗ nào cần
-đọc kỹ. Luật bị hạ xuống mức lỏng hơn được đánh dấu riêng. Xem
-[docs/diff.md](docs/diff.md).
+`archctl export` xuất sơ đồ Mermaid tĩnh để commit vào repo hoặc dán vào mô tả
+pull request; `--violations` phủ vi phạm thật lên trên.
 
-Năm ngôn ngữ dùng chung **một lexer cấu hình được**, biết bỏ qua chú thích,
-chuỗi, char literal, raw string, docstring và regex theo từng ngôn ngữ. Vẫn
-**không có dependency ngoài std**. Binary 457KB. Quét 2000 file mất ~112ms.
+## Agent có lối ra
 
-**Giới hạn lớn nhất:** cạnh liên ngôn ngữ — FFI, liên kết thư viện, con trỏ
-hàm, IPC — không xuất hiện trong bất kỳ câu lệnh import nào nên không bị bắt.
-Ngữ nghĩa và giới hạn đầy đủ: [docs/check.md](docs/check.md).
+Gặp luật sai, agent chỉ còn hai lựa chọn nếu không có gì khác: lách luật một
+cách sáng tạo, hoặc kẹt vô hạn. Giao thức cho nó lối thứ ba.
 
-`archctl check <file>...` quét đúng những file được nêu, mất ~11ms trên dự án
-2000 file — đủ nhanh để chạy trong hook sau mỗi lần agent lưu file.
+```bash
+archctl propose 'allow A -> B' --reason "..."   # agent đề xuất rồi DỪNG
+archctl block --on 'deny * -> X' --reason "..." # agent báo bế tắc
+archctl accept <id> --reason "..."              # người quyết định
+archctl reject <id> --reason "..."
+```
 
-Chưa có: kiểm `flow`, `contract`, `boundary`, `invariant`.
+Agent **không bao giờ ghi** `system.arch` — nó chỉ ghi `proposals.arch`. Một
+file một người ghi thì xung đột ghi đè và vượt quyền bị triệt tiêu bằng cấu
+trúc, không phải bằng cơ chế phát hiện.
 
-## Ghi công
+Mọi quyết định vào `decisions.md` kèm lý do bắt buộc. Agent không có trí nhớ
+giữa các phiên, nên file đó chặn nó đề xuất lại thứ đã bị từ chối — và nó cũng
+chính là ADR tự sinh ra trong lúc làm việc.
 
-Cách phân loại thay đổi trong `archctl diff` lấy ý tưởng từ
-[tt-a1i/archify](https://github.com/tt-a1i/archify) (MIT). Hai dự án bổ sung
-cho nhau: archify biến một spec thành sơ đồ đẹp, archctl đối chiếu spec với mã.
-Không có dòng code nào được sao chép.
+## Áp lên dự án đã có mã
+
+```bash
+archctl init --from-code   # đọc repo, dựng bản nháp, mọi thứ ở #draft
+archctl baseline           # tha vi phạm có sẵn, chỉ chặn cái mới
+```
+
+Component nào có `allow` đang có hiệu lực thì component đó bắt đầu bị kiểm;
+phần còn lại tạm để yên. Không cần mô tả cả repo trước khi có được giá trị nào.
+
+## Chạy trong vòng lặp của agent
+
+`archctl init` sinh sẵn hook chạy sau mỗi lần agent sửa file:
+
+```json
+{ "type": "command", "command": "archctl check --changed" }
+```
+
+| Phạm vi | 2000 file TypeScript |
+| --- | --- |
+| `archctl check` | ~120ms |
+| `archctl check --changed` | ~24ms |
+| `archctl check <file>...` | **~11ms** |
+
+Và trong CI, nơi agent không với tới:
+
+```yaml
+- run: archctl check --strict
+```
+
+## Tính chất
+
+| | |
+| --- | --- |
+| Dependency ngoài std | **0** |
+| Test | 188 |
+| Binary | 832 KB |
+| Khởi động | 3ms |
+
+Không gói ngoài nào cả — kể cả bộ quét import, bộ đọc JSON, máy chủ HTTP và
+engine layout. Công cụ này chạy trong repo của người dùng và trong vòng lặp của
+agent, nên mỗi dependency thêm vào là một bề mặt tấn công thêm.
+
+## Tài liệu
+
+| | |
+| --- | --- |
+| [docs/check.md](docs/check.md) | Ngữ nghĩa kiểm chứng, phân giải từng ngôn ngữ, giới hạn |
+| [docs/api.md](docs/api.md) | Hàm và từ khoá bị cấm |
+| [docs/protocol.md](docs/protocol.md) | Giao thức agent–người |
+| [docs/adopt.md](docs/adopt.md) | `init --from-code` và `baseline` |
+| [docs/serve.md](docs/serve.md) | Sơ đồ tương tác |
+| [docs/diff.md](docs/diff.md) | Tách thay đổi thật khỏi thay đổi hình thức |
+| [docs/toolchain.md](docs/toolchain.md) | Cài và gỡ Rust |
+
+Bản đặc tả đầy đủ:
+https://claude.ai/code/artifact/2b26df5d-d6b0-40d0-a398-7e574c7d1387
+
+## Giới hạn đã biết
+
+- **Cạnh liên ngôn ngữ vô hình.** FFI, liên kết thư viện, con trỏ hàm, IPC đều
+  không xuất hiện trong câu lệnh import nào. Với C/C++ thì `#include` là điều
+  kiện cần nhưng rất xa điều kiện đủ — đó là lý do có `api`.
+- **`flow`, `contract`, `boundary`, `invariant` đọc được nhưng chưa kiểm.** Luật
+  nào không có cách kiểm đều bị cảnh báo là "chỉ là lời hứa".
+- **Đây là lan can, không phải hàng rào an ninh.** Agent chạy được shell nên vẫn
+  ghi đè được file luật. Cưỡng chế thật nằm ở CI, CODEOWNERS trên `.arch/**`, và
+  việc tên người duyệt bị ghi vào nhật ký.
 
 ## Cấu trúc repo
 
 ```
 archctl/
-├── docs/         # đặc tả, ghi chú thiết kế
+├── docs/         # tài liệu
 ├── templates/    # khung .arch/ mà `archctl init` sinh ra
 ├── examples/
 │   ├── shop/     # dự án TypeScript, hai vi phạm cài sẵn
@@ -110,3 +154,10 @@ archctl/
     ├── arch-core/   # parser, mô hình, kiểm chứng, layout, xuất sơ đồ
     └── archctl/     # CLI và máy chủ sơ đồ
 ```
+
+## Ghi công
+
+Cách phân loại thay đổi trong `archctl diff` lấy ý tưởng từ
+[tt-a1i/archify](https://github.com/tt-a1i/archify) (MIT). Hai dự án bổ sung
+cho nhau: archify biến một spec thành sơ đồ đẹp, archctl đối chiếu spec với mã.
+Không có dòng code nào được sao chép.
