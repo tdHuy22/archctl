@@ -6,7 +6,7 @@ Hiện kiểm **luật phụ thuộc giữa component** cho năm ngôn ngữ.
 
 | Ngôn ngữ | Phần mở rộng | Nhận được | Phân giải |
 | --- | --- | --- | --- |
-| TypeScript, JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | `import`, `import type`, `export … from`, `require()`, `import()` | tương đối, `index.*`, `.js`→`.ts`, **alias `paths` trong tsconfig** |
+| TypeScript, JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | `import`, `import type`, `export … from`, `require()`, `import()` | tương đối, `index.*`, `.js`→`.ts`, alias `paths` trong tsconfig, **gói anh em trong workspace npm** |
 | Python | `.py .pyi` | `import a.b`, `import a as b, c`, `from .x import y` | tương đối theo số dấu chấm; tuyệt đối thử gốc, `src/`, `lib/`; **gói không gian tên (PEP 420)** |
 | C, C++ | `.c .h .cc .cpp .cxx .hpp .hh .hxx .inl` | `#include "x"`, `#include <x>` | **thư mục `-I` đọc từ build**; `"…"` ưu tiên thư mục file gọi |
 | Rust | `.rs` | `use`, `pub use`, `use a::{b, c}`, `extern crate` | theo cây module; đọc `Cargo.toml` để biết gốc crate **và các crate anh em trong workspace** |
@@ -87,6 +87,7 @@ tệ hơn hẳn việc nói thẳng là chưa biết.
 | --- | --- |
 | `@/lib/x` khi có `tsconfig.json` khai báo | phân giải theo `paths`; monorepo thì lấy cấu hình gần file gọi nhất |
 | `@/lib/x` khi không có khai báo nào | **báo ra** |
+| `@acme/core` khi `packages/core/package.json` khai tên đó | gói anh em trong workspace — phụ thuộc nội bộ, không phải gói ngoài |
 | `#include "x.h"` không tìm thấy | **báo ra**, có thể nằm trong include path của build |
 | `#include <x.h>` nằm trong một thư mục `-I` của dự án | file của dự án — đúng như trình biên dịch sẽ thấy |
 | `use super::Thing` | module cha — `Thing` là item chứ không phải module |

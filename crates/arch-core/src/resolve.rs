@@ -45,6 +45,11 @@ pub struct Resolver {
     /// Mọi `tsconfig.json` trong dự án, gần nhất trước. Monorepo có nhiều cấu
     /// hình, và alias chỉ có hiệu lực trong phạm vi cấu hình chứa file gọi.
     ts_configs: Vec<TsConfig>,
+    /// Gói trong workspace npm: tên trong `package.json` → thư mục của nó.
+    /// Thiếu bản đồ này thì mọi phụ thuộc giữa các gói anh em đều bị coi là
+    /// gói ngoài, và monorepo nào cũng hiện ra là không có quan hệ nào — chỗ
+    /// mà luật kiến trúc cần nhất.
+    npm_packages: Vec<(String, String)>,
     /// Thư mục include mà build của C/C++ khai báo. Đọc muộn: repo không có
     /// file C nào thì không phải quét tìm `Makefile` làm gì.
     c_includes: OnceCell<Vec<String>>,
@@ -67,6 +72,7 @@ impl Resolver {
             go_module: read_go_module(root),
             rust_crates: find_rust_crates(root),
             ts_configs: find_ts_configs(root),
+            npm_packages: find_npm_packages(root),
             c_includes: OnceCell::new(),
         }
     }
@@ -110,6 +116,9 @@ impl Resolver {
         if let Some(found) = self.ts_alias(importer, spec) {
             return found;
         }
+        if let Some(found) = self.npm_workspace(spec) {
+            return found;
+        }
         // Gói có phạm vi luôn là `@scope/name`, nên phạm vi rỗng là alias —
         // tới đây nghĩa là không có `tsconfig.json` nào khai báo nó.
         if spec.starts_with("@/") || spec.starts_with("~/") || spec.starts_with('#') {
@@ -119,6 +128,26 @@ impl Resolver {
             return Resolved::Alias;
         }
         Resolved::Package(npm_package(spec))
+    }
+
+    /// Gói anh em trong cùng workspace. Lấy tên gói dài nhất khớp, vì
+    /// `@acme/core` và `@acme/core-utils` có thể cùng tồn tại.
+    fn npm_workspace(&self, spec: &str) -> Option<Resolved> {
+        let (name, dir) = self
+            .npm_packages
+            .iter()
+            .filter(|(name, _)| spec == name || spec.starts_with(&format!("{name}/")))
+            .max_by_key(|(name, _)| name.len())?;
+
+        let subpath = spec[name.len()..].trim_start_matches('/');
+        let base = if subpath.is_empty() { dir.clone() } else { format!("{dir}/{subpath}") };
+        let mut candidates = vec![base.clone()];
+        candidates.extend(TS_EXTENSIONS.iter().map(|e| format!("{base}.{e}")));
+        candidates.extend(TS_EXTENSIONS.iter().map(|e| format!("{base}/index.{e}")));
+        candidates.extend(TS_EXTENSIONS.iter().map(|e| format!("{base}/src/index.{e}")));
+        // Không lần ra được file vào thì đích vẫn là gói đó; thư mục của nó đủ
+        // để biết nó thuộc component nào.
+        Some(Resolved::Path(self.first_file(candidates).unwrap_or_else(|| dir.clone())))
     }
 
     /// Thử các mẫu trong `tsconfig.json` gần file gọi nhất. `None` nghĩa là
@@ -413,6 +442,26 @@ fn capture<'a>(spec: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
 /// File có nằm trong phạm vi của thư mục cấu hình không.
 fn within(dir: &str, path: &str) -> bool {
     dir.is_empty() || path.starts_with(&format!("{dir}/"))
+}
+
+/// Tên gói trong mọi `package.json` của dự án. Bỏ qua gói ở ngay gốc: tên đó
+/// ứng với cả repo nên nó sẽ nuốt mọi import.
+fn find_npm_packages(root: &Path) -> Vec<(String, String)> {
+    let mut dirs = Vec::new();
+    collect_dirs_with(root, "", 0, "package.json", &mut dirs);
+    let mut out: Vec<(String, String)> = dirs
+        .iter()
+        .filter(|dir| !dir.is_empty())
+        .filter_map(|dir| {
+            let path = root.join(dir).join("package.json");
+            let text = std::fs::read_to_string(path).ok()?;
+            let name = jsonc::parse(&text)?.get("name")?.as_str()?.to_string();
+            (!name.is_empty()).then_some((name, dir.clone()))
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn find_ts_configs(root: &Path) -> Vec<TsConfig> {

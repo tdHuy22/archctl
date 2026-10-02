@@ -103,6 +103,60 @@ fn python_from_cham_import_tro_vao_chinh_thu_muc_minh() {
     assert!(!unresolved.iter().any(|u| u == "."), "{unresolved:?}");
 }
 
+const TS_ARCH: &str = "\
+component Web  at packages/web/**  @human #accepted
+component Core at packages/core/** @human #accepted
+component O    at o/**             @human #accepted
+allow Web -> O
+";
+
+/// Monorepo npm: `packages/web` gọi sang `packages/core` bằng tên gói.
+fn monorepo(name: &str) -> Repo {
+    let repo = Repo::new(name);
+    repo.write(".arch/system.arch", TS_ARCH)
+        .write("package.json", r#"{"name":"root","workspaces":["packages/*"]}"#)
+        .write("packages/core/package.json", r#"{"name":"@acme/core"}"#)
+        .write("packages/core/src/index.ts", "export const thing = 1\n")
+        .write("packages/core/src/types.ts", "export type T = number\n")
+        .write("packages/web/package.json", r#"{"name":"@acme/web"}"#)
+        .write("packages/web/src/util.ts", "export const u = 1\n")
+        .write(
+            "packages/web/src/page.ts",
+            "import { thing } from '@acme/core'\n\
+             export * from './util'\n\
+             import type { T } from '@acme/core/src/types'\n",
+        );
+    repo
+}
+
+#[test]
+fn goi_anh_em_trong_workspace_npm_la_phu_thuoc_that() {
+    // Trước đây `@acme/core` bị coi là gói bên ngoài chưa khai báo `external`,
+    // nên bị bỏ **trong im lặng**: không cạnh, không cảnh báo, không gì cả.
+    // Monorepo là đúng chỗ luật kiến trúc cần nhất.
+    let (edges, unresolved) = monorepo("npmws").judge();
+    assert_eq!(edges, ["Web -> Core (1)", "Web -> Core (3)"], "{edges:?}");
+    assert!(unresolved.is_empty(), "{unresolved:?}");
+}
+
+#[test]
+fn ten_goi_dai_hon_thang() {
+    // `@acme/core` và `@acme/core-utils` cùng tồn tại thì phải chọn đúng cái.
+    let repo = monorepo("longest");
+    repo.write(".arch/system.arch", &format!("{TS_ARCH}component Utils at packages/core-utils/** @human #accepted\n"))
+        .write("packages/core-utils/package.json", r#"{"name":"@acme/core-utils"}"#)
+        .write("packages/core-utils/src/index.ts", "export const v = 1\n")
+        .write("packages/web/src/page.ts", "import { v } from '@acme/core-utils'\n");
+    assert_eq!(repo.judge().0, ["Web -> Utils (1)"]);
+}
+
+#[test]
+fn goi_ngoai_van_la_goi_ngoai() {
+    let repo = monorepo("external");
+    repo.write("packages/web/src/page.ts", "import x from 'lodash'\n");
+    assert_eq!(repo.judge(), (vec![], vec![]), "gói npm thật không được thành cạnh nội bộ");
+}
+
 #[test]
 fn go_doc_duoc_duong_dan_module_co_so_phien_ban() {
     let repo = Repo::new("gomod");
