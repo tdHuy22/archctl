@@ -6,6 +6,7 @@
 //! dependency thêm vào là một bề mặt tấn công thêm.
 
 pub mod check;
+pub mod diff;
 pub mod diag;
 pub mod glob;
 pub mod json;
@@ -32,11 +33,15 @@ pub fn load(src: &str) -> (Document, Vec<Diag>) {
     (doc, diags)
 }
 
-/// Dấu vân tay của file luật. Mọi đầu ra đều in nó ra, để agent biết kiến trúc
-/// đã đổi kể từ lần kiểm trước và cần đọc lại.
-pub fn arch_hash(src: &str) -> String {
+/// Dấu vân tay của luật. Mọi đầu ra đều in nó ra, để agent biết kiến trúc đã
+/// đổi kể từ lần kiểm trước và cần đọc lại.
+///
+/// Băm **mô hình đã chuẩn hoá**, không phải văn bản: thêm một dòng chú thích
+/// hay đổi thứ tự khai báo thì hash phải giữ nguyên. Báo "kiến trúc đã đổi"
+/// khi không có gì đổi là kêu sói, và agent sẽ học cách phớt lờ cảnh báo.
+pub fn arch_hash(doc: &Document) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in src.bytes() {
+    for b in doc.canonical().bytes() {
         h ^= u64::from(b);
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
@@ -69,12 +74,36 @@ pub fn read_ignores(root: &Path) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::arch_hash;
+    use super::{arch_hash, load};
+
+    fn hash(src: &str) -> String {
+        arch_hash(&load(src).0)
+    }
 
     #[test]
-    fn hash_doi_khi_noi_dung_doi() {
-        assert_ne!(arch_hash("component A"), arch_hash("component B"));
-        assert_eq!(arch_hash("component A"), arch_hash("component A"));
-        assert_eq!(arch_hash("component A").len(), 8);
+    fn hash_doi_khi_luat_doi() {
+        assert_ne!(hash("component A at a/**"), hash("component B at b/**"));
+        assert_eq!(hash("component A at a/**").len(), 8);
+    }
+
+    #[test]
+    fn hash_khong_doi_vi_chu_thich_hay_khoang_trang() {
+        let a = "component A at a/**\ncomponent B at b/**\n";
+        let b = "# ghi chú mới\ncomponent A    at a/**\n\ncomponent B at b/**\n";
+        assert_eq!(hash(a), hash(b), "chú thích và khoảng trắng không phải là luật");
+    }
+
+    #[test]
+    fn hash_khong_doi_vi_thu_tu_khai_bao() {
+        let a = "component A at a/**\ncomponent B at b/**\n";
+        let b = "component B at b/**\ncomponent A at a/**\n";
+        assert_eq!(hash(a), hash(b));
+    }
+
+    #[test]
+    fn hash_doi_khi_trang_thai_doi() {
+        let a = "component A at a/** #accepted";
+        let b = "component A at a/** #locked";
+        assert_ne!(hash(a), hash(b), "đổi trạng thái là đổi luật");
     }
 }

@@ -47,6 +47,11 @@ kiến trúc d832ca07 · 15 file quét (5 Rust, 4 C/C++, 4 Python, 2 Go) · 7/8 
 
 `--json` cho agent đọc. Mã thoát 1 khi có vi phạm, nên dùng được trong CI ngay.
 
+`archctl diff` so luật hiện tại với một bản trước, và **tách thay đổi kiến trúc
+khỏi thay đổi chỉ xê dịch chữ trong file** — người duyệt biết ngay chỗ nào cần
+đọc kỹ. Luật bị hạ xuống mức lỏng hơn được đánh dấu riêng. Xem
+[docs/diff.md](docs/diff.md).
+
 Năm ngôn ngữ dùng chung **một lexer cấu hình được**, biết bỏ qua chú thích,
 chuỗi, char literal, raw string, docstring và regex theo từng ngôn ngữ. Vẫn
 **không có dependency ngoài std**. Binary 457KB. Quét 2000 file mất ~112ms.
@@ -57,6 +62,13 @@ Ngữ nghĩa và giới hạn đầy đủ: [docs/check.md](docs/check.md).
 
 Chưa có: hàm bị cấm (`api`), tsconfig `paths`, `--changed`, kiểm
 `store owned_by`, `propose`, `serve`.
+
+## Ghi công
+
+Cách phân loại thay đổi trong `archctl diff` lấy ý tưởng từ
+[tt-a1i/archify](https://github.com/tt-a1i/archify) (MIT). Hai dự án bổ sung
+cho nhau: archify biến một spec thành sơ đồ đẹp, archctl đối chiếu spec với mã.
+Không có dòng code nào được sao chép.
 
 ## Cấu trúc repo
 

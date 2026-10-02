@@ -158,6 +158,41 @@ pub struct View {
     pub meta: Meta,
 }
 
+/// Một phần tử bất kỳ của mô hình, nhìn dưới dạng chung để so sánh được.
+///
+/// `key` là **danh tính**: hai phần tử cùng `key` ở hai phiên bản là cùng một
+/// thứ. `body` là **nội dung ngữ nghĩa**, không gồm chú thích quản trị và số
+/// dòng. Tách hai thứ này ra là điều kiện để phân biệt được "kiến trúc đổi"
+/// với "chỉ xê dịch trong file".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Element {
+    pub kind: &'static str,
+    pub key: String,
+    pub body: String,
+    pub owner: Owner,
+    pub status: Status,
+    pub line: usize,
+}
+
+impl Element {
+    fn new(kind: &'static str, key: String, body: String, meta: &Meta) -> Self {
+        Element { kind, key, body, owner: meta.owner, status: meta.status, line: meta.line }
+    }
+
+    /// Phần tử có tên riêng thì ghép được giữa hai phiên bản để báo "đã đổi".
+    /// Luật và invariant không có tên, nên thay đổi của chúng hiện thành một
+    /// cặp thêm/bớt — rõ ràng hơn là đoán xem luật nào tương ứng luật nào.
+    pub fn is_named(&self) -> bool {
+        !matches!(self.kind, "rule" | "invariant")
+    }
+}
+
+fn list(items: &[String]) -> String {
+    let mut sorted = items.to_vec();
+    sorted.sort();
+    sorted.join(", ")
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Document {
     pub components: Vec<Component>,
@@ -193,4 +228,99 @@ impl Document {
         self.rules.iter().filter(|r| r.meta.status.is_enforced()).count()
             + self.stores.iter().filter(|s| s.meta.status.is_enforced()).count()
     }
+
+    /// Mọi phần tử dưới dạng chung, để so sánh hai phiên bản và để băm.
+    pub fn elements(&self) -> Vec<Element> {
+        let mut out = Vec::new();
+
+        for c in &self.components {
+            let kind = if c.external { "external" } else { "component" };
+            out.push(Element::new(kind, c.name.clone(), format!("at {}", list(&c.paths)), &c.meta));
+        }
+        for s in &self.stores {
+            out.push(Element::new(
+                "store",
+                s.name.clone(),
+                format!("owned_by {} at {}", s.owned_by, list(&s.tables)),
+                &s.meta,
+            ));
+        }
+        for r in &self.rules {
+            let text = r.one_line();
+            out.push(Element::new("rule", text.clone(), text, &r.meta));
+        }
+        for f in &self.flows {
+            let body = f.lines.iter().map(flow_line_text).collect::<Vec<_>>().join("; ");
+            out.push(Element::new("flow", f.name.clone(), body, &f.meta));
+        }
+        for c in &self.contracts {
+            out.push(Element::new(
+                "contract",
+                format!("{}.{}", c.component, c.capability),
+                fields_text(&c.fields),
+                &c.meta,
+            ));
+        }
+        for b in &self.boundaries {
+            out.push(Element::new(
+                "boundary",
+                b.name.clone(),
+                format!("contains {} · {}", list(&b.contains), fields_text(&b.fields)),
+                &b.meta,
+            ));
+        }
+        for i in &self.invariants {
+            let scope = i.scope.as_deref().unwrap_or("-");
+            let key = format!("invariant {} [{}] {}", i.kind, scope, i.expr);
+            let body = format!("{key} verify {}", list(&i.verify));
+            out.push(Element::new("invariant", key, body, &i.meta));
+        }
+        for v in &self.views {
+            out.push(Element::new("view", v.name.clone(), list(&v.components), &v.meta));
+        }
+
+        out.sort_by(|a, b| (a.kind, &a.key).cmp(&(b.kind, &b.key)));
+        out
+    }
+
+    /// Dạng chuẩn hoá của toàn bộ luật: đã sắp xếp, không có chú thích, không
+    /// có số dòng. Đây là thứ được băm — đổi thứ tự khai báo hay thêm một dòng
+    /// ghi chú thì hash phải giữ nguyên, nếu không agent sẽ bị báo "kiến trúc
+    /// đã đổi" liên tục rồi học cách phớt lờ.
+    pub fn canonical(&self) -> String {
+        self.elements()
+            .iter()
+            .map(|e| {
+                let owner = if e.owner == Owner::Ai { "@ai" } else { "@human" };
+                format!("{}|{}|{}|{owner}|{}", e.kind, e.key, e.body, e.status.as_str())
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+impl Rule {
+    /// Luật viết lại thành một dòng, dùng làm cả danh tính lẫn thông báo.
+    pub fn one_line(&self) -> String {
+        let kind = if self.kind == RuleKind::Allow { "allow" } else { "deny" };
+        let targets: Vec<&str> = self.to.iter().map(Target::as_str).collect();
+        let mut out = format!("{kind} {} -> {}", self.from.as_str(), targets.join(", "));
+        if !self.except.is_empty() {
+            out.push_str(&format!(" except {}", list(&self.except)));
+        }
+        out
+    }
+}
+
+fn flow_line_text(line: &FlowLine) -> String {
+    match line {
+        FlowLine::Sequence(steps) => steps.join(" -> "),
+        FlowLine::Parallel(steps) => format!("parallel: {}", steps.join(", ")),
+        FlowLine::Cond { cond, steps } => format!("if {cond}: {}", steps.join(", ")),
+        FlowLine::OnFail { step, steps } => format!("on_fail({step}): {}", steps.join(", ")),
+    }
+}
+
+fn fields_text(fields: &[Field]) -> String {
+    fields.iter().map(|f| format!("{} {}", f.key, f.values.join(" / "))).collect::<Vec<_>>().join("; ")
 }

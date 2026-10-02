@@ -5,6 +5,7 @@
 //! agent, nên mỗi dependency thêm vào là một bề mặt tấn công thêm.
 
 use arch_core::check::{Reason, Report};
+use arch_core::diff::{Class, Kind};
 use arch_core::diag::{self, Severity};
 use arch_core::model::Status;
 use arch_core::{Document, json};
@@ -28,6 +29,7 @@ fn main() -> ExitCode {
     match command {
         "parse" => cmd_parse(&args[1..]),
         "check" => cmd_check(&args[1..]),
+        "diff" => cmd_diff(&args[1..]),
         "help" | "-h" | "--help" => {
             print_usage();
             ExitCode::from(exit::OK)
@@ -50,9 +52,13 @@ fn print_usage() {
 
 Cách dùng:
   archctl check [--root <dir>] [--json]   Đối chiếu mã nguồn với luật
+  archctl diff [<git-ref>] [--root <dir>] So luật hiện tại với một bản trước
   archctl parse <file.arch>               Chỉ đọc và kiểm tra file luật
   archctl help
   archctl version
+
+`diff` mặc định so với HEAD. Nó tách thay đổi kiến trúc khỏi thay đổi chỉ
+xê dịch chữ trong file, để người duyệt biết chỗ nào cần đọc kỹ.
 
 Gốc dự án là thư mục gần nhất đi lên có chứa .arch/system.arch.
 
@@ -74,8 +80,8 @@ fn load_arch(root: &Path, as_json: bool) -> Option<(Document, String)> {
             return None;
         }
     };
-    let hash = arch_core::arch_hash(&src);
     let (doc, diags) = arch_core::load(&src);
+    let hash = arch_core::arch_hash(&doc);
 
     if diag::has_errors(&diags) {
         if !as_json {
@@ -246,6 +252,124 @@ fn print_json(hash: &str, report: &Report) {
     );
 }
 
+fn cmd_diff(args: &[String]) -> ExitCode {
+    let mut git_ref = "HEAD".to_string();
+    let mut root_arg: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--root" => match args.get(i + 1) {
+                Some(p) => {
+                    root_arg = Some(PathBuf::from(p));
+                    i += 1;
+                }
+                None => {
+                    eprintln!("archctl diff: `--root` thiếu đường dẫn");
+                    return ExitCode::from(exit::USAGE);
+                }
+            },
+            other if other.starts_with('-') => {
+                eprintln!("archctl diff: tham số không nhận ra: `{other}`");
+                return ExitCode::from(exit::USAGE);
+            }
+            other => git_ref = other.to_string(),
+        }
+        i += 1;
+    }
+
+    let start = root_arg.unwrap_or_else(|| PathBuf::from("."));
+    let Some(root) = arch_core::find_root(&start) else {
+        eprintln!("archctl: không tìm thấy `{}`", arch_core::ARCH_FILE);
+        return ExitCode::from(exit::USAGE);
+    };
+
+    let head_src = match std::fs::read_to_string(root.join(arch_core::ARCH_FILE)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("archctl: không đọc được file luật: {e}");
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+    let Some(base_src) = git_show(&root, &git_ref) else {
+        eprintln!(
+            "archctl: không lấy được `{}:{}` từ git.\n\
+             → kiểm tra ref, hoặc dự án chưa commit file luật lần nào",
+            git_ref,
+            arch_core::ARCH_FILE
+        );
+        return ExitCode::from(exit::USAGE);
+    };
+
+    let (base, base_diags) = arch_core::load(&base_src);
+    let (head, head_diags) = arch_core::load(&head_src);
+    for (label, diags) in [("bản trước", &base_diags), ("bản hiện tại", &head_diags)] {
+        if diag::has_errors(diags) {
+            eprintln!("archctl: {label} có lỗi cú pháp, không so sánh được");
+            return ExitCode::from(exit::DSL_INVALID);
+        }
+    }
+
+    let base_hash = arch_core::arch_hash(&base);
+    let head_hash = arch_core::arch_hash(&head);
+    let delta = arch_core::diff::diff(&base, &head);
+
+    if base_hash == head_hash {
+        println!("kiến trúc {head_hash} — không đổi so với {git_ref}");
+        if delta.moved > 0 {
+            println!("{} phần tử chỉ xê dịch trong file, không cần đọc kỹ", delta.moved);
+        }
+        return ExitCode::from(exit::OK);
+    }
+
+    println!("kiến trúc {base_hash} → {head_hash}  (so với {git_ref})\n");
+    for c in &delta.changes {
+        let marker = if c.loosening { '!' } else { c.kind.marker() };
+        print!("{marker} {:<10} {}", c.element_kind, c.key);
+        match (c.kind, &c.before, &c.after) {
+            (Kind::Changed, Some(before), Some(after)) => {
+                println!("\n    {before}\n  → {after}  ({})", c.class.label());
+            }
+            // Luật và invariant lấy chính nội dung làm danh tính, nên in lại
+            // body chỉ là lặp.
+            (_, _, Some(body)) | (_, Some(body), _) if !body.is_empty() && *body != c.key => {
+                println!("\n    {body}  ({})", c.class.label());
+            }
+            _ => println!("  ({})", c.class.label()),
+        }
+    }
+
+    println!(
+        "\n{} cấu trúc · {} ngữ nghĩa · {} quản trị · {} chỉ xê dịch trong file",
+        delta.count(Class::Topology),
+        delta.count(Class::Semantic),
+        delta.count(Class::Governance),
+        delta.moved,
+    );
+    if delta.architectural() == 0 {
+        println!("Không có thay đổi cấu trúc hay ngữ nghĩa nào.");
+    }
+    let loosened: Vec<&str> = delta.loosenings().map(|c| c.key.as_str()).collect();
+    if !loosened.is_empty() {
+        println!("\n! Luật bị nới lỏng: {}  — đọc kỹ chỗ này", loosened.join(", "));
+    }
+    ExitCode::from(exit::OK)
+}
+
+/// Lấy nội dung file luật ở một ref của git. Dùng `git` có sẵn thay vì thư
+/// viện, để giữ cây dependency bằng không.
+fn git_show(root: &Path, git_ref: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("show")
+        // `./` bắt git tính đường dẫn từ thư mục hiện tại, không phải từ gốc
+        // repo — cần thiết khi dự án nằm trong thư mục con của repo.
+        .arg(format!("{git_ref}:./{}", arch_core::ARCH_FILE))
+        .output()
+        .ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 fn cmd_parse(args: &[String]) -> ExitCode {
     let Some(path) = args.first() else {
         eprintln!("archctl parse: thiếu đường dẫn file");
@@ -262,7 +386,7 @@ fn cmd_parse(args: &[String]) -> ExitCode {
 
     let (doc, diags) = arch_core::load(&src);
 
-    println!("{path} · kiến trúc {}\n", arch_core::arch_hash(&src));
+    println!("{path} · kiến trúc {}\n", arch_core::arch_hash(&doc));
     println!(
         "{} component · {} store · {} quan hệ · {} flow · {} contract · {} boundary · {} invariant",
         doc.components.len(),
