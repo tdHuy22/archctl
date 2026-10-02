@@ -1,7 +1,7 @@
 //! Test đầu-tới-cuối trên `examples/sensor`: bốn ngôn ngữ trong một repo,
 //! mỗi ngôn ngữ cài sẵn một vi phạm và vài cái bẫy báo động giả.
 
-use arch_core::check::{Reason, Report, check};
+use arch_core::check::{Reason, Report, Via, check};
 use arch_core::scan::Lang;
 use std::path::{Path, PathBuf};
 
@@ -23,6 +23,7 @@ fn moi_ngon_ngu_bi_bat_dung_mot_vi_pham() {
     let found: Vec<(&str, &str, &str)> = r
         .violations
         .iter()
+        .filter(|v| v.via == Via::Import)
         .map(|v| (v.from.as_str(), v.to.as_str(), v.file.as_str()))
         .collect();
     assert_eq!(
@@ -77,7 +78,9 @@ fn lifetime_cua_rust_khong_lam_bo_sot_use() {
 fn docstring_cua_python_khong_sinh_import_gia() {
     let r = report();
     assert!(
-        !r.violations.iter().any(|v| v.from == "Tools" && v.file.contains("analyze")),
+        !r.violations
+            .iter()
+            .any(|v| v.via == Via::Import && v.from == "Tools" && v.file.contains("analyze")),
         "nhận: {:#?}",
         r.violations
     );

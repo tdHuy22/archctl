@@ -12,7 +12,7 @@ mod python;
 mod rustlang;
 mod ts;
 
-use lexer::{CharLit, LexConfig};
+use lexer::{CharLit, LexConfig, Tok, Token};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Lang {
@@ -92,14 +92,66 @@ impl Lang {
     }
 
     pub fn imports(self, src: &str) -> Vec<Import> {
+        self.scan(src, &[]).imports
+    }
+
+    /// Đọc file một lần, lấy cả import lẫn các ký hiệu đang bị theo dõi.
+    /// Lex là phần tốn nhất, nên không làm hai lượt.
+    pub fn scan(self, src: &str, needles: &[&str]) -> FileScan {
         let toks = lexer::lex(src, &self.config());
-        match self {
+        let imports = match self {
             Lang::TypeScript => ts::extract(&toks),
             Lang::Python => python::extract(&toks),
             Lang::C => clang::extract(&toks),
             Lang::Rust => rustlang::extract(&toks),
             Lang::Go => golang::extract(&toks),
+        };
+        FileScan { imports, symbols: find_symbols(&toks, needles) }
+    }
+}
+
+/// Một lần gặp ký hiệu bị theo dõi trong mã.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolHit {
+    pub symbol: String,
+    pub line: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FileScan {
+    pub imports: Vec<Import>,
+    pub symbols: Vec<SymbolHit>,
+}
+
+fn find_symbols(toks: &[Token], needles: &[&str]) -> Vec<SymbolHit> {
+    if needles.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for t in toks {
+        let Tok::Word(word) = &t.tok else { continue };
+        for needle in needles {
+            if word_matches(word, needle) {
+                out.push(SymbolHit { symbol: (*needle).to_string(), line: t.line });
+            }
         }
+    }
+    out
+}
+
+/// Khớp khi từ đúng bằng ký hiệu, hoặc là ký hiệu đó có tiền tố đủ điều kiện:
+/// `builtins.eval` khớp `eval`, `std::ptr::copy` khớp `copy`.
+///
+/// Điều quan trọng là việc này chạy trên **dòng token**, không phải văn bản
+/// thô. Một `strcpy` nằm trong chú thích hay trong chuỗi sẽ không bao giờ
+/// khớp — thứ mà `grep` không làm được.
+fn word_matches(word: &str, symbol: &str) -> bool {
+    if word == symbol {
+        return true;
+    }
+    match word.strip_suffix(symbol) {
+        Some(prefix) => prefix.ends_with('.') || prefix.ends_with("::"),
+        None => false,
     }
 }
 

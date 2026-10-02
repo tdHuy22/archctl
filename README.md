@@ -27,7 +27,7 @@ Giai đoạn 1 đang làm. Đã có **parser DSL** và **kiểm luật phụ thu
 **TypeScript, Python, C/C++, Rust và Go**.
 
 ```bash
-cargo test                                   # 72 test
+cargo test                                   # 97 test
 cargo run -p archctl -- check --root examples/sensor
 ```
 
@@ -47,6 +47,11 @@ kiến trúc d832ca07 · 15 file quét (5 Rust, 4 C/C++, 4 Python, 2 Go) · 7/8 
 
 `--json` cho agent đọc. Mã thoát 1 khi có vi phạm, nên dùng được trong CI ngay.
 
+`api` khai báo nhóm hàm và từ khoá bị cấm — `strcpy`, `eval`, `unsafe`. Loại
+luật này **không có vùng mù FFI** như đồ thị import, và vì chạy trên dòng token
+nên chú thích và chuỗi không bao giờ gây báo động giả: trong `examples/sensor`,
+`grep -c strcpy` ra 4, `archctl` báo đúng 2. Xem [docs/api.md](docs/api.md).
+
 `archctl diff` so luật hiện tại với một bản trước, và **tách thay đổi kiến trúc
 khỏi thay đổi chỉ xê dịch chữ trong file** — người duyệt biết ngay chỗ nào cần
 đọc kỹ. Luật bị hạ xuống mức lỏng hơn được đánh dấu riêng. Xem
@@ -60,8 +65,8 @@ chuỗi, char literal, raw string, docstring và regex theo từng ngôn ngữ. 
 hàm, IPC — không xuất hiện trong bất kỳ câu lệnh import nào nên không bị bắt.
 Ngữ nghĩa và giới hạn đầy đủ: [docs/check.md](docs/check.md).
 
-Chưa có: hàm bị cấm (`api`), tsconfig `paths`, `--changed`, kiểm
-`store owned_by`, `propose`, `serve`.
+Chưa có: tsconfig `paths`, `--changed`, kiểm `store owned_by`, `propose`,
+`serve`.
 
 ## Ghi công
 

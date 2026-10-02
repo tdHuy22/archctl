@@ -31,8 +31,8 @@ hẳn một test khoá lại điều đó, để giới hạn này không bị q
 
 **Hệ quả cho mã hệ thống và bảo mật:** với C/C++, `#include` là điều kiện cần
 nhưng rất xa điều kiện đủ. Loại luật phù hợp hơn cho các mảng đó là **hàm bị
-cấm** (`api Unsafe at "strcpy", "gets"`), kiểm được hoàn toàn bằng từ vựng và
-không có vùng mù như đồ thị include. Đó là việc tiếp theo.
+cấm** — xem [api.md](api.md). Nó không có vùng mù này, vì một lời gọi `strcpy`
+phải xuất hiện trong mã nguồn thì mới chạy được.
 
 ## Cách một component vào diện kiểm
 

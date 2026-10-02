@@ -41,6 +41,15 @@ pub enum Reason {
     NoAllow,
 }
 
+/// Phụ thuộc được phát hiện bằng cách nào.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Via {
+    /// Câu lệnh import. Không thấy được FFI, liên kết thư viện hay IPC.
+    Import,
+    /// Tên hàm hoặc từ khoá xuất hiện trong mã. Không có vùng mù như import.
+    Symbol,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Violation {
     pub from: String,
@@ -48,6 +57,9 @@ pub struct Violation {
     pub file: String,
     pub line: usize,
     pub spec: String,
+    pub via: Via,
+    /// Số lần gặp trong file. Luôn 1 với import.
+    pub count: usize,
     pub reason: Reason,
     /// Luật bị vi phạm, viết lại thành một dòng.
     pub rule: String,
@@ -130,6 +142,16 @@ pub fn check(root: &Path, doc: &Document, extra_ignores: &[String]) -> Report {
     let resolver = Resolver::new(root);
     let mut counts: Vec<(Lang, usize)> = Vec::new();
 
+    // Ký hiệu cần tìm, và nhóm api chứa mỗi ký hiệu. Một ký hiệu có thể thuộc
+    // nhiều nhóm.
+    let watched = doc.watched_symbols();
+    let needles: Vec<&str> = {
+        let mut v: Vec<&str> = watched.iter().map(|(_, s)| *s).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+
     for path in &files {
         let Some(lang) = Lang::for_path(path) else {
             continue;
@@ -152,9 +174,11 @@ pub fn check(root: &Path, doc: &Document, extra_ignores: &[String]) -> Report {
         let Ok(src) = std::fs::read_to_string(root.join(path)) else {
             continue;
         };
-        for import in lang.imports(&src) {
-            inspect(&resolver, doc, lang, path, from, &import, &mut report);
+        let scan = lang.scan(&src, &needles);
+        for import in &scan.imports {
+            inspect(&resolver, doc, lang, path, from, import, &mut report);
         }
+        inspect_symbols(doc, &watched, path, from, &scan.symbols, &mut report);
     }
 
     counts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
@@ -211,11 +235,59 @@ fn inspect(
             file: path.to_string(),
             line: import.line,
             spec: import.spec.clone(),
+            via: Via::Import,
+            count: 1,
             reason,
             rule,
             status,
-            hint: hint_for(doc, from, &to, reason),
+            hint: hint_for(doc, from, &to, reason, Via::Import),
         });
+    }
+}
+
+/// Mỗi cặp (file, ký hiệu) báo một lần, ở lần gặp đầu tiên, kèm số lần gặp.
+/// In ra từng vị trí một sẽ làm ngập báo cáo khi `strcpy` xuất hiện năm chục
+/// lần trong cùng một file.
+fn inspect_symbols(
+    doc: &Document,
+    watched: &[(&str, &str)],
+    path: &str,
+    from: &str,
+    hits: &[crate::scan::SymbolHit],
+    report: &mut Report,
+) {
+    let mut seen: std::collections::BTreeMap<(&str, &str), (usize, usize)> =
+        std::collections::BTreeMap::new();
+    for hit in hits {
+        for (group, symbol) in watched {
+            if *symbol != hit.symbol {
+                continue;
+            }
+            seen.entry((group, symbol))
+                .and_modify(|(_, n)| *n += 1)
+                .or_insert((hit.line, 1));
+        }
+    }
+
+    for ((group, symbol), (line, count)) in seen {
+        if group == from {
+            continue;
+        }
+        if let Some((reason, rule, status)) = judge(doc, from, group) {
+            report.violations.push(Violation {
+                from: from.to_string(),
+                to: group.to_string(),
+                file: path.to_string(),
+                line,
+                spec: symbol.to_string(),
+                via: Via::Symbol,
+                count,
+                reason,
+                rule,
+                status,
+                hint: hint_for(doc, from, group, reason, Via::Symbol),
+            });
+        }
     }
 }
 
@@ -223,6 +295,14 @@ fn inspect(
 fn judge(doc: &Document, from: &str, to: &str) -> Option<(Reason, String, Status)> {
     if let Some(rule) = matching(doc, RuleKind::Deny, from, to) {
         return Some((Reason::Denied, describe(rule), rule.meta.status));
+    }
+    // `deny * -> X except Y` là miễn trừ cho Y, không chỉ là "deny không áp
+    // dụng". Thiếu bước này thì Y rơi xuống nhánh "không có allow nào" và bị
+    // báo vi phạm, trái hẳn ý người viết.
+    if let Some(rule) = matching_ignoring_except(doc, RuleKind::Deny, from, to)
+        && rule.except.iter().any(|e| e == from)
+    {
+        return None;
     }
     if matching(doc, RuleKind::Allow, from, to).is_some() {
         return None;
@@ -262,12 +342,18 @@ fn opted_in(doc: &Document, component: &str) -> bool {
     })
 }
 
-fn hint_for(doc: &Document, from: &str, to: &str, reason: Reason) -> String {
+fn hint_for(doc: &Document, from: &str, to: &str, reason: Reason, via: Via) -> String {
     if reason == Reason::Denied
         && let Some(rule) = matching_ignoring_except(doc, RuleKind::Deny, from, to)
         && let [only] = rule.except.as_slice()
     {
-        return format!("gọi {only} thay vì truy cập thẳng {to}");
+        return match via {
+            Via::Import => format!("gọi {only} thay vì truy cập thẳng {to}"),
+            Via::Symbol => format!("chỉ {only} được dùng nhóm {to}"),
+        };
+    }
+    if via == Via::Symbol {
+        return format!("{from} chưa được phép dùng nhóm {to}");
     }
     let allowed = allowed_targets(doc, from);
     if allowed.is_empty() {

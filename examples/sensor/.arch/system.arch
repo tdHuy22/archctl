@@ -25,3 +25,13 @@ allow Stream   -> GoNet
 
 # Chỉ Capture được chạm libpcap. Mọi nơi khác phải đi qua nó.
 deny * -> LibPcap except Capture
+
+# Hàm và từ khoá bị theo dõi. Khác với import, nhóm này được tìm thẳng trong
+# dòng token nên không có vùng mù: FFI hay con trỏ hàm đều không giấu được.
+api Unsafe     at "strcpy", "sprintf", "gets", "strcat", "alloca"   @human #locked
+api Danger     at "eval", "pickle"                                  @human #locked
+api RustUnsafe at "unsafe"                                          @human #accepted
+
+deny * -> Unsafe
+deny * -> Danger
+deny * -> RustUnsafe except Decode

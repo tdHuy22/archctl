@@ -10,7 +10,14 @@
 // #include <pcap.h>
 static const char *doc = "#include <pcap.h>";
 
+/* Hai dòng dưới KHÔNG phải lời gọi: strcpy trong chú thích. */
+static const char *warn = "strcpy is unsafe";
+
 int parse_ethernet(const unsigned char *buf, unsigned long len) {
+    char name[32];
+    strcpy(name, "eth0");   /* vi phạm: deny * -> Unsafe */
+    strcpy(name, "eth1");
+    (void)warn;
     (void)doc;
     (void)pcap_lib_version();
     return checksum(buf, len) ? 0 : fprintf(stderr, "bad\n");

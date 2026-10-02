@@ -4,7 +4,7 @@
 //! không. Công cụ này chạy trong repo của người dùng và trong vòng lặp của
 //! agent, nên mỗi dependency thêm vào là một bề mặt tấn công thêm.
 
-use arch_core::check::{Reason, Report};
+use arch_core::check::{Reason, Report, Via};
 use arch_core::diff::{Class, Kind};
 use arch_core::diag::{self, Severity};
 use arch_core::model::Status;
@@ -163,7 +163,13 @@ fn print_human(hash: &str, report: &Report) {
             Reason::NoAllow => "không được phép",
         };
         println!("✗ VI PHẠM  {} -> {}  ({what}, {})", v.from, v.to, v.status.as_str());
-        println!("  {}:{}  import '{}'", v.file, v.line, v.spec);
+        match v.via {
+            Via::Import => println!("  {}:{}  import '{}'", v.file, v.line, v.spec),
+            Via::Symbol if v.count > 1 => {
+                println!("  {}:{}  dùng `{}` ({} lần trong file)", v.file, v.line, v.spec, v.count)
+            }
+            Via::Symbol => println!("  {}:{}  dùng `{}`", v.file, v.line, v.spec),
+        }
         println!("  luật: {}", v.rule);
         println!("  → {}\n", v.hint);
     }
@@ -207,12 +213,17 @@ fn print_json(hash: &str, report: &Report) {
         .iter()
         .map(|v| {
             format!(
-                r#"{{"from":{},"to":{},"file":{},"line":{},"spec":{},"reason":{},"rule":{},"status":{},"hint":{}}}"#,
+                r#"{{"from":{},"to":{},"file":{},"line":{},"spec":{},"via":{},"count":{},"reason":{},"rule":{},"status":{},"hint":{}}}"#,
                 json::string(&v.from),
                 json::string(&v.to),
                 json::string(&v.file),
                 v.line,
                 json::string(&v.spec),
+                json::string(match v.via {
+                    Via::Import => "import",
+                    Via::Symbol => "symbol",
+                }),
+                v.count,
                 json::string(match v.reason {
                     Reason::Denied => "denied",
                     Reason::NoAllow => "no_allow",

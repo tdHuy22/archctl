@@ -13,4 +13,6 @@ note = "import cung_khong_phai"
 
 def main():
     data = read_capture("out.pcap")
-    return np.mean(data)
+    # Vi phạm: deny * -> Danger
+    threshold = eval("1 + 1")
+    return np.mean(data) * threshold

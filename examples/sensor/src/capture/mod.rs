@@ -11,5 +11,10 @@ pub fn label<'a>(p: &'a Packet, sep: char) -> &'a str {
 }
 
 pub fn run() -> Summary {
+    // Vi phạm: deny * -> RustUnsafe except Decode
+    let n = unsafe { COUNT };
+    let _ = n;
     Summary::default()
 }
+
+static mut COUNT: u64 = 0;

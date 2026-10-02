@@ -29,13 +29,14 @@ fn check_unique_names(doc: &Document, diags: &mut Vec<Diag>) {
         .chain(doc.stores.iter().map(|s| (s.name.as_str(), s.meta.line, "store")))
         .chain(doc.boundaries.iter().map(|b| (b.name.as_str(), b.meta.line, "boundary")))
         .chain(doc.flows.iter().map(|f| (f.name.as_str(), f.meta.line, "flow")))
-        .chain(doc.views.iter().map(|v| (v.name.as_str(), v.meta.line, "view")));
+        .chain(doc.views.iter().map(|v| (v.name.as_str(), v.meta.line, "view")))
+        .chain(doc.apis.iter().map(|a| (a.name.as_str(), a.meta.line, "api")));
 
     for (name, line, what) in entries {
         if let Some(first) = seen.insert(name, line) {
             diags.push(
                 Diag::error(line, format!("{what} `{name}` trùng tên đã khai báo ở dòng {first}"))
-                    .with_hint("component, store, boundary, flow và view dùng chung không gian tên"),
+                    .with_hint("component, store, api, boundary, flow và view dùng chung không gian tên"),
             );
         }
     }

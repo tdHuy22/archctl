@@ -150,6 +150,20 @@ pub struct Invariant {
     pub meta: Meta,
 }
 
+/// Nhóm hàm hoặc từ khoá bị theo dõi: `strcpy`, `eval`, `unsafe`.
+///
+/// Khác với `component` và `store`, nhóm này không ánh xạ sang file nào. Nó
+/// được phát hiện ngay trong dòng token, nên **không có vùng mù** như đồ thị
+/// import: FFI, con trỏ hàm hay liên kết thư viện đều không giấu được một lời
+/// gọi `strcpy` nằm trong mã nguồn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Api {
+    pub name: String,
+    /// Tên hàm hoặc từ khoá cần tìm.
+    pub symbols: Vec<String>,
+    pub meta: Meta,
+}
+
 /// Lát cắt để app hiển thị riêng từng phần. Thuần trình bày, không phải luật.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct View {
@@ -203,6 +217,7 @@ pub struct Document {
     pub boundaries: Vec<Boundary>,
     pub invariants: Vec<Invariant>,
     pub views: Vec<View>,
+    pub apis: Vec<Api>,
 }
 
 impl Document {
@@ -214,13 +229,25 @@ impl Document {
         self.stores.iter().find(|s| s.name == name)
     }
 
+    pub fn api(&self, name: &str) -> Option<&Api> {
+        self.apis.iter().find(|a| a.name == name)
+    }
+
+    /// Mọi ký hiệu cần tìm trong mã, kèm nhóm chứa nó.
+    pub fn watched_symbols(&self) -> Vec<(&str, &str)> {
+        self.apis
+            .iter()
+            .flat_map(|a| a.symbols.iter().map(move |s| (a.name.as_str(), s.as_str())))
+            .collect()
+    }
+
     pub fn boundary(&self, name: &str) -> Option<&Boundary> {
         self.boundaries.iter().find(|b| b.name == name)
     }
 
-    /// `allow`/`deny` trỏ tới component hoặc store, nên cả hai đều hợp lệ.
+    /// `allow`/`deny` trỏ tới component, store hoặc nhóm api.
     pub fn knows(&self, name: &str) -> bool {
-        self.component(name).is_some() || self.store(name).is_some()
+        self.component(name).is_some() || self.store(name).is_some() || self.api(name).is_some()
     }
 
     /// Số luật đang có hiệu lực. Dùng cho báo cáo độ phủ.
@@ -277,6 +304,9 @@ impl Document {
         }
         for v in &self.views {
             out.push(Element::new("view", v.name.clone(), list(&v.components), &v.meta));
+        }
+        for a in &self.apis {
+            out.push(Element::new("api", a.name.clone(), list(&a.symbols), &a.meta));
         }
 
         out.sort_by(|a, b| (a.kind, &a.key).cmp(&(b.kind, &b.key)));

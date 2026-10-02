@@ -55,6 +55,10 @@ pub fn parse(src: &str) -> (Document, Vec<Diag>) {
                 parse_view(rest, meta, line.no, &mut doc, &mut diags);
                 i += 1;
             }
+            "api" => {
+                parse_api(rest, meta, line.no, &mut doc, &mut diags);
+                i += 1;
+            }
             "invariant" => {
                 parse_invariant(rest, meta, line.no, &mut doc, &mut diags);
                 i += 1;
@@ -79,7 +83,7 @@ pub fn parse(src: &str) -> (Document, Vec<Diag>) {
                 diags.push(
                     Diag::error(line.no, format!("từ khoá không nhận ra: `{other}`")).with_hint(
                         "từ khoá hợp lệ: component, external, store, allow, deny, \
-                         flow, contract, boundary, invariant, view",
+                         flow, contract, boundary, invariant, view, api",
                     ),
                 );
                 i += 1;
@@ -334,6 +338,25 @@ fn parse_view(rest: &str, meta: Meta, no: usize, doc: &mut Document, diags: &mut
         components: split_list(members),
         meta,
     });
+}
+
+fn parse_api(rest: &str, meta: Meta, no: usize, doc: &mut Document, diags: &mut Vec<Diag>) {
+    let Some((name, symbols)) = rest.split_once(" at ") else {
+        diags.push(
+            Diag::error(no, "`api` thiếu `at`")
+                .with_hint("dạng đúng: api <Tên> at \"strcpy\", \"gets\""),
+        );
+        return;
+    };
+    if !check_ident(name.trim(), "tên api", no, diags) {
+        return;
+    }
+    let symbols = split_list(symbols);
+    if symbols.is_empty() {
+        diags.push(Diag::error(no, format!("api `{}` không liệt kê ký hiệu nào", name.trim())));
+        return;
+    }
+    doc.apis.push(Api { name: name.trim().to_string(), symbols, meta });
 }
 
 fn parse_invariant(rest: &str, meta: Meta, no: usize, doc: &mut Document, diags: &mut Vec<Diag>) {
