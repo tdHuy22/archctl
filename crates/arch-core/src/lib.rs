@@ -5,7 +5,9 @@
 //! này chạy trong repo của người dùng và trong vòng lặp của agent, nên mỗi
 //! dependency thêm vào là một bề mặt tấn công thêm.
 
+pub mod baseline;
 pub mod check;
+pub mod discover;
 pub mod diff;
 pub mod diag;
 pub mod glob;

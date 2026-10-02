@@ -14,6 +14,28 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 mod proto;
+mod setup;
+
+/// In ra stdout, bỏ qua lỗi ghi.
+///
+/// `println!` panic khi stdout đóng sớm, nên `archctl check | head` làm chương
+/// trình vỡ. Một công cụ dòng lệnh không được phép như vậy.
+#[macro_export]
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), $($arg)*);
+    }};
+}
+
+/// Như [`say!`] nhưng không xuống dòng.
+#[macro_export]
+macro_rules! say_inline {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = write!(std::io::stdout(), $($arg)*);
+    }};
+}
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -40,6 +62,8 @@ fn main() -> ExitCode {
         "accept" => proto::cmd_decide(&args[1..], Verdict::Accepted),
         "reject" => proto::cmd_decide(&args[1..], Verdict::Rejected),
         "proposals" => proto::cmd_proposals(&args[1..]),
+        "init" => setup::cmd_init(&args[1..]),
+        "baseline" => setup::cmd_baseline(&args[1..]),
         "help" | "-h" | "--help" => {
             print_usage();
             ExitCode::from(exit::OK)
@@ -57,8 +81,12 @@ fn main() -> ExitCode {
 }
 
 fn print_usage() {
-    println!(
+    crate::say!(
         "archctl {VERSION} — sơ đồ kiến trúc là luật
+
+Bắt đầu:
+  archctl init [--from-code]              Dựng .arch/ cho dự án
+  archctl baseline                        Tha vi phạm có sẵn, chỉ chặn cái mới
 
 Lệnh chung:
   archctl check [--root <dir>] [--json]   Đối chiếu mã nguồn với luật
@@ -104,7 +132,7 @@ fn load_arch(root: &Path, as_json: bool) -> Option<(Document, String)> {
     if diag::has_errors(&diags) {
         if !as_json {
             for d in diags.iter().filter(|d| d.severity == Severity::Error) {
-                println!("✗ {}:{d}", arch_core::ARCH_FILE);
+                crate::say!("✗ {}:{d}", arch_core::ARCH_FILE);
             }
         }
         return None;
@@ -162,7 +190,8 @@ fn cmd_check(args: &[String]) -> ExitCode {
         print_human(&hash, &report, &memory);
     }
 
-    ExitCode::from(if report.has_violations() { exit::VIOLATION } else { exit::OK })
+    let fresh = arch_core::baseline::split(&report.violations, &memory.baseline).fresh.len();
+    ExitCode::from(if fresh > 0 { exit::VIOLATION } else { exit::OK })
 }
 
 /// Những gì `check` nhớ giữa các lần chạy: kiến trúc có đổi không, và mỗi vi
@@ -171,6 +200,9 @@ struct Memory {
     previous_hash: String,
     attempts: std::collections::BTreeMap<String, usize>,
     pending: Vec<(Intent, String, String)>,
+    /// Vi phạm đã có từ trước khi áp luật. Được tha, nhưng vẫn đếm.
+    baseline: std::collections::BTreeSet<String>,
+    baseline_stale: usize,
 }
 
 fn violation_key(v: &arch_core::check::Violation) -> String {
@@ -194,97 +226,123 @@ fn remember(root: &Path, hash: &str, report: &Report) -> Memory {
     let (proposals, _) = protocol::parse_proposals(
         &std::fs::read_to_string(root.join(protocol::PROPOSALS_FILE)).unwrap_or_default(),
     );
+    let baseline = arch_core::baseline::parse(
+        &std::fs::read_to_string(root.join(arch_core::baseline::BASELINE_FILE))
+            .unwrap_or_default(),
+    );
     Memory {
         previous_hash: previous.arch_hash,
         attempts,
         pending: proposals.into_iter().map(|p| (p.intent, p.id, p.statement)).collect(),
+        baseline_stale: arch_core::baseline::stale(&report.violations, &baseline),
+        baseline,
     }
 }
 
 fn print_human(hash: &str, report: &Report, memory: &Memory) {
     // Báo trước mọi thứ khác: agent đang làm theo một bản luật đã cũ.
     if !memory.previous_hash.is_empty() && memory.previous_hash != hash {
-        println!(
+        crate::say!(
             "⚠ Kiến trúc đã thay đổi kể từ lần kiểm trước ({} → {hash})",
             memory.previous_hash
         );
-        println!("  Đọc lại {} trước khi tiếp tục.\n", arch_core::ARCH_FILE);
+        crate::say!("  Đọc lại {} trước khi tiếp tục.\n", arch_core::ARCH_FILE);
     }
 
     let total = report.checked.len() + report.unchecked.len();
     let langs: Vec<String> =
         report.by_lang.iter().map(|(l, n)| format!("{n} {}", l.name())).collect();
-    println!(
+    crate::say!(
         "kiến trúc {hash} · {} file quét ({}) · {}/{total} component trong diện kiểm\n",
         report.files_scanned,
         if langs.is_empty() { "không có file nào hỗ trợ".to_string() } else { langs.join(", ") },
         report.checked.len(),
     );
 
-    for v in &report.violations {
+    let split = arch_core::baseline::split(&report.violations, &memory.baseline);
+    for v in &split.fresh {
         let what = match v.reason {
             Reason::Denied => "bị cấm",
             Reason::NoAllow => "không được phép",
         };
-        println!("✗ VI PHẠM  {} -> {}  ({what}, {})", v.from, v.to, v.status.as_str());
+        crate::say!("✗ VI PHẠM  {} -> {}  ({what}, {})", v.from, v.to, v.status.as_str());
         match v.via {
-            Via::Import => println!("  {}:{}  import '{}'", v.file, v.line, v.spec),
+            Via::Import => crate::say!("  {}:{}  import '{}'", v.file, v.line, v.spec),
             Via::Symbol if v.count > 1 => {
-                println!("  {}:{}  dùng `{}` ({} lần trong file)", v.file, v.line, v.spec, v.count)
+                crate::say!("  {}:{}  dùng `{}` ({} lần trong file)", v.file, v.line, v.spec, v.count)
             }
-            Via::Symbol => println!("  {}:{}  dùng `{}`", v.file, v.line, v.spec),
+            Via::Symbol => crate::say!("  {}:{}  dùng `{}`", v.file, v.line, v.spec),
         }
-        println!("  luật: {}", v.rule);
-        println!("  → {}", v.hint);
+        crate::say!("  luật: {}", v.rule);
+        crate::say!("  → {}", v.hint);
 
         // Thử đi thử lại cùng một chỗ nghĩa là agent không sửa được. Nó cần
         // một lối ra, nếu không nó sẽ đi tìm đường lách.
         match memory.attempts.get(&violation_key(v)).copied().unwrap_or(1) {
             n if n >= protocol::MAX_TRIES => {
-                println!("  ! đã gặp lại {n} lần — không sửa được thì dừng lại và:");
+                crate::say!("  ! đã gặp lại {n} lần — không sửa được thì dừng lại và:");
                 // `deny` có một luật cụ thể để báo bế tắc. `NoAllow` thì không
                 // có luật nào chặn cả — thứ còn thiếu là một `allow`, nên lối
                 // ra đúng là đề xuất thêm nó.
                 match v.reason {
-                    Reason::Denied => println!(
+                    Reason::Denied => crate::say!(
                         "    archctl block --on '{}' --reason \"...\"",
                         v.rule
                     ),
-                    Reason::NoAllow => println!(
+                    Reason::NoAllow => crate::say!(
                         "    archctl propose 'allow {} -> {}' --reason \"...\"",
                         v.from, v.to
                     ),
                 }
             }
-            n if n > 1 => println!("  (lần thứ {n})"),
+            n if n > 1 => crate::say!("  (lần thứ {n})"),
             _ => {}
         }
-        println!();
+        crate::say!();
     }
 
     for u in &report.unresolved {
-        println!("⚠ CHƯA PHÂN GIẢI  '{}'", u.spec);
-        println!("  {}:{}  — {}\n", u.file, u.line, u.reason.describe(u.lang));
+        crate::say!("⚠ CHƯA PHÂN GIẢI  '{}'", u.spec);
+        crate::say!("  {}:{}  — {}\n", u.file, u.line, u.reason.describe(u.lang));
     }
 
     for (file, owners) in &report.ambiguous {
-        println!("⚠ MẪU CHỒNG NHAU  {file} khớp cả {}\n", owners.join(" và "));
+        crate::say!("⚠ MẪU CHỒNG NHAU  {file} khớp cả {}\n", owners.join(" và "));
     }
 
     if !report.unchecked.is_empty() {
-        println!(
+        crate::say!(
             "⚠ CHƯA KIỂM  {} — chưa có allow nào nên tạm để yên",
             report.unchecked.join(", ")
         );
     }
     if report.files_unmapped > 0 {
-        println!("⚠ {} file không thuộc component nào trong sơ đồ", report.files_unmapped);
+        crate::say!("⚠ {} file không thuộc component nào trong sơ đồ", report.files_unmapped);
     }
     if report.rules_deferred > 0 {
-        println!(
+        crate::say!(
             "⚠ {} luật về store chưa kiểm được, cần phân tích truy cập dữ liệu",
             report.rules_deferred
         );
+    }
+
+    if !split.grandfathered.is_empty() {
+        crate::say!(
+            "⊖ {} vi phạm có sẵn từ trước, đang được tha theo `{}`",
+            split.grandfathered.len(),
+            arch_core::baseline::BASELINE_FILE
+        );
+    }
+    // Phải báo kể cả khi không còn mục nào được tha — đó chính là lúc sửa
+    // xong hết, và là lúc đáng siết bánh răng nhất.
+    if memory.baseline_stale > 0 {
+        crate::say!(
+            "⊖ {} mục trong baseline đã sửa xong — chạy `archctl baseline` để siết lại",
+            memory.baseline_stale
+        );
+    }
+    if !split.grandfathered.is_empty() || memory.baseline_stale > 0 {
+        crate::say!();
     }
 
     for (intent, id, statement) in &memory.pending {
@@ -292,7 +350,7 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
             Intent::Rule => "ĐANG CHỜ DUYỆT",
             Intent::Block => "ĐANG CHỜ GỠ BẾ TẮC",
         };
-        println!("⏸ {what}  {id}  {statement}");
+        crate::say!("⏸ {what}  {id}  {statement}");
     }
 
     let warnings = report.unresolved.len()
@@ -300,9 +358,9 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
         + usize::from(!report.unchecked.is_empty())
         + usize::from(report.files_unmapped > 0)
         + usize::from(report.rules_deferred > 0);
-    println!("\n{} vi phạm, {warnings} cảnh báo", report.violations.len());
+    crate::say!("\n{} vi phạm mới, {warnings} cảnh báo", split.fresh.len());
     if !memory.pending.is_empty() {
-        println!("{} đề xuất đang chờ người quyết định — archctl proposals", memory.pending.len());
+        crate::say!("{} đề xuất đang chờ người quyết định — archctl proposals", memory.pending.len());
     }
 }
 
@@ -349,7 +407,7 @@ fn print_json(hash: &str, report: &Report) {
         })
         .collect();
 
-    println!(
+    crate::say!(
         r#"{{"archHash":{},"filesScanned":{},"filesUnmapped":{},"checked":{},"unchecked":{},"rulesDeferred":{},"violations":[{}],"unresolved":[{}]}}"#,
         json::string(hash),
         report.files_scanned,
@@ -424,31 +482,31 @@ fn cmd_diff(args: &[String]) -> ExitCode {
     let delta = arch_core::diff::diff(&base, &head);
 
     if base_hash == head_hash {
-        println!("kiến trúc {head_hash} — không đổi so với {git_ref}");
+        crate::say!("kiến trúc {head_hash} — không đổi so với {git_ref}");
         if delta.moved > 0 {
-            println!("{} phần tử chỉ xê dịch trong file, không cần đọc kỹ", delta.moved);
+            crate::say!("{} phần tử chỉ xê dịch trong file, không cần đọc kỹ", delta.moved);
         }
         return ExitCode::from(exit::OK);
     }
 
-    println!("kiến trúc {base_hash} → {head_hash}  (so với {git_ref})\n");
+    crate::say!("kiến trúc {base_hash} → {head_hash}  (so với {git_ref})\n");
     for c in &delta.changes {
         let marker = if c.loosening { '!' } else { c.kind.marker() };
-        print!("{marker} {:<10} {}", c.element_kind, c.key);
+        crate::say_inline!("{marker} {:<10} {}", c.element_kind, c.key);
         match (c.kind, &c.before, &c.after) {
             (Kind::Changed, Some(before), Some(after)) => {
-                println!("\n    {before}\n  → {after}  ({})", c.class.label());
+                crate::say!("\n    {before}\n  → {after}  ({})", c.class.label());
             }
             // Luật và invariant lấy chính nội dung làm danh tính, nên in lại
             // body chỉ là lặp.
             (_, _, Some(body)) | (_, Some(body), _) if !body.is_empty() && *body != c.key => {
-                println!("\n    {body}  ({})", c.class.label());
+                crate::say!("\n    {body}  ({})", c.class.label());
             }
-            _ => println!("  ({})", c.class.label()),
+            _ => crate::say!("  ({})", c.class.label()),
         }
     }
 
-    println!(
+    crate::say!(
         "\n{} cấu trúc · {} ngữ nghĩa · {} quản trị · {} chỉ xê dịch trong file",
         delta.count(Class::Topology),
         delta.count(Class::Semantic),
@@ -456,11 +514,11 @@ fn cmd_diff(args: &[String]) -> ExitCode {
         delta.moved,
     );
     if delta.architectural() == 0 {
-        println!("Không có thay đổi cấu trúc hay ngữ nghĩa nào.");
+        crate::say!("Không có thay đổi cấu trúc hay ngữ nghĩa nào.");
     }
     let loosened: Vec<&str> = delta.loosenings().map(|c| c.key.as_str()).collect();
     if !loosened.is_empty() {
-        println!("\n! Luật bị nới lỏng: {}  — đọc kỹ chỗ này", loosened.join(", "));
+        crate::say!("\n! Luật bị nới lỏng: {}  — đọc kỹ chỗ này", loosened.join(", "));
     }
     ExitCode::from(exit::OK)
 }
@@ -496,8 +554,8 @@ fn cmd_parse(args: &[String]) -> ExitCode {
 
     let (doc, diags) = arch_core::load(&src);
 
-    println!("{path} · kiến trúc {}\n", arch_core::arch_hash(&doc));
-    println!(
+    crate::say!("{path} · kiến trúc {}\n", arch_core::arch_hash(&doc));
+    crate::say!(
         "{} component · {} store · {} quan hệ · {} flow · {} contract · {} boundary · {} invariant",
         doc.components.len(),
         doc.stores.len(),
@@ -510,19 +568,19 @@ fn cmd_parse(args: &[String]) -> ExitCode {
 
     let locked = doc.components.iter().filter(|c| c.meta.status == Status::Locked).count()
         + doc.rules.iter().filter(|r| r.meta.status == Status::Locked).count();
-    println!("{} luật có hiệu lực · {} trong đó đã khoá\n", doc.enforced_count(), locked);
+    crate::say!("{} luật có hiệu lực · {} trong đó đã khoá\n", doc.enforced_count(), locked);
 
     for d in &diags {
         let mark = if d.severity == Severity::Error { "✗" } else { "⚠" };
-        println!("{mark} {d}");
+        crate::say!("{mark} {d}");
     }
 
     let errors = diag::count(&diags, Severity::Error);
     let warnings = diag::count(&diags, Severity::Warning);
     if errors == 0 && warnings == 0 {
-        println!("không có lỗi, không có cảnh báo");
+        crate::say!("không có lỗi, không có cảnh báo");
     } else {
-        println!("\n{errors} lỗi, {warnings} cảnh báo");
+        crate::say!("\n{errors} lỗi, {warnings} cảnh báo");
     }
 
     ExitCode::from(if errors > 0 { exit::DSL_INVALID } else { exit::OK })

@@ -10,24 +10,42 @@ use arch_core::protocol::{
     self as proto, DECISIONS_FILE, DECISIONS_HEADER, Decision, Intent, PROPOSALS_FILE, Proposal,
     Verdict,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use crate::exit;
 
-/// Phân tích tham số dạng `--cờ giá trị`, phần còn lại là tham số vị trí.
+/// Phân tích tham số: `--cờ giá trị`, `--cờ` không giá trị, phần còn lại là
+/// tham số vị trí.
 pub struct Args {
     pub positional: Vec<String>,
     pub flags: BTreeMap<String, String>,
+    pub bools: BTreeSet<String>,
 }
 
-pub fn parse_args(args: &[String], value_flags: &[&str]) -> Result<Args, String> {
-    let mut out = Args { positional: Vec::new(), flags: BTreeMap::new() };
+impl Args {
+    pub fn has(&self, name: &str) -> bool {
+        self.bools.contains(name)
+    }
+}
+
+pub fn parse_args(
+    args: &[String],
+    value_flags: &[&str],
+    bool_flags: &[&str],
+) -> Result<Args, String> {
+    let mut out =
+        Args { positional: Vec::new(), flags: BTreeMap::new(), bools: BTreeSet::new() };
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
         if let Some(name) = arg.strip_prefix("--") {
+            if bool_flags.contains(&name) {
+                out.bools.insert(name.to_string());
+                i += 1;
+                continue;
+            }
             if !value_flags.contains(&name) {
                 return Err(format!("tham số không nhận ra: `--{name}`"));
             }
@@ -115,7 +133,7 @@ fn load_proposals(root: &Path) -> Result<Vec<Proposal>, String> {
 }
 
 pub fn cmd_propose(args: &[String], intent: Intent) -> ExitCode {
-    let parsed = match parse_args(args, &["reason", "from", "root", "on"]) {
+    let parsed = match parse_args(args, &["reason", "from", "root", "on"], &[]) {
         Ok(a) => a,
         Err(e) => return fail(&e, exit::USAGE),
     };
@@ -150,9 +168,9 @@ pub fn cmd_propose(args: &[String], intent: Intent) -> ExitCode {
     // `decisions.md` tồn tại: agent không có trí nhớ giữa các phiên.
     let decisions = proto::parse_decisions(&read(&root, DECISIONS_FILE));
     if let Some(d) = decisions.iter().rev().find(|d| d.id == id && d.verdict == Verdict::Rejected) {
-        println!("Đề xuất này đã bị từ chối ngày {} bởi {}.", d.date, d.by);
-        println!("Lý do: {}", d.reason);
-        println!("\n→ Đừng đề xuất lại. Tìm hướng khác, hoặc hỏi người dùng.");
+        crate::say!("Đề xuất này đã bị từ chối ngày {} bởi {}.", d.date, d.by);
+        crate::say!("Lý do: {}", d.reason);
+        crate::say!("\n→ Đừng đề xuất lại. Tìm hướng khác, hoặc hỏi người dùng.");
         return ExitCode::from(exit::PENDING);
     }
 
@@ -161,7 +179,7 @@ pub fn cmd_propose(args: &[String], intent: Intent) -> ExitCode {
         Err(e) => return fail(&e, exit::DSL_INVALID),
     };
     if proposals.iter().any(|p| p.id == id) {
-        println!("Đề xuất `{id}` đã có sẵn, đang chờ người duyệt. Không ghi thêm.");
+        crate::say!("Đề xuất `{id}` đã có sẵn, đang chờ người duyệt. Không ghi thêm.");
         return ExitCode::from(exit::PENDING);
     }
 
@@ -179,15 +197,15 @@ pub fn cmd_propose(args: &[String], intent: Intent) -> ExitCode {
     }
 
     match intent {
-        Intent::Rule => println!("Đã ghi đề xuất `{id}`: {statement}"),
-        Intent::Block => println!("Đã báo bế tắc `{id}` tại: {statement}"),
+        Intent::Rule => crate::say!("Đã ghi đề xuất `{id}`: {statement}"),
+        Intent::Block => crate::say!("Đã báo bế tắc `{id}` tại: {statement}"),
     }
-    println!("→ DỪNG phần việc này lại và làm việc khác. Chờ người quyết định.");
+    crate::say!("→ DỪNG phần việc này lại và làm việc khác. Chờ người quyết định.");
     ExitCode::from(exit::PENDING)
 }
 
 pub fn cmd_decide(args: &[String], verdict: Verdict) -> ExitCode {
-    let parsed = match parse_args(args, &["reason", "root"]) {
+    let parsed = match parse_args(args, &["reason", "root"], &[]) {
         Ok(a) => a,
         Err(e) => return fail(&e, exit::USAGE),
     };
@@ -251,24 +269,24 @@ pub fn cmd_decide(args: &[String], verdict: Verdict) -> ExitCode {
         return fail(&e, exit::USAGE);
     }
 
-    println!("{} `{id}`: {}", verdict.label(), proposal.statement);
+    crate::say!("{} `{id}`: {}", verdict.label(), proposal.statement);
     match (verdict, proposal.intent) {
         (Verdict::Accepted, Intent::Rule) => {
-            println!("Đã thêm vào `{}` với `@ai #accepted`.", arch_core::ARCH_FILE)
+            crate::say!("Đã thêm vào `{}` với `@ai #accepted`.", arch_core::ARCH_FILE)
         }
-        (Verdict::Accepted, Intent::Block) => println!(
+        (Verdict::Accepted, Intent::Block) => crate::say!(
             "Đã ghi nhận. Luật chặn vẫn còn — sửa `{}` nếu muốn gỡ.",
             arch_core::ARCH_FILE
         ),
         (Verdict::Rejected, _) => {
-            println!("Đã ghi vào `{DECISIONS_FILE}`. Agent sẽ không đề xuất lại.")
+            crate::say!("Đã ghi vào `{DECISIONS_FILE}`. Agent sẽ không đề xuất lại.")
         }
     }
     ExitCode::from(exit::OK)
 }
 
 pub fn cmd_proposals(args: &[String]) -> ExitCode {
-    let parsed = match parse_args(args, &["root"]) {
+    let parsed = match parse_args(args, &["root"], &[]) {
         Ok(a) => a,
         Err(e) => return fail(&e, exit::USAGE),
     };
@@ -282,7 +300,7 @@ pub fn cmd_proposals(args: &[String]) -> ExitCode {
     };
 
     if proposals.is_empty() {
-        println!("Không có đề xuất nào đang chờ.");
+        crate::say!("Không có đề xuất nào đang chờ.");
         return ExitCode::from(exit::OK);
     }
     for p in &proposals {
@@ -290,14 +308,14 @@ pub fn cmd_proposals(args: &[String]) -> ExitCode {
             Intent::Rule => "ĐỀ XUẤT",
             Intent::Block => "BẾ TẮC ",
         };
-        println!("{what} {}  {}", p.id, p.statement);
-        println!("  lý do: {}", p.reason);
+        crate::say!("{what} {}  {}", p.id, p.statement);
+        crate::say!("  lý do: {}", p.reason);
         if let Some(origin) = &p.origin {
-            println!("  từ:    {origin}");
+            crate::say!("  từ:    {origin}");
         }
-        println!("  ngày:  {}\n", p.date);
+        crate::say!("  ngày:  {}\n", p.date);
     }
-    println!(
+    crate::say!(
         "{} đang chờ. Duyệt: archctl accept <id> --reason \"...\"  ·  Từ chối: archctl reject <id> --reason \"...\"",
         proposals.len()
     );

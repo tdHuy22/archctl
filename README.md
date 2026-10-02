@@ -27,9 +27,15 @@ Giai đoạn 1 đang làm. Đã có **parser DSL** và **kiểm luật phụ thu
 **TypeScript, Python, C/C++, Rust và Go**.
 
 ```bash
-cargo test                                   # 123 test
+cargo test                                   # 136 test
 cargo run -p archctl -- check --root examples/sensor
 ```
+
+**Áp lên dự án đã có mã:** `archctl init --from-code` đọc repo và dựng bản nháp
+kiến trúc từ import thật — 2000 file mất 190ms. Mọi thứ ở `#draft` nên chưa gì
+bị cưỡng chế; nâng dần từng component lên `#accepted`. `archctl baseline` tha
+vi phạm có sẵn và chỉ chặn vi phạm mới, như cách áp `strict` của TypeScript lên
+dự án đang chạy. Xem [docs/adopt.md](docs/adopt.md).
 
 ```
 kiến trúc d832ca07 · 15 file quét (5 Rust, 4 C/C++, 4 Python, 2 Go) · 7/8 component trong diện kiểm

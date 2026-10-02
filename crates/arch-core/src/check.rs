@@ -124,6 +124,14 @@ impl Report {
     }
 }
 
+/// Mọi file thuộc ngôn ngữ đã hỗ trợ, tương đối so với gốc dự án.
+pub fn source_files(root: &Path, extra_ignores: &[String]) -> Vec<String> {
+    let mut files = Vec::new();
+    walk(root, "", extra_ignores, &mut files);
+    files.retain(|f| Lang::for_path(f).is_some());
+    files
+}
+
 pub fn check(root: &Path, doc: &Document, extra_ignores: &[String]) -> Report {
     let mut report = Report::default();
     let mut files = Vec::new();

@@ -206,3 +206,100 @@ fn ngoai_du_an_co_arch_thi_bao_loi_ro_rang() {
     assert_eq!(code(&out), 64);
     assert!(text(&out).contains(".arch/system.arch"), "{}", text(&out));
 }
+
+// ---------- init và baseline ----------
+
+#[test]
+fn init_dung_khung_arch_va_tro_cho_agent() {
+    let p = Project::new("init");
+    std::fs::remove_dir_all(p.0.join(".arch")).unwrap();
+    let out = p.run(&["init"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+
+    for f in [".arch/system.arch", ".arch/proposals.arch", ".arch/decisions.md", ".arch/ARCHITECTURE.md"] {
+        assert!(p.0.join(f).is_file(), "thiếu {f}");
+    }
+    for f in ["AGENTS.md", "CLAUDE.md"] {
+        assert!(p.read(f).contains(".arch/ARCHITECTURE.md"), "{f} không trỏ về hướng dẫn");
+    }
+    assert!(p.read(".gitignore").contains(".arch/.state"));
+}
+
+#[test]
+fn init_khong_de_len_du_an_dang_co() {
+    let p = Project::new("init-guard");
+    let out = p.run(&["init"]);
+    assert_eq!(code(&out), 64, "{}", text(&out));
+    assert!(text(&out).contains("--force"), "{}", text(&out));
+    assert_eq!(p.read(".arch/system.arch"), ARCH, "file luật phải còn nguyên");
+}
+
+#[test]
+fn init_khong_xoa_nhat_ky_quyet_dinh() {
+    let p = Project::new("init-keep-log");
+    std::fs::write(p.0.join(".arch/decisions.md"), "# giữ lại tôi\n").unwrap();
+    assert_eq!(code(&p.run(&["init", "--force"])), 0);
+    assert!(p.read(".arch/decisions.md").contains("giữ lại tôi"), "nhật ký không được mất");
+}
+
+#[test]
+fn init_from_code_dung_component_va_quan_he_tu_ma_that() {
+    let p = Project::new("init-discover");
+    std::fs::remove_dir_all(p.0.join(".arch")).unwrap();
+    for (path, body) in [
+        ("src/web/page.ts", "import { make } from '../order/create'\nexport const p = make\n"),
+        ("src/order/create.ts", "export const make = 1\n"),
+        ("src/order/edit.ts", "export const e = 2\n"),
+    ] {
+        let full = p.0.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, body).unwrap();
+    }
+
+    assert_eq!(code(&p.run(&["init", "--from-code"])), 0);
+    let law = p.read(".arch/system.arch");
+    assert!(law.contains("component Web") && law.contains("at src/web/**"), "{law}");
+    assert!(law.contains("component Order") && law.contains("at src/order/**"), "{law}");
+    assert!(law.contains("allow Web"), "quan hệ thật phải được tìm ra: {law}");
+    assert!(law.contains("-> Order"), "{law}");
+    // Mọi thứ phải ở #draft: đây là mô tả hiện trạng, chưa phải luật. Phần
+    // chú thích có nhắc tới #accepted để hướng dẫn, nên chỉ xét dòng luật.
+    let rules: Vec<&str> = law.lines().filter(|l| !l.trim_start().starts_with('#')).collect();
+    assert!(rules.iter().all(|l| !l.contains("#accepted")), "{law}");
+    assert!(rules.iter().filter(|l| !l.trim().is_empty()).all(|l| l.contains("#draft")), "{law}");
+    assert_eq!(code(&p.run(&["check"])), 0, "chưa luật nào có hiệu lực nên không vi phạm");
+}
+
+#[test]
+fn baseline_tha_vi_pham_cu_va_chan_vi_pham_moi() {
+    let p = Project::new("baseline");
+    // `allow Web -> Order` có sẵn, nên Web đã vào diện kiểm.
+    std::fs::write(p.0.join("src/web/page.ts"), "import { r } from '../report/x'\n").unwrap();
+    std::fs::create_dir_all(p.0.join("src/report")).unwrap();
+    std::fs::write(p.0.join("src/report/x.ts"), "export const r = 1\n").unwrap();
+    assert_eq!(code(&p.run(&["check"])), 1, "vi phạm có sẵn");
+
+    assert_eq!(code(&p.run(&["baseline"])), 0);
+    assert_eq!(code(&p.run(&["check"])), 0, "vi phạm cũ được tha");
+    assert!(text(&p.run(&["check"])).contains("đang được tha"));
+
+    // Vi phạm mới trong file khác thì không được tha.
+    std::fs::write(p.0.join("src/web/other.ts"), "import { r } from '../report/x'\n").unwrap();
+    assert_eq!(code(&p.run(&["check"])), 1, "vi phạm mới phải làm hỏng build");
+}
+
+#[test]
+fn baseline_siet_lai_khi_vi_pham_cu_duoc_sua() {
+    let p = Project::new("ratchet");
+    std::fs::create_dir_all(p.0.join("src/report")).unwrap();
+    std::fs::write(p.0.join("src/report/x.ts"), "export const r = 1\n").unwrap();
+    std::fs::write(p.0.join("src/web/page.ts"), "import { r } from '../report/x'\n").unwrap();
+    p.run(&["baseline"]);
+
+    std::fs::write(p.0.join("src/web/page.ts"), "export const p = 1\n").unwrap();
+    assert!(text(&p.run(&["check"])).contains("đã sửa xong"), "phải nhắc siết lại");
+
+    let out = p.run(&["baseline"]);
+    assert!(text(&out).contains("không quay lại được"), "{}", text(&out));
+    assert!(text(&out).contains("Không còn vi phạm nào"), "{}", text(&out));
+}

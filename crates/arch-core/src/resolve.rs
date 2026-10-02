@@ -31,11 +31,19 @@ const C_INCLUDE_DIRS: &[&str] = &["", "include", "src", "lib"];
 pub struct Resolver {
     root: PathBuf,
     go_module: Option<String>,
+    /// Crate trong cùng workspace: tên dùng trong `use` → thư mục `src` của nó.
+    /// Thiếu bản đồ này thì mọi phụ thuộc giữa các crate anh em đều bị coi là
+    /// gói ngoài, và Rust workspace nào cũng hiện ra là không có quan hệ nào.
+    rust_crates: Vec<(String, String)>,
 }
 
 impl Resolver {
     pub fn new(root: &Path) -> Self {
-        Resolver { root: root.to_path_buf(), go_module: read_go_module(root) }
+        Resolver {
+            root: root.to_path_buf(),
+            go_module: read_go_module(root),
+            rust_crates: find_rust_crates(root),
+        }
     }
 
     pub fn resolve(&self, lang: Lang, importer: &str, import: &Import) -> Resolved {
@@ -169,12 +177,25 @@ impl Resolver {
                 }
             }
             "std" | "core" | "alloc" => return Resolved::Package(parts[0].to_string()),
-            // Edition 2015 cho phép `use some_module::x` trỏ vào chính crate.
-            // Thử trong crate trước, không có thì coi là crate bên ngoài.
-            other => match self.rust_module(&crate_src, &parts) {
-                Some(found) => return Resolved::Path(found),
-                None => return Resolved::Package(other.to_string()),
-            },
+            // Crate anh em trong workspace, rồi tới edition 2015 cho phép
+            // `use some_module::x` trỏ vào chính crate. Hết hai cách đó mới
+            // coi là crate bên ngoài.
+            other => {
+                if let Some((_, src)) = self.rust_crates.iter().find(|(n, _)| n == other) {
+                    let src = src.clone();
+                    parts.remove(0);
+                    return match self.rust_module(&src, &parts) {
+                        Some(found) => Resolved::Path(found),
+                        // Crate anh em có thật nhưng không lần ra module: đích
+                        // vẫn là crate đó, lấy chính thư mục src của nó.
+                        None => Resolved::Path(src),
+                    };
+                }
+                return match self.rust_module(&crate_src, &parts) {
+                    Some(found) => Resolved::Path(found),
+                    None => Resolved::Package(other.to_string()),
+                };
+            }
         };
         match self.rust_module(&base, &parts) {
             Some(found) => Resolved::Path(found),
@@ -231,6 +252,62 @@ impl Resolver {
             None => Resolved::Package(spec.to_string()),
         }
     }
+}
+
+/// Quét `Cargo.toml` để biết workspace có những crate nào. Chỉ cần tên gói,
+/// nên đọc bằng cách dò dòng thay vì kéo thêm một thư viện TOML.
+fn find_rust_crates(root: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    collect_manifests(root, "", 0, &mut out);
+    out
+}
+
+fn collect_manifests(root: &Path, prefix: &str, depth: usize, out: &mut Vec<(String, String)>) {
+    const MAX_DEPTH: usize = 4;
+    const SKIP: &[&str] = &["target", "node_modules", ".git", ".arch", "vendor"];
+
+    if depth > MAX_DEPTH {
+        return;
+    }
+    let dir = if prefix.is_empty() { root.to_path_buf() } else { root.join(prefix) };
+    if let Some(name) = package_name(&dir.join("Cargo.toml")) {
+        let src = if prefix.is_empty() { "src".to_string() } else { format!("{prefix}/src") };
+        if root.join(&src).is_dir() {
+            // `use` viết tên crate với gạch dưới, Cargo.toml viết gạch nối.
+            out.push((name.replace('-', "_"), src));
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else { continue };
+        if SKIP.contains(&name.as_str()) || name.starts_with('.') {
+            continue;
+        }
+        if entry.path().is_dir() {
+            let next = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
+            collect_manifests(root, &next, depth + 1, out);
+        }
+    }
+}
+
+fn package_name(manifest: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(manifest).ok()?;
+    let mut in_package = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if in_package && let Some(value) = line.strip_prefix("name") {
+            return value
+                .trim_start()
+                .strip_prefix('=')
+                .map(|v| v.trim().trim_matches('"').to_string())
+                .filter(|v| !v.is_empty());
+        }
+    }
+    None
 }
 
 fn read_go_module(root: &Path) -> Option<String> {
