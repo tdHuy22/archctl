@@ -96,14 +96,32 @@ fn go_doc_module_tu_go_mod_de_phan_biet_noi_bo_voi_ben_ngoai() {
 }
 
 /// Rust gọi C qua FFI chứ không qua `use`, nên cạnh Decode -> Native vô hình
-/// với mọi phân tích import. Test này khoá lại giới hạn đó để nó không bị quên.
+/// với mọi phân tích import. Nhưng hai đầu mang cùng một cái tên — `extern "C"
+/// { fn parse_ethernet }` bên Rust, `int parse_ethernet(…) {` bên C — và cái
+/// tên đó phải khớp thì chương trình mới liên kết được.
 #[test]
-fn canh_ffi_giua_rust_va_c_khong_duoc_nhin_thay() {
+fn canh_ffi_giua_rust_va_c_duoc_ghep_lai() {
     let r = report();
-    assert!(
-        !r.violations.iter().any(|v| v.from == "Decode" && v.to == "Native"),
-        "nếu test này đổ thì đã phân tích được FFI — cập nhật docs/check.md"
-    );
+    let ffi = r
+        .violations
+        .iter()
+        .find(|v| v.from == "Decode" && v.to == "Native")
+        .unwrap_or_else(|| panic!("thiếu cạnh FFI: {:#?}", r.violations));
+    assert_eq!(ffi.via, Via::Ffi);
+    assert_eq!(ffi.spec, "parse_ethernet");
+    assert_eq!(ffi.file, "src/decode/ethernet.rs");
+    assert_eq!(ffi.reason, Reason::NoAllow, "`.arch` không có allow Decode -> Native");
+}
+
+/// Ghép theo tên nên chỉ đúng khi cái tên thật sự đi qua ranh giới. `summarize`
+/// được định nghĩa trong Rust và không có `extern` nào, nên nó không được sinh
+/// ra cạnh nào cả.
+#[test]
+fn ham_khong_qua_ranh_gioi_thi_khong_sinh_canh_ffi() {
+    let r = report();
+    let ffi: Vec<&str> =
+        r.violations.iter().filter(|v| v.via == Via::Ffi).map(|v| v.spec.as_str()).collect();
+    assert_eq!(ffi, ["parse_ethernet"], "chỉ đúng một cạnh FFI trong fixture");
 }
 
 #[test]

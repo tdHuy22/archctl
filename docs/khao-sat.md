@@ -49,6 +49,9 @@ nhúng nên không trích được text, và máy chưa có `poppler`):
 Giữ nguyên quyết định cũ: **không kiểm thứ tự bước**. Thứ tự thật chỉ kiểm
 được bằng trace runtime.
 
+> **Cả hai việc ở mục dưới đã làm xong** (commit `2f93092` và commit kế tiếp).
+> Mục này giữ lại phần đo đạc đã dẫn tới quyết định.
+
 ## Hai việc làm được, không cần dependency nào
 
 ### 1. Phân biệt định nghĩa với lời gọi

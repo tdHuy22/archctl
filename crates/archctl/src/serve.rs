@@ -360,6 +360,7 @@ fn model_json(root: &Path) -> String {
                     Via::Import => "import",
                     Via::Symbol => "symbol",
                     Via::Table => "table",
+                    Via::Ffi => "ffi",
                 }),
                 v.count,
                 json::string(&v.rule),

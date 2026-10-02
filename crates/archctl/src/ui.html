@@ -535,7 +535,7 @@ const violationCard = (v) => `
   <div class="card bad">
     <h4>${esc(v.from)} → ${esc(v.to)}</h4>
     <p class="where mono">${esc(v.file)}:${v.line}${v.count > 1 ? ` · ${v.count} lần` : ""}</p>
-    <p class="mono">${esc(v.via === "import" ? `import '${v.spec}'` : v.via === "table" ? `bảng '${v.spec}'` : `dùng '${v.spec}'`)}</p>
+    <p class="mono">${esc(v.via === "import" ? `import '${v.spec}'` : v.via === "table" ? `bảng '${v.spec}'` : v.via === "ffi" ? `gọi '${v.spec}' qua ranh giới ngôn ngữ` : `dùng '${v.spec}'`)}</p>
     <p class="muted">${esc(v.rule)}</p>
     <p class="hint">→ ${esc(v.hint)}</p>
   </div>`;

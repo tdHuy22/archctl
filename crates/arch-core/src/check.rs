@@ -54,6 +54,9 @@ pub enum Via {
     Symbol,
     /// Tên bảng dữ liệu, tìm trong định danh và trong chuỗi.
     Table,
+    /// Lời gọi qua ranh giới ngôn ngữ: `extern "C"` của Rust, `C.x` của Go,
+    /// ghép với định nghĩa cùng tên ở phía C.
+    Ffi,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,6 +239,11 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
         std::collections::BTreeMap::new();
     // Mẫu số cho việc xét một cái tên có quá phổ biến để nói lên điều gì không.
     let mut symbol_scanned = 0usize;
+    // Hai đầu của một cạnh liên ngôn ngữ, ghép lại sau khi quét xong: một bên
+    // khai báo `extern "C" { fn x }`, bên kia định nghĩa `x`.
+    let mut ffi_calls: Vec<(String, String, crate::scan::SymbolHit)> = Vec::new();
+    let mut ffi_provides: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
     fn as_refs(v: &[String]) -> Vec<&str> {
         v.iter().map(String::as_str).collect()
     }
@@ -274,6 +282,22 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
         inspect_hits(doc, &watched, path, from, &scan.symbols, Via::Symbol, &mut report);
         inspect_hits(doc, &tables, path, from, &scan.tables, Via::Table, &mut report);
 
+        for call in &scan.foreign.calls {
+            ffi_calls.push((from.clone(), path.clone(), call.clone()));
+        }
+        for provided in &scan.foreign.provides {
+            // Cùng một tên được hai component cung cấp thì không biết chọn
+            // đâu, nên bỏ cả hai: đoán sai sinh ra một cạnh không có thật.
+            ffi_provides
+                .entry(provided.symbol.clone())
+                .and_modify(|owner| {
+                    if owner != from {
+                        owner.clear();
+                    }
+                })
+                .or_insert_with(|| from.clone());
+        }
+
         for hit in &scan.symbols {
             if let Some(name) = needle_set.get(hit.symbol.as_str()) {
                 sightings.entry(*name).or_default().push(Sighting {
@@ -286,6 +310,7 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
         }
     }
 
+    judge_ffi(doc, &ffi_calls, &ffi_provides, &mut report);
     judge_expectations(&expectations, &sightings, symbol_scanned, &mut report);
 
     counts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
@@ -295,6 +320,41 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
     report.unresolved.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
     report.oversized.sort();
     report
+}
+
+/// Ghép hai đầu của một lời gọi qua ranh giới ngôn ngữ.
+///
+/// Tên nào không ghép được thì im lặng bỏ qua: đó là hàm của thư viện hệ
+/// thống, hoặc — khi chỉ quét một phần repo — phía cung cấp nằm ngoài tập
+/// file đang xét.
+fn judge_ffi(
+    doc: &Document,
+    calls: &[(String, String, crate::scan::SymbolHit)],
+    provides: &std::collections::BTreeMap<String, String>,
+    report: &mut Report,
+) {
+    for (from, file, call) in calls {
+        let Some(to) = provides.get(&call.symbol).filter(|owner| !owner.is_empty()) else {
+            continue;
+        };
+        if to == from {
+            continue;
+        }
+        let Some((reason, rule, status)) = judge(doc, from, to) else { continue };
+        report.violations.push(Violation {
+            from: from.clone(),
+            to: to.clone(),
+            file: file.clone(),
+            line: call.line,
+            spec: call.symbol.clone(),
+            via: Via::Ffi,
+            count: 1,
+            reason,
+            rule,
+            status,
+            hint: hint_for(doc, from, to, reason, Via::Ffi),
+        });
+    }
 }
 
 /// Một lần gặp một cái tên trong mã.
@@ -606,7 +666,7 @@ fn hint_for(doc: &Document, from: &str, to: &str, reason: Reason, via: Via) -> S
     {
         return match via {
             Via::Import => format!("gọi {only} thay vì truy cập thẳng {to}"),
-            Via::Symbol | Via::Table => format!("chỉ {only} được dùng {to}"),
+            Via::Symbol | Via::Table | Via::Ffi => format!("chỉ {only} được dùng {to}"),
         };
     }
     if reason == Reason::NotOwner

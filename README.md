@@ -37,6 +37,7 @@ kiến trúc c8bd3bd9 · 15 file quét (5 Rust, 4 C/C++, 4 Python, 2 Go) · 7/8 
 | --- | --- |
 | `allow` / `deny` giữa component | đồ thị import, phân giải theo từng ngôn ngữ (C/C++ đọc `-I` từ build) |
 | `api` — hàm và từ khoá bị cấm | dò định danh trên dòng token |
+| cạnh FFI | `extern "C"` và `C.x` ghép với định nghĩa hàm C |
 | `store owned_by` — truy cập dữ liệu | dò tên bảng trong chuỗi |
 | `boundary ... contain` — lỗi không được lọt ra ngoài vùng | dò định danh ngoài vùng |
 | `flow`, `contract`, `invariant state` | mọi tên khai báo phải tồn tại trong mã |
@@ -116,7 +117,7 @@ Và trong CI, nơi agent không với tới:
 | | |
 | --- | --- |
 | Dependency ngoài std | **0** |
-| Test | 262 |
+| Test | 278 |
 | Binary | 945 KB |
 | Khởi động | 3ms |
 
@@ -143,9 +144,10 @@ https://claude.ai/code/artifact/2b26df5d-d6b0-40d0-a398-7e574c7d1387
 
 ## Giới hạn đã biết
 
-- **Cạnh liên ngôn ngữ vô hình.** FFI, liên kết thư viện, con trỏ hàm, IPC đều
-  không xuất hiện trong câu lệnh import nào. Với C/C++ thì `#include` là điều
-  kiện cần nhưng rất xa điều kiện đủ — đó là lý do có `api`.
+- **Một phần cạnh liên ngôn ngữ vẫn vô hình.** `extern "C"` của Rust và `C.x`
+  của Go ghép được với định nghĩa hàm C. Nhưng `dlopen`, con trỏ hàm, `ctypes`
+  của Python và IPC thì không — với C/C++ thì `#include` là điều kiện cần
+  nhưng rất xa điều kiện đủ, và đó là lý do có `api`.
 - **File trên 4 MB không được dò**, và được báo ra. Bộ dò giữ cả dãy token
   trong bộ nhớ, nên một bundle đã minify 32 MB ngốn hơn một gigabyte.
 - **Thứ tự bước trong `flow` chưa kiểm.** Bộ quét không phân biệt được lời gọi

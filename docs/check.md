@@ -16,18 +16,65 @@ Mọi ngôn ngữ dùng chung một lexer cấu hình được. Nó biết bỏ 
 chuỗi, char literal, raw string, docstring và regex theo từng ngôn ngữ — đó là
 chỗ dễ sai nhất, nên chỉ viết một lần.
 
-## Giới hạn lớn nhất: cạnh liên ngôn ngữ vô hình
+## Cạnh liên ngôn ngữ
 
-Phân tích import chỉ thấy được phụ thuộc **trong cùng một ngôn ngữ**. Các loại
-sau không xuất hiện ở bất kỳ câu lệnh import nào, nên bộ kiểm chứng không thấy:
+Phân tích import chỉ thấy phụ thuộc **trong cùng một ngôn ngữ**. Rust gọi C
+không qua câu lệnh import nào.
 
-- **FFI** — Rust gọi C qua `extern "C"`, Python gọi qua `ctypes` hay `cffi`
-- **Liên kết** — thư viện tĩnh và động, kể cả `dlopen`
+Nhưng một phần lớn FFI viết tay là **khai báo tường minh**:
+
+```rust
+// src/decode/ethernet.rs
+unsafe extern "C" {
+    fn parse_ethernet(buf: *const u8, len: usize) -> i32;
+}
+```
+```c
+// native/parser.c
+int parse_ethernet(const unsigned char *buf, unsigned long len) {
+```
+
+Hai đầu mang cùng một cái tên, và cái tên đó phải khớp thì chương trình mới
+liên kết được. Ghép chúng lại là ra cạnh — không cần đọc binary, không cần
+bảng ký hiệu:
+
+```
+✗ VI PHẠM  Decode -> Native  (không được phép, #accepted)
+  src/decode/ethernet.rs:4  gọi `parse_ethernet` qua ranh giới ngôn ngữ
+```
+
+| Bên gọi | Nhận bằng |
+| --- | --- |
+| Rust | `extern "C" { fn x; }` — ABI nào cũng được |
+| Go | `import "C"` rồi `C.x` |
+| Bên cung cấp | |
+| C, C++ | định nghĩa hàm ở mức ngoài cùng |
+| Rust | `pub extern "C" fn x` |
+
+Ghép theo tên, nên nó thận trọng ở mấy chỗ:
+
+- **Khai báo trước không phải là cung cấp.** `int f(void);` kết thúc bằng `;`
+  chứ không mở thân hàm.
+- **Lời gọi lồng trong thân hàm khác không phải là định nghĩa.** Chỉ xét khi
+  độ sâu ngoặc nhọn bằng 0.
+- **Hai component cùng cung cấp một tên thì bỏ cả hai.** Không biết chọn đâu,
+  mà đoán sai sinh ra một cạnh không có thật.
+- **Không ghép được thì im lặng.** `memcpy` nằm trong libc, không có định
+  nghĩa nào trong repo. FFI tới thư viện hệ thống là chuyện thường.
+- **`C.CString`, `C.int` của cgo tự rụng**, vì chúng không khớp định nghĩa nào
+  trong repo.
+
+### Vẫn còn vô hình
+
+- **Liên kết động** — `dlopen` cộng tên hàm dựng lúc chạy
 - **Con trỏ hàm và vtable**
+- **`ctypes` và `cffi` của Python** — tên hàm nằm trong chuỗi, và thư viện
+  được chọn lúc chạy
 - **Tiến trình con, syscall, IPC, mạng**
 
-Trong `examples/sensor`, cạnh `Decode -> Native` là FFI nên không bị bắt. Có
-hẳn một test khoá lại điều đó, để giới hạn này không bị quên.
+`archctl check --changed` chỉ ghép trong tập file đang xét, nên nó có thể bỏ
+sót cạnh liên ngôn ngữ khi phía cung cấp không nằm trong tập. Lần quét đầy đủ
+— và CI — vẫn thấy.
 
 **Hệ quả cho mã hệ thống và bảo mật:** với C/C++, `#include` là điều kiện cần
 nhưng rất xa điều kiện đủ. Loại luật phù hợp hơn cho các mảng đó là **hàm bị

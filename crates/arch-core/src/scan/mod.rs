@@ -7,6 +7,7 @@
 pub mod lexer;
 
 mod clang;
+pub mod foreign;
 mod golang;
 mod python;
 mod rustlang;
@@ -124,6 +125,7 @@ impl Lang {
             imports,
             symbols: find_symbols(&toks, needles, self),
             tables: find_tables(&toks, tables),
+            foreign: foreign::scan(&toks, self),
         }
     }
 }
@@ -147,6 +149,8 @@ pub struct FileScan {
     pub imports: Vec<Import>,
     pub symbols: Vec<SymbolHit>,
     pub tables: Vec<SymbolHit>,
+    /// Hàm đi qua ranh giới ngôn ngữ — thứ mà câu lệnh import không nói gì.
+    pub foreign: foreign::Foreign,
 }
 
 /// Tìm tên bảng, **chỉ trong chuỗi**.

@@ -328,6 +328,10 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
                 crate::say!("  {}:{}  dùng `{}` ({} lần trong file)", v.file, v.line, v.spec, v.count)
             }
             Via::Symbol => crate::say!("  {}:{}  dùng `{}`", v.file, v.line, v.spec),
+            Via::Ffi => crate::say!(
+                "  {}:{}  gọi `{}` qua ranh giới ngôn ngữ",
+                v.file, v.line, v.spec
+            ),
         }
         crate::say!("  luật: {}", v.rule);
         crate::say!("  → {}", v.hint);
@@ -469,6 +473,7 @@ fn print_json(hash: &str, report: &Report) {
                     Via::Import => "import",
                     Via::Symbol => "symbol",
                     Via::Table => "table",
+                    Via::Ffi => "ffi",
                 }),
                 v.count,
                 json::string(match v.reason {
