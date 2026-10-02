@@ -98,12 +98,12 @@ phần còn lại tạm để yên. Không cần mô tả cả repo trước khi
 
 | Phạm vi | 2000 file TypeScript, 7.8 MB |
 | --- | --- |
-| `archctl check` | 65ms |
-| `archctl check --changed` | 28ms |
-| `archctl check <file>...` | **13ms** |
+| `archctl check` | 58ms |
+| `archctl check --changed` | 25ms |
+| `archctl check <file>...` | **11ms** |
 
-Đo bằng trung vị của chín lần chạy, tính cả thời gian khởi động tiến trình —
-hai hàng dưới gần như chỉ còn phần đó.
+Đo bằng trung vị của 21 lần chạy, tính cả thời gian khởi động tiến trình — hai
+hàng dưới gần như chỉ còn phần đó.
 
 Và trong CI, nơi agent không với tới:
 

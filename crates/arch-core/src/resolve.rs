@@ -49,7 +49,11 @@ pub struct Resolver {
     /// Thiếu bản đồ này thì mọi phụ thuộc giữa các gói anh em đều bị coi là
     /// gói ngoài, và monorepo nào cũng hiện ra là không có quan hệ nào — chỗ
     /// mà luật kiến trúc cần nhất.
-    npm_packages: Vec<(String, String)>,
+    ///
+    /// Đọc muộn như `c_includes`: chỉ cần tới khi gặp một import không tương
+    /// đối và không khớp alias nào, nên repo không phải TypeScript không tốn
+    /// gì cả.
+    npm_packages: OnceCell<Vec<(String, String)>>,
     /// Thư mục include mà build của C/C++ khai báo. Đọc muộn: repo không có
     /// file C nào thì không phải quét tìm `Makefile` làm gì.
     c_includes: OnceCell<Vec<String>>,
@@ -72,7 +76,7 @@ impl Resolver {
             go_module: read_go_module(root),
             rust_crates: find_rust_crates(root),
             ts_configs: find_ts_configs(root),
-            npm_packages: find_npm_packages(root),
+            npm_packages: OnceCell::new(),
             c_includes: OnceCell::new(),
         }
     }
@@ -135,6 +139,7 @@ impl Resolver {
     fn npm_workspace(&self, spec: &str) -> Option<Resolved> {
         let (name, dir) = self
             .npm_packages
+            .get_or_init(|| find_npm_packages(&self.root))
             .iter()
             .filter(|(name, _)| spec == name || spec.starts_with(&format!("{name}/")))
             .max_by_key(|(name, _)| name.len())?;
