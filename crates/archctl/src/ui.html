@@ -156,9 +156,11 @@ function fitToView() {
   const maxX = Math.max(...model.nodes.map((n) => n.x + NODE_W)) + pad;
   const maxY = Math.max(...model.nodes.map((n) => n.y + NODE_H)) + pad;
   const box = canvas.getBoundingClientRect();
-  // Có sàn: thu nhỏ quá thì chữ không đọc được, thà để người kéo còn hơn.
+  // Sàn thấp, vì thấy toàn cảnh quan trọng hơn đọc được chữ. Một sơ đồ 24
+  // component rộng gấp sáu lần khung nhìn: giữ sàn cao thì người mở ra chỉ
+  // thấy một góc và không biết còn gì ở ngoài. Chữ nhỏ quá thì ẩn đi.
   const fit = Math.min(box.width / (maxX - minX), box.height / (maxY - minY));
-  view.k = Math.min(1.1, Math.max(0.6, fit));
+  view.k = Math.min(1.1, Math.max(0.2, fit));
   view.x = (box.width - (maxX - minX) * view.k) / 2 - minX * view.k;
   view.y = (box.height - (maxY - minY) * view.k) / 2 - minY * view.k;
 }
@@ -328,7 +330,8 @@ function drawEdge(root, e, broken) {
     opacity: violation ? 1 : draft ? 0.6 : 0.85,
   }));
 
-  const label = violation ? (e.count > 1 ? `${e.count} vi phạm` : "vi phạm") : e.kind === "deny" ? "cấm" : "";
+  const label = view.k < 0.45 ? ""
+    : violation ? (e.count > 1 ? `${e.count} vi phạm` : "vi phạm") : e.kind === "deny" ? "cấm" : "";
   if (label) {
     const mx = mid.x;
     let my = mid.y;
@@ -369,18 +372,24 @@ function drawNode(root, n, broken) {
   g.append(shape);
 
   const cx = n.x + NODE_W / 2;
-  g.append(el("text", {
-    x: cx, y: n.y + (n.sub ? 24 : 32), "text-anchor": "middle", "font-size": 13,
-    "font-weight": 600, fill: faulty ? "var(--bad)" : "var(--ink)",
-  }, n.name.length > 20 ? n.name.slice(0, 19) + "…" : n.name));
-  if (n.sub) {
+  // Dưới các mức này chữ thành vệt mờ, đọc đã không được mà còn che mất hình
+  // dạng tổng thể — thứ duy nhất còn đọc được ở mức thu nhỏ đó.
+  const showName = view.k >= 0.25;
+  const showSub = view.k >= 0.45;
+  if (showName) {
+    g.append(el("text", {
+      x: cx, y: n.y + (n.sub && showSub ? 24 : 32), "text-anchor": "middle", "font-size": 13,
+      "font-weight": 600, fill: faulty ? "var(--bad)" : "var(--ink)",
+    }, n.name.length > 20 ? n.name.slice(0, 19) + "…" : n.name));
+  }
+  if (n.sub && showSub) {
     const short = n.sub.length > 26 ? n.sub.slice(0, 25) + "…" : n.sub;
     g.append(el("text", {
       x: cx, y: n.y + 39, "text-anchor": "middle", "font-size": 11, fill: "var(--muted)",
     }, short));
   }
   const tag = boundaryTags.get(n.name);
-  if (tag) {
+  if (tag && showSub) {
     g.append(el("text", {
       x: n.x + 9, y: n.y - 5, "font-size": 10, fill: "var(--muted)",
     }, `⌜ ${tag}`));

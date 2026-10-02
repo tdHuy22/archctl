@@ -1,0 +1,179 @@
+component Cache at cache/** @human #accepted
+component Commands at commands/** @human #accepted
+component Common at common/** @human #accepted
+component Compare at compare/** @human #accepted
+component Config at config/** @human #accepted
+component Core at core/** @human #accepted
+component Deploy at deploy/** @human #accepted
+component Docs at docs/** @human #accepted
+component Helpers at helpers/** @human #accepted
+component Hugofs at hugofs/** @human #accepted
+component Hugolib at hugolib/** @human #accepted
+component Identity at identity/** @human #accepted
+component Internal at internal/** @human #accepted
+component Langs at langs/** @human #accepted
+component Livereload at livereload/** @human #accepted
+component Markup at markup/** @human #accepted
+component Media at media/** @human #accepted
+component Modules at modules/** @human #accepted
+component Output at output/** @human #accepted
+component Parser at parser/** @human #accepted
+component Resources at resources/** @human #accepted
+component Tpl at tpl/** @human #accepted
+component Transform at transform/** @human #accepted
+component Watcher at watcher/** @human #accepted
+allow Cache -> Common
+allow Cache -> Config
+allow Cache -> Helpers
+allow Cache -> Hugofs
+allow Cache -> Hugolib
+allow Cache -> Identity
+allow Cache -> Resources
+allow Commands -> Common
+allow Commands -> Config
+allow Commands -> Deploy
+allow Commands -> Helpers
+allow Commands -> Hugofs
+allow Commands -> Hugolib
+allow Commands -> Identity
+allow Commands -> Langs
+allow Commands -> Livereload
+allow Commands -> Markup
+allow Commands -> Modules
+allow Commands -> Parser
+allow Commands -> Resources
+allow Commands -> Tpl
+allow Commands -> Transform
+allow Commands -> Watcher
+allow Common -> Compare
+allow Common -> Config
+allow Common -> Hugofs
+allow Common -> Hugolib
+allow Common -> Identity
+allow Common -> Internal
+allow Common -> Resources
+allow Config -> Cache
+allow Config -> Common
+allow Config -> Deploy
+allow Config -> Helpers
+allow Config -> Hugofs
+allow Config -> Hugolib
+allow Config -> Identity
+allow Config -> Internal
+allow Config -> Langs
+allow Config -> Markup
+allow Config -> Media
+allow Config -> Modules
+allow Config -> Output
+allow Config -> Parser
+allow Config -> Resources
+allow Core -> Commands
+allow Core -> Common
+allow Core -> Hugofs
+allow Core -> Resources
+allow Deploy -> Common
+allow Deploy -> Config
+allow Deploy -> Hugofs
+allow Deploy -> Media
+allow Docs -> Internal
+allow Helpers -> Common
+allow Helpers -> Config
+allow Helpers -> Hugofs
+allow Helpers -> Hugolib
+allow Helpers -> Markup
+allow Helpers -> Media
+allow Hugofs -> Common
+allow Hugofs -> Config
+allow Hugofs -> Hugolib
+allow Hugofs -> Identity
+allow Hugofs -> Media
+allow Hugolib -> Cache
+allow Hugolib -> Common
+allow Hugolib -> Compare
+allow Hugolib -> Config
+allow Hugolib -> Helpers
+allow Hugolib -> Hugofs
+allow Hugolib -> Identity
+allow Hugolib -> Internal
+allow Hugolib -> Langs
+allow Hugolib -> Markup
+allow Hugolib -> Media
+allow Hugolib -> Modules
+allow Hugolib -> Output
+allow Hugolib -> Parser
+allow Hugolib -> Resources
+allow Hugolib -> Tpl
+allow Identity -> Common
+allow Identity -> Compare
+allow Internal -> Cache
+allow Internal -> Common
+allow Internal -> Config
+allow Internal -> Helpers
+allow Internal -> Hugofs
+allow Internal -> Hugolib
+allow Internal -> Identity
+allow Internal -> Media
+allow Internal -> Resources
+allow Internal -> Tpl
+allow Langs -> Common
+allow Langs -> Config
+allow Langs -> Hugofs
+allow Langs -> Hugolib
+allow Langs -> Parser
+allow Langs -> Resources
+allow Livereload -> Media
+allow Markup -> Common
+allow Markup -> Config
+allow Markup -> Hugolib
+allow Markup -> Identity
+allow Markup -> Langs
+allow Markup -> Media
+allow Markup -> Tpl
+allow Media -> Common
+allow Media -> Config
+allow Modules -> Common
+allow Modules -> Config
+allow Modules -> Hugofs
+allow Modules -> Hugolib
+allow Modules -> Langs
+allow Modules -> Parser
+allow Output -> Common
+allow Output -> Config
+allow Output -> Hugolib
+allow Output -> Media
+allow Parser -> Common
+allow Parser -> Hugolib
+allow Resources -> Cache
+allow Resources -> Common
+allow Resources -> Compare
+allow Resources -> Config
+allow Resources -> Helpers
+allow Resources -> Hugofs
+allow Resources -> Hugolib
+allow Resources -> Identity
+allow Resources -> Internal
+allow Resources -> Langs
+allow Resources -> Markup
+allow Resources -> Media
+allow Resources -> Output
+allow Resources -> Tpl
+allow Tpl -> Cache
+allow Tpl -> Common
+allow Tpl -> Compare
+allow Tpl -> Config
+allow Tpl -> Helpers
+allow Tpl -> Hugofs
+allow Tpl -> Hugolib
+allow Tpl -> Identity
+allow Tpl -> Internal
+allow Tpl -> Langs
+allow Tpl -> Markup
+allow Tpl -> Media
+allow Tpl -> Output
+allow Tpl -> Parser
+allow Tpl -> Resources
+allow Transform -> Common
+allow Transform -> Helpers
+allow Transform -> Hugofs
+allow Watcher -> Common
+allow Cache -> Commands

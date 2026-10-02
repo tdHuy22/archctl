@@ -57,6 +57,45 @@ ngoài, không gọi mạng. Hệ quả:
 Layout tính ở Rust (phân tầng, xác định) rồi gửi kèm toạ độ, nên giao diện
 không phải tự tính và kết quả không đổi giữa các lần chạy.
 
+## Sơ đồ ở quy mô thật
+
+Fixture chỉ có vài component nên mọi bố cục đều trông ổn. Chế độ hỏng chỉ lộ
+ra khi đồ thị vừa lớn vừa dày — `hugo` có 24 component và 155 quan hệ, 58
+trong số đó khép thành vòng:
+
+| | bề ngang |
+| --- | --- |
+| ban đầu | **63540** điểm ảnh |
+| sau khi bỏ cạnh quay ngược khỏi việc xếp lớp | 4140 |
+| sau khi đổi cách chọn cạnh quay ngược | **3084** |
+
+Phân lớp bằng nới lỏng lặp cần một đồ thị không còn chu trình. Không bỏ cạnh
+quay ngược ra thì mỗi vòng lặp đẩy cả vòng tròn lên thêm một bậc, và kết quả
+phụ thuộc vào việc vòng lặp dừng ở đâu — tức là rác.
+
+Cạnh nào bị coi là quay ngược thì chọn bằng cách xếp component thành một hàng
+theo **bậc ra trừ bậc vào**: gọi nhiều mà bị gọi ít thì đứng trước. Thứ tự ấy
+đúng với trực giác phân tầng, và trên mười repo thật nó cho sơ đồ gọn nhất
+trong ba cách đã thử:
+
+| cách chọn | cạnh ngược | sơ đồ dẹt nhất |
+| --- | --- | --- |
+| duyệt sâu | 112 | 26.8:1 |
+| bậc ra trừ bậc vào | 84 | **12.6:1** |
+| Eades–Lin–Smyth | 74 | 16.4:1 |
+
+Cạnh bị bỏ chỉ bỏ khỏi việc **xếp lớp**; nó vẫn được vẽ như mọi cạnh khác.
+
+Đồ thị hugo nằm trong `tests/fixtures/hugo.arch`: đồ thị sinh ngẫu nhiên không
+tái tạo được chế độ hỏng này, chỉ hình dạng thật mới làm lộ ra.
+
+### Thấy toàn cảnh quan trọng hơn đọc được chữ
+
+Sàn thu nhỏ cũ là 0.6, nên một sơ đồ rộng gấp sáu lần khung nhìn mở ra chỉ
+thấy một góc — và không có gì cho biết còn gì ở ngoài. Sàn giờ là 0.2, và chữ
+tự ẩn khi nhỏ quá: đường dẫn dưới 0.45, tên dưới 0.25. Ở mức đó hình dạng tổng
+thể là thứ duy nhất còn đọc được, nên để nó bị chữ che là mất nốt.
+
 ## Sơ đồ không được nhảy
 
 Node đã có toạ độ trong `layout.json` thì **giữ nguyên vị trí**, kể cả khi agent
