@@ -244,6 +244,7 @@ fn coordinates(grid: &[Vec<String>]) -> BTreeMap<String, Point> {
 /// Đọc `.arch/layout.json`. Hỏng thì coi như chưa có gì — vị trí là thứ xếp
 /// lại được, không đáng để làm hỏng cả phiên làm việc.
 pub fn parse_saved(src: &str) -> Saved {
+    let src = crate::strip_bom(src);
     let Some(value) = crate::jsonc::parse(src) else { return Saved::new() };
     let Some(nodes) = value.get("nodes").and_then(|n| n.as_object()) else {
         return Saved::new();

@@ -82,6 +82,7 @@ fn normalize_space(s: &str) -> String {
 // ---------- proposals.arch ----------
 
 pub fn parse_proposals(src: &str) -> (Vec<Proposal>, Vec<Diag>) {
+    let src = crate::strip_bom(src);
     let mut out: Vec<Proposal> = Vec::new();
     let mut diags = Vec::new();
 
@@ -192,6 +193,7 @@ pub struct Decision {
 /// Mỗi quyết định là một mục `## <ngày> · <phán quyết> · <id>`. Định dạng này
 /// vừa đọc được bằng mắt vừa đọc được bằng máy, vì agent phải tự tra được.
 pub fn parse_decisions(src: &str) -> Vec<Decision> {
+    let src = crate::strip_bom(src);
     let mut out: Vec<Decision> = Vec::new();
     for raw in src.lines() {
         let text = raw.trim();
@@ -254,6 +256,7 @@ pub struct State {
 }
 
 pub fn parse_state(src: &str) -> State {
+    let src = crate::strip_bom(src);
     let mut state = State::default();
     for line in src.lines() {
         let line = line.trim();

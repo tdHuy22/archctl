@@ -55,11 +55,12 @@ pub fn include_dirs(root: &Path) -> Vec<String> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for (kind, path) in &configs {
         let base = dir_of(path);
-        let Ok(src) = std::fs::read_to_string(root.join(path)) else { continue };
+        let Ok(raw) = std::fs::read_to_string(root.join(path)) else { continue };
+        let src = crate::strip_bom(&raw);
         let raws = match kind {
-            Kind::CompileCommands => from_compile_commands(&src),
-            Kind::Cmake => from_cmake(&src, base),
-            Kind::Make => from_make(&src, base),
+            Kind::CompileCommands => from_compile_commands(src),
+            Kind::Cmake => from_cmake(src, base),
+            Kind::Make => from_make(src, base),
         };
         for (at, raw) in raws {
             let Some(dir) = to_repo_dir(root, &at, &raw) else { continue };

@@ -148,6 +148,49 @@ fn khoa_mot_luat_chi_dung_mot_dong() {
 }
 
 #[test]
+fn hai_tab_cung_sua_mot_luc_khong_mat_thay_doi_nao() {
+    // Mỗi kết nối một luồng, nên đọc-sửa-ghi của hai yêu cầu có thể xen vào
+    // nhau: bản ghi sau dựa trên bản đọc trước và nuốt mất thay đổi kia.
+    let s = std::sync::Arc::new(Server::start("race", 4743));
+    let names = ["Web", "Order", "Report"];
+    let threads: Vec<_> = names
+        .iter()
+        .map(|name| {
+            let s = std::sync::Arc::clone(&s);
+            let body = format!(r##"{{"name":"{name}","status":"#locked"}}"##);
+            std::thread::spawn(move || s.post("/api/status", &body))
+        })
+        .collect();
+    for t in threads {
+        assert!(t.join().unwrap().contains("200 OK"));
+    }
+
+    let law = s.law();
+    for name in names {
+        assert!(law.contains(&format!("{name} ")) && law.contains("#locked"), "{law}");
+        let line = law.lines().find(|l| l.contains(&format!("component {name} "))).unwrap();
+        assert!(line.ends_with("#locked"), "mất thay đổi của `{name}`: {law}");
+    }
+    assert_eq!(law.lines().count(), ARCH.lines().count(), "không thêm bớt dòng nào");
+}
+
+#[test]
+fn ghi_xong_khong_de_lai_file_tam() {
+    let s = Server::start("tidy", 4744);
+    assert!(s.post("/api/layout", r#"{"name":"Web","x":"10","y":"20"}"#).contains("200 OK"));
+    assert!(s.post("/api/status", r##"{"name":"Web","status":"#locked"}"##).contains("200 OK"));
+    for dir in [s.root.clone(), s.root.join(".arch")] {
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "còn file tạm trong {}: {leftovers:?}", dir.display());
+    }
+}
+
+#[test]
 fn khoa_phan_tu_khong_ton_tai_bi_tu_choi() {
     let s = Server::start("lock-missing", 4734);
     let before = s.law();

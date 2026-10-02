@@ -17,6 +17,7 @@ struct Line<'a> {
 /// Đọc nguồn thành mô hình. Luôn trả về cả hai: mô hình đọc được tới đâu và
 /// danh sách chẩn đoán. Một dòng sai không làm hỏng cả file.
 pub fn parse(src: &str) -> (Document, Vec<Diag>) {
+    let src = crate::strip_bom(src);
     let mut doc = Document::default();
     let mut diags = Vec::new();
     let lines = collect_lines(src);

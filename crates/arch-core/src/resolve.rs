@@ -350,6 +350,7 @@ fn collect_manifests(root: &Path, prefix: &str, depth: usize, out: &mut Vec<(Str
 
 fn package_name(manifest: &Path) -> Option<String> {
     let text = std::fs::read_to_string(manifest).ok()?;
+    let text = crate::strip_bom(&text);
     let mut in_package = false;
     for line in text.lines() {
         let line = line.trim();
@@ -474,7 +475,8 @@ fn collect_dirs_with(root: &Path, prefix: &str, depth: usize, name: &str, out: &
 
 fn read_go_module(root: &Path) -> Option<String> {
     let text = std::fs::read_to_string(root.join("go.mod")).ok()?;
-    text.lines()
+    crate::strip_bom(&text)
+        .lines()
         .map(str::trim)
         .find_map(|l| l.strip_prefix("module "))
         .map(|m| m.trim().to_string())

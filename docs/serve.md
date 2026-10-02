@@ -66,9 +66,24 @@ dõi.
 
 Muốn xếp lại từ đầu thì bấm **Sắp xếp lại**.
 
+## Ghi file
+
+Máy chủ tạo một luồng cho mỗi kết nối, nên hai tab cùng mở có thể cùng
+đọc-sửa-ghi `.arch/system.arch`. Hai chỗ chống lại điều đó:
+
+- **Mọi thao tác ghi đi qua một cửa.** Chúng hiếm, nên xếp hàng không tốn gì,
+  còn mất một lần sửa thì tốn. Không có khoá này thì bản ghi sau dựa trên bản
+  đọc trước và nuốt mất thay đổi kia.
+- **Ghi nguyên tử**: ra file tạm cùng thư mục rồi đổi tên. `fs::write` cắt file
+  về rỗng trước, nên ai đọc đúng khoảng giữa sẽ thấy file luật rỗng — mà "ai
+  đó" ở đây là agent đang chạy `archctl check`, hoặc chính luồng theo dõi.
+
+Mọi lệnh `archctl` ghi file đều theo cách này, không riêng máy chủ.
+
 ## Giới hạn
 
-- **Một người dùng.** Không có khoá ghi; hai tab cùng sửa thì tab sau thắng.
+- **Một người dùng.** Hai người cùng sửa thì không mất file, nhưng người sau
+  vẫn ghi đè quyết định của người trước — không có hợp nhất.
 - **Không sửa được cấu trúc.** Thêm component hay vẽ quan hệ mới vẫn phải sửa
   `.arch/system.arch`. Giao diện chỉ đổi *trạng thái*, vị trí, và quyết định
   trên đề xuất.

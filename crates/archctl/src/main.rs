@@ -260,7 +260,7 @@ fn remember(root: &Path, hash: &str, report: &Report) -> Memory {
         attempts.insert(key, n);
     }
     let state = protocol::State { arch_hash: hash.to_string(), attempts: attempts.clone() };
-    let _ = std::fs::write(&path, protocol::render_state(&state));
+    let _ = arch_core::write_atomic(&path, &protocol::render_state(&state));
 
     let (proposals, _) = protocol::parse_proposals(
         &std::fs::read_to_string(root.join(protocol::PROPOSALS_FILE)).unwrap_or_default(),

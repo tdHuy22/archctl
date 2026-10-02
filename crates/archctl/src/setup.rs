@@ -105,7 +105,7 @@ pub fn cmd_init(args: &[String]) -> ExitCode {
         if rel == DECISIONS_FILE && root.join(rel).exists() {
             continue;
         }
-        if let Err(e) = std::fs::write(root.join(rel), body) {
+        if let Err(e) = arch_core::write_atomic(&root.join(rel), body) {
             return fail(&format!("không ghi được `{rel}`: {e}"), exit::USAGE);
         }
         crate::say!("  tạo  {rel}");
@@ -153,7 +153,7 @@ fn write_hook(root: &Path) -> Result<bool, String> {
         return Ok(false);
     }
     std::fs::create_dir_all(root.join(".claude")).map_err(|e| e.to_string())?;
-    std::fs::write(&path, CLAUDE_SETTINGS).map_err(|e| e.to_string())?;
+    arch_core::write_atomic(&path, CLAUDE_SETTINGS).map_err(|e| e.to_string())?;
     Ok(true)
 }
 
@@ -194,7 +194,7 @@ fn append_pointer(root: &Path, name: &str) -> Result<bool, String> {
     }
     body.push_str(POINTER);
     body.push('\n');
-    std::fs::write(&path, body).map_err(|e| e.to_string())?;
+    arch_core::write_atomic(&path, &body).map_err(|e| e.to_string())?;
     Ok(true)
 }
 
@@ -208,7 +208,7 @@ fn append_gitignore(root: &Path) -> Result<bool, String> {
         body.push('\n');
     }
     body.push_str(".arch/.state\n");
-    std::fs::write(&path, body).map_err(|e| e.to_string())?;
+    arch_core::write_atomic(&path, &body).map_err(|e| e.to_string())?;
     Ok(true)
 }
 
@@ -253,7 +253,7 @@ pub fn cmd_export(args: &[String]) -> ExitCode {
                 arch_core::export::mermaid(&doc, &options)
             };
             let path = root.join(out);
-            if let Err(e) = std::fs::write(&path, body) {
+            if let Err(e) = arch_core::write_atomic(&path, &body) {
                 return fail(&format!("không ghi được `{out}`: {e}"), exit::USAGE);
             }
             crate::say!("Đã ghi {out}");
@@ -292,7 +292,7 @@ pub fn cmd_baseline(args: &[String]) -> ExitCode {
     let added = now.difference(&before).count();
     let removed = before.difference(&now).count();
     let body = baseline::render(&now, &arch_core::protocol::today());
-    if let Err(e) = std::fs::write(root.join(BASELINE_FILE), body) {
+    if let Err(e) = arch_core::write_atomic(&root.join(BASELINE_FILE), &body) {
         return fail(&format!("không ghi được `{BASELINE_FILE}`: {e}"), exit::USAGE);
     }
 

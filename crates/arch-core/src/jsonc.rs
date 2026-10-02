@@ -55,7 +55,7 @@ impl Value {
 /// `None` khi nguồn không đọc được. Lỗi cụ thể không quan trọng ở đây: nơi gọi
 /// chỉ cần biết có dùng được cấu hình này hay không.
 pub fn parse(src: &str) -> Option<Value> {
-    let chars: Vec<char> = src.chars().collect();
+    let chars: Vec<char> = crate::strip_bom(src).chars().collect();
     let mut p = Parser { cs: &chars, i: 0 };
     p.skip_trivia();
     let value = p.value()?;

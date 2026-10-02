@@ -19,6 +19,7 @@ pub fn key(v: &Violation) -> String {
 }
 
 pub fn parse(src: &str) -> BTreeSet<String> {
+    let src = crate::strip_bom(src);
     src.lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))

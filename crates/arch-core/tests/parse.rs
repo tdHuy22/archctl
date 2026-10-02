@@ -276,3 +276,26 @@ fn thanh_vien_cua_boundary_nam_canh_nhau() {
         "B không được nằm giữa A và C: A={a} B={b} C={c}"
     );
 }
+
+/// Trình soạn thảo trên Windows hay ghi UTF-8 kèm BOM. Ba byte đó dính vào
+/// token đầu tiên, nên mọi bộ đọc hỏng ngay dòng 1 — và thông báo lỗi khi đó
+/// tự mâu thuẫn: "từ khoá không nhận ra: `component`".
+#[test]
+fn bom_dau_file_khong_lam_hong_bo_doc() {
+    const BOM: &str = "\u{feff}";
+
+    let plain = "component Web at src/web/** @human #locked\n";
+    let doc = ok(&format!("{BOM}{plain}"));
+    assert_eq!(doc.components[0].name, "Web");
+    // Hash phải giống hệt bản không BOM: BOM không phải là luật.
+    assert_eq!(arch_core::arch_hash(&doc), arch_core::arch_hash(&ok(plain)));
+
+    assert!(arch_core::jsonc::parse(&format!("{BOM}{{\"a\":1}}")).is_some());
+
+    let proposals =
+        format!("{BOM}proposal p-abc123 @ai 2026-01-01\n  rule allow A -> B\n  reason vì\n");
+    let (parsed, diags) = arch_core::protocol::parse_proposals(&proposals);
+    assert_eq!(parsed.len(), 1, "{parsed:#?} {diags:#?}");
+
+    assert_eq!(arch_core::baseline::parse(&format!("{BOM}A -> B via import\n")).len(), 1);
+}

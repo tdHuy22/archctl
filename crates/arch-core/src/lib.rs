@@ -32,6 +32,42 @@ use std::path::{Path, PathBuf};
 pub const ARCH_FILE: &str = ".arch/system.arch";
 pub const IGNORE_FILE: &str = ".arch/.archignore";
 
+/// Ghi file một cách nguyên tử: ra file tạm cùng thư mục, rồi đổi tên.
+///
+/// `fs::write` cắt file về rỗng trước khi ghi nội dung mới. Ai đọc đúng khoảng
+/// giữa đó sẽ thấy một file luật rỗng hoặc dở dang — và "ai đó" ở đây là agent
+/// đang chạy `archctl check`, hay `archctl serve` đang theo dõi file, hay một
+/// lệnh `archctl` khác chạy song song. Đổi tên trong cùng một hệ thống file là
+/// thao tác nguyên tử, nên người đọc chỉ thấy bản cũ hoặc bản mới.
+///
+/// File tạm mang số hiệu tiến trình và thời điểm, để hai tiến trình ghi cùng
+/// lúc không giẫm lên file tạm của nhau.
+pub fn write_atomic(path: &Path, body: &str) -> std::io::Result<()> {
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let stem = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let tmp = dir.join(format!(".{stem}.{}.{nanos}.tmp", std::process::id()));
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// Bỏ dấu BOM đầu file.
+///
+/// Trình soạn thảo trên Windows hay ghi UTF-8 kèm BOM. Ba byte đó dính vào
+/// token đầu tiên và làm mọi bộ đọc hỏng ngay dòng 1 — tệ nhất là thông báo
+/// lỗi khi đó tự mâu thuẫn: "từ khoá không nhận ra: `component`".
+///
+/// Áp ở từng bộ đọc chứ không ở từng chỗ gọi `read_to_string`: như vậy nó
+/// đúng cả khi chuỗi tới từ nơi khác, không chỉ từ đĩa.
+pub fn strip_bom(src: &str) -> &str {
+    src.strip_prefix('\u{feff}').unwrap_or(src)
+}
+
 /// Đọc nguồn rồi kiểm tra luôn. Chẩn đoán của cả hai bước gộp làm một.
 pub fn load(src: &str) -> (Document, Vec<Diag>) {
     let (doc, mut diags) = parser::parse(src);
@@ -70,8 +106,9 @@ pub fn find_root(start: &Path) -> Option<PathBuf> {
 
 /// Mẫu glob trong `.arch/.archignore`. Thiếu file thì danh sách rỗng.
 pub fn read_ignores(root: &Path) -> Vec<String> {
-    std::fs::read_to_string(root.join(IGNORE_FILE))
-        .unwrap_or_default()
+    let text = std::fs::read_to_string(root.join(IGNORE_FILE))
+        .unwrap_or_default();
+    strip_bom(&text)
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))

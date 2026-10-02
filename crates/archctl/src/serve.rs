@@ -130,6 +130,10 @@ fn handle(mut stream: TcpStream, root: &Path, clients: &Clients) {
             }
         }
         ("POST", _) => {
+            // Mỗi kết nối một luồng, nên hai tab mở cùng lúc có thể cùng
+            // đọc-sửa-ghi file luật. Mọi thao tác ghi đi qua một cửa: chúng
+            // hiếm, nên xếp hàng không tốn gì, còn mất một lần sửa thì tốn.
+            let _writing = WRITES.lock();
             let result = match path {
                 "/api/layout" => save_position(root, &req.body),
                 "/api/status" => set_status(root, &req.body),
@@ -154,6 +158,9 @@ fn handle(mut stream: TcpStream, root: &Path, clients: &Clients) {
         _ => respond(&mut stream, "404 Not Found", "text/plain; charset=utf-8", "không có"),
     }
 }
+
+/// Một cửa duy nhất cho mọi thao tác ghi của máy chủ.
+static WRITES: Mutex<()> = Mutex::new(());
 
 // ---------- theo dõi thay đổi ----------
 
@@ -405,7 +412,7 @@ fn save_position(root: &Path, body: &str) -> Result<(), String> {
     let mut saved =
         layout::parse_saved(&std::fs::read_to_string(&path).unwrap_or_default());
     saved.insert(name, Point { x, y });
-    std::fs::write(&path, layout::render_saved(&saved)).map_err(|e| e.to_string())
+    arch_core::write_atomic(&path, &layout::render_saved(&saved)).map_err(|e| e.to_string())
 }
 
 /// Đổi trạng thái một phần tử ngay trên sơ đồ — đây là nút khoá.
@@ -445,7 +452,7 @@ fn set_status(root: &Path, body: &str) -> Result<(), String> {
     {
         return Err(format!("sửa xong thì file luật hỏng: {}", d.msg));
     }
-    std::fs::write(&path, updated).map_err(|e| e.to_string())
+    arch_core::write_atomic(&path, &updated).map_err(|e| e.to_string())
 }
 
 /// Duyệt hoặc từ chối một đề xuất, dùng lại đúng lệnh của `archctl`.

@@ -74,7 +74,7 @@ fn read(root: &Path, rel: &str) -> String {
 }
 
 fn write(root: &Path, rel: &str, body: &str) -> Result<(), String> {
-    std::fs::write(root.join(rel), body).map_err(|e| format!("không ghi được `{rel}`: {e}"))
+    arch_core::write_atomic(&root.join(rel), body).map_err(|e| format!("không ghi được `{rel}`: {e}"))
 }
 
 /// Ai đang quyết định. Lấy từ git để nhật ký ghi được tên thật, nhờ đó một
