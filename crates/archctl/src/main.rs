@@ -6,19 +6,24 @@
 
 use arch_core::check::{Reason, Report, Via};
 use arch_core::diff::{Class, Kind};
+use arch_core::protocol::{self as protocol, Intent, Verdict};
 use arch_core::diag::{self, Severity};
 use arch_core::model::Status;
 use arch_core::{Document, json};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod proto;
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Mã thoát, theo mục 7 của đặc tả.
-mod exit {
+pub mod exit {
     pub const OK: u8 = 0;
     pub const VIOLATION: u8 = 1;
     pub const DSL_INVALID: u8 = 2;
+    /// Có đề xuất hoặc bế tắc đang chờ người quyết định.
+    pub const PENDING: u8 = 3;
     pub const USAGE: u8 = 64;
 }
 
@@ -30,6 +35,11 @@ fn main() -> ExitCode {
         "parse" => cmd_parse(&args[1..]),
         "check" => cmd_check(&args[1..]),
         "diff" => cmd_diff(&args[1..]),
+        "propose" => proto::cmd_propose(&args[1..], Intent::Rule),
+        "block" => proto::cmd_propose(&args[1..], Intent::Block),
+        "accept" => proto::cmd_decide(&args[1..], Verdict::Accepted),
+        "reject" => proto::cmd_decide(&args[1..], Verdict::Rejected),
+        "proposals" => proto::cmd_proposals(&args[1..]),
         "help" | "-h" | "--help" => {
             print_usage();
             ExitCode::from(exit::OK)
@@ -50,12 +60,19 @@ fn print_usage() {
     println!(
         "archctl {VERSION} — sơ đồ kiến trúc là luật
 
-Cách dùng:
+Lệnh chung:
   archctl check [--root <dir>] [--json]   Đối chiếu mã nguồn với luật
   archctl diff [<git-ref>] [--root <dir>] So luật hiện tại với một bản trước
   archctl parse <file.arch>               Chỉ đọc và kiểm tra file luật
-  archctl help
-  archctl version
+  archctl proposals                       Liệt kê đề xuất đang chờ
+
+Lệnh của agent:
+  archctl propose '<luật>' --reason \"...\"  Đề xuất thêm một luật
+  archctl block --on '<luật>' --reason \"...\" Báo bế tắc, rồi dừng việc đó lại
+
+Lệnh của người:
+  archctl accept <id> --reason \"...\"       Duyệt một đề xuất
+  archctl reject <id> --reason \"...\"       Từ chối, agent sẽ không đề xuất lại
 
 `diff` mặc định so với HEAD. Nó tách thay đổi kiến trúc khỏi thay đổi chỉ
 xê dịch chữ trong file, để người duyệt biết chỗ nào cần đọc kỹ.
@@ -66,6 +83,7 @@ Mã thoát:
   0   không vi phạm
   1   có vi phạm luật đang có hiệu lực
   2   DSL sai cú pháp hoặc tham chiếu không tồn tại
+  3   có đề xuất hoặc bế tắc đang chờ người quyết định
   64  dùng lệnh sai"
     );
 }
@@ -136,17 +154,63 @@ fn cmd_check(args: &[String]) -> ExitCode {
 
     let ignores = arch_core::read_ignores(&root);
     let report = arch_core::check::check(&root, &doc, &ignores);
+    let memory = remember(&root, &hash, &report);
 
     if as_json {
         print_json(&hash, &report);
     } else {
-        print_human(&hash, &report);
+        print_human(&hash, &report, &memory);
     }
 
     ExitCode::from(if report.has_violations() { exit::VIOLATION } else { exit::OK })
 }
 
-fn print_human(hash: &str, report: &Report) {
+/// Những gì `check` nhớ giữa các lần chạy: kiến trúc có đổi không, và mỗi vi
+/// phạm đã gặp lại bao nhiêu lần.
+struct Memory {
+    previous_hash: String,
+    attempts: std::collections::BTreeMap<String, usize>,
+    pending: Vec<(Intent, String, String)>,
+}
+
+fn violation_key(v: &arch_core::check::Violation) -> String {
+    format!("{}->{}|{}", v.from, v.to, v.file)
+}
+
+fn remember(root: &Path, hash: &str, report: &Report) -> Memory {
+    let path = root.join(protocol::STATE_FILE);
+    let previous = protocol::parse_state(&std::fs::read_to_string(&path).unwrap_or_default());
+
+    // Chỉ đếm những vi phạm còn tồn tại: sửa xong thì bộ đếm về không.
+    let mut attempts = std::collections::BTreeMap::new();
+    for v in &report.violations {
+        let key = violation_key(v);
+        let n = previous.attempts.get(&key).copied().unwrap_or(0) + 1;
+        attempts.insert(key, n);
+    }
+    let state = protocol::State { arch_hash: hash.to_string(), attempts: attempts.clone() };
+    let _ = std::fs::write(&path, protocol::render_state(&state));
+
+    let (proposals, _) = protocol::parse_proposals(
+        &std::fs::read_to_string(root.join(protocol::PROPOSALS_FILE)).unwrap_or_default(),
+    );
+    Memory {
+        previous_hash: previous.arch_hash,
+        attempts,
+        pending: proposals.into_iter().map(|p| (p.intent, p.id, p.statement)).collect(),
+    }
+}
+
+fn print_human(hash: &str, report: &Report, memory: &Memory) {
+    // Báo trước mọi thứ khác: agent đang làm theo một bản luật đã cũ.
+    if !memory.previous_hash.is_empty() && memory.previous_hash != hash {
+        println!(
+            "⚠ Kiến trúc đã thay đổi kể từ lần kiểm trước ({} → {hash})",
+            memory.previous_hash
+        );
+        println!("  Đọc lại {} trước khi tiếp tục.\n", arch_core::ARCH_FILE);
+    }
+
     let total = report.checked.len() + report.unchecked.len();
     let langs: Vec<String> =
         report.by_lang.iter().map(|(l, n)| format!("{n} {}", l.name())).collect();
@@ -171,7 +235,31 @@ fn print_human(hash: &str, report: &Report) {
             Via::Symbol => println!("  {}:{}  dùng `{}`", v.file, v.line, v.spec),
         }
         println!("  luật: {}", v.rule);
-        println!("  → {}\n", v.hint);
+        println!("  → {}", v.hint);
+
+        // Thử đi thử lại cùng một chỗ nghĩa là agent không sửa được. Nó cần
+        // một lối ra, nếu không nó sẽ đi tìm đường lách.
+        match memory.attempts.get(&violation_key(v)).copied().unwrap_or(1) {
+            n if n >= protocol::MAX_TRIES => {
+                println!("  ! đã gặp lại {n} lần — không sửa được thì dừng lại và:");
+                // `deny` có một luật cụ thể để báo bế tắc. `NoAllow` thì không
+                // có luật nào chặn cả — thứ còn thiếu là một `allow`, nên lối
+                // ra đúng là đề xuất thêm nó.
+                match v.reason {
+                    Reason::Denied => println!(
+                        "    archctl block --on '{}' --reason \"...\"",
+                        v.rule
+                    ),
+                    Reason::NoAllow => println!(
+                        "    archctl propose 'allow {} -> {}' --reason \"...\"",
+                        v.from, v.to
+                    ),
+                }
+            }
+            n if n > 1 => println!("  (lần thứ {n})"),
+            _ => {}
+        }
+        println!();
     }
 
     for u in &report.unresolved {
@@ -199,12 +287,23 @@ fn print_human(hash: &str, report: &Report) {
         );
     }
 
+    for (intent, id, statement) in &memory.pending {
+        let what = match intent {
+            Intent::Rule => "ĐANG CHỜ DUYỆT",
+            Intent::Block => "ĐANG CHỜ GỠ BẾ TẮC",
+        };
+        println!("⏸ {what}  {id}  {statement}");
+    }
+
     let warnings = report.unresolved.len()
         + report.ambiguous.len()
         + usize::from(!report.unchecked.is_empty())
         + usize::from(report.files_unmapped > 0)
         + usize::from(report.rules_deferred > 0);
     println!("\n{} vi phạm, {warnings} cảnh báo", report.violations.len());
+    if !memory.pending.is_empty() {
+        println!("{} đề xuất đang chờ người quyết định — archctl proposals", memory.pending.len());
+    }
 }
 
 fn print_json(hash: &str, report: &Report) {

@@ -27,7 +27,7 @@ Giai đoạn 1 đang làm. Đã có **parser DSL** và **kiểm luật phụ thu
 **TypeScript, Python, C/C++, Rust và Go**.
 
 ```bash
-cargo test                                   # 97 test
+cargo test                                   # 123 test
 cargo run -p archctl -- check --root examples/sensor
 ```
 
@@ -52,6 +52,12 @@ luật này **không có vùng mù FFI** như đồ thị import, và vì chạy
 nên chú thích và chuỗi không bao giờ gây báo động giả: trong `examples/sensor`,
 `grep -c strcpy` ra 4, `archctl` báo đúng 2. Xem [docs/api.md](docs/api.md).
 
+**Giao thức agent–người** cho agent một lối ra khi gặp luật sai, thay vì chỉ
+có lách hoặc kẹt: `propose` đề xuất thêm luật, `block` báo bế tắc, rồi người
+`accept` hoặc `reject`. Mọi quyết định vào `decisions.md` — và vì agent không
+có trí nhớ giữa các phiên, file đó chặn nó đề xuất lại thứ đã bị từ chối. Xem
+[docs/protocol.md](docs/protocol.md).
+
 `archctl diff` so luật hiện tại với một bản trước, và **tách thay đổi kiến trúc
 khỏi thay đổi chỉ xê dịch chữ trong file** — người duyệt biết ngay chỗ nào cần
 đọc kỹ. Luật bị hạ xuống mức lỏng hơn được đánh dấu riêng. Xem
@@ -65,8 +71,7 @@ chuỗi, char literal, raw string, docstring và regex theo từng ngôn ngữ. 
 hàm, IPC — không xuất hiện trong bất kỳ câu lệnh import nào nên không bị bắt.
 Ngữ nghĩa và giới hạn đầy đủ: [docs/check.md](docs/check.md).
 
-Chưa có: tsconfig `paths`, `--changed`, kiểm `store owned_by`, `propose`,
-`serve`.
+Chưa có: tsconfig `paths`, `--changed`, kiểm `store owned_by`, `serve`.
 
 ## Ghi công
 

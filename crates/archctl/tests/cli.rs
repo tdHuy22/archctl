@@ -1,0 +1,208 @@
+//! Test đầu-tới-cuối cho giao thức agent–người, chạy chính binary.
+//!
+//! Vòng lặp đáng kiểm nhất là: agent đề xuất → người từ chối → **phiên sau
+//! agent bị chặn không đề xuất lại**. Agent không có trí nhớ giữa các phiên,
+//! nên nếu mắt xích cuối hỏng thì nó sẽ đề xuất lại mãi và người dùng sẽ tắt
+//! cả hệ thống đi.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+const ARCH: &str = "\
+component Web     at src/web/**     @human #locked
+component Order   at src/order/**   @human #accepted
+component Report  at src/report/**  @human #accepted
+allow Web -> Order
+";
+
+struct Project(PathBuf);
+
+impl Project {
+    fn new(name: &str) -> Project {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let root = std::env::temp_dir().join(format!("archctl-{name}-{}-{nanos}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".arch")).unwrap();
+        std::fs::create_dir_all(root.join("src/web")).unwrap();
+        std::fs::write(root.join(".arch/system.arch"), ARCH).unwrap();
+        std::fs::write(root.join("src/web/page.ts"), "export const a = 1\n").unwrap();
+        Project(root)
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_archctl"))
+            .args(args)
+            .arg("--root")
+            .arg(&self.0)
+            .output()
+            .expect("chạy được archctl")
+    }
+
+    fn read(&self, rel: &str) -> String {
+        std::fs::read_to_string(self.0.join(rel)).unwrap_or_default()
+    }
+
+    fn id_of(&self, marker: &str) -> String {
+        let listing = text(&self.run(&["proposals"]));
+        listing
+            .lines()
+            .find(|l| l.contains(marker))
+            .and_then(|l| l.split_whitespace().find(|w| w.starts_with("p-")))
+            .unwrap_or_else(|| panic!("không tìm thấy đề xuất `{marker}` trong:\n{listing}"))
+            .to_string()
+    }
+}
+
+impl Drop for Project {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn text(out: &Output) -> String {
+    format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+}
+
+fn code(out: &Output) -> i32 {
+    out.status.code().unwrap_or(-1)
+}
+
+#[test]
+fn de_xuat_roi_tu_choi_thi_phien_sau_bi_chan() {
+    let p = Project::new("reject");
+    let out = p.run(&["propose", "allow Order -> Report", "--reason", "cần số liệu"]);
+    assert_eq!(code(&out), 3, "{}", text(&out));
+
+    let id = p.id_of("ĐỀ XUẤT");
+    let out = p.run(&["reject", &id, "--reason", "Order không được biết tới Report"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+
+    // Phiên sau: cùng câu lệnh, lý do khác. Phải bị chặn kèm lý do cũ.
+    let out = p.run(&["propose", "allow Order -> Report", "--reason", "vẫn cần"]);
+    let said = text(&out);
+    assert_eq!(code(&out), 3);
+    assert!(said.contains("đã bị từ chối"), "{said}");
+    assert!(said.contains("Order không được biết tới Report"), "lý do cũ phải hiện ra: {said}");
+    assert!(!p.read(".arch/proposals.arch").contains("allow Order -> Report"));
+}
+
+#[test]
+fn duyet_de_xuat_thi_luat_moi_vao_system_arch() {
+    let p = Project::new("accept");
+    p.run(&["propose", "allow Order -> Report", "--reason", "cần số liệu"]);
+    let id = p.id_of("ĐỀ XUẤT");
+    let out = p.run(&["accept", &id, "--reason", "hợp lý, Report chỉ đọc"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+
+    let law = p.read(".arch/system.arch");
+    assert!(law.contains("allow Order -> Report @ai #accepted"), "{law}");
+    assert!(!p.read(".arch/proposals.arch").contains("allow Order -> Report"));
+    assert!(p.read(".arch/decisions.md").contains("DUYỆT"));
+    // Luật mới phải dùng được ngay.
+    assert_eq!(code(&p.run(&["check"])), 0);
+}
+
+#[test]
+fn de_xuat_trung_lap_la_khong_thao_tac() {
+    let p = Project::new("dup");
+    p.run(&["propose", "allow Order -> Report", "--reason", "lần đầu"]);
+    let out = p.run(&["propose", "allow   Order  ->  Report", "--reason", "lần hai"]);
+    assert!(text(&out).contains("đã có sẵn"), "{}", text(&out));
+    assert_eq!(p.read(".arch/proposals.arch").matches("proposal ").count(), 1);
+}
+
+#[test]
+fn cau_lenh_duoc_kiem_cung_voi_luat_hien_co() {
+    let p = Project::new("validate");
+    // Tham chiếu tới component đã khai báo: hợp lệ.
+    assert_eq!(code(&p.run(&["propose", "allow Order -> Report", "--reason", "x"])), 3);
+    // Tham chiếu tới component không tồn tại: bị chặn.
+    let out = p.run(&["propose", "allow Order -> KhongCo", "--reason", "x"]);
+    assert_eq!(code(&out), 64);
+    assert!(text(&out).contains("KhongCo"), "{}", text(&out));
+    // Sai cú pháp: bị chặn.
+    let out = p.run(&["propose", "allow Order Report", "--reason", "x"]);
+    assert_eq!(code(&out), 64);
+    assert!(text(&out).contains("cú pháp"), "{}", text(&out));
+}
+
+#[test]
+fn moi_quyet_dinh_deu_phai_co_ly_do() {
+    let p = Project::new("reason");
+    assert_eq!(code(&p.run(&["propose", "allow Order -> Report"])), 64);
+    p.run(&["propose", "allow Order -> Report", "--reason", "x"]);
+    let id = p.id_of("ĐỀ XUẤT");
+    // Kể cả khi duyệt. Ma sát phải tương xứng với mức độ của hành vi.
+    let out = p.run(&["accept", &id]);
+    assert_eq!(code(&out), 64);
+    assert!(text(&out).contains("lý do"), "{}", text(&out));
+}
+
+#[test]
+fn bao_be_tac_ghi_vao_hang_cho() {
+    let p = Project::new("block");
+    let out = p.run(&["block", "--on", "allow Web -> Order", "--reason", "cần gọi ngược lại"]);
+    assert_eq!(code(&out), 3, "{}", text(&out));
+    assert!(text(&out).contains("DỪNG"), "{}", text(&out));
+    assert!(p.read(".arch/proposals.arch").contains("block allow Web -> Order"));
+    assert!(text(&p.run(&["proposals"])).contains("BẾ TẮC"));
+}
+
+#[test]
+fn check_nhac_doc_lai_khi_kien_truc_doi() {
+    let p = Project::new("hash");
+    p.run(&["check"]);
+    let law = p.read(".arch/system.arch");
+    std::fs::write(p.0.join(".arch/system.arch"), format!("{law}allow Order -> Report\n")).unwrap();
+    let said = text(&p.run(&["check"]));
+    assert!(said.contains("Kiến trúc đã thay đổi"), "{said}");
+    assert!(said.contains("Đọc lại"), "{said}");
+}
+
+#[test]
+fn chi_them_chu_thich_thi_khong_bao_kien_truc_doi() {
+    let p = Project::new("hash-quiet");
+    p.run(&["check"]);
+    let law = p.read(".arch/system.arch");
+    std::fs::write(p.0.join(".arch/system.arch"), format!("# ghi chú mới\n\n{law}")).unwrap();
+    let said = text(&p.run(&["check"]));
+    assert!(!said.contains("Kiến trúc đã thay đổi"), "kêu sói: {said}");
+}
+
+#[test]
+fn check_hien_de_xuat_dang_cho() {
+    let p = Project::new("pending");
+    p.run(&["propose", "allow Order -> Report", "--reason", "x"]);
+    let said = text(&p.run(&["check"]));
+    assert!(said.contains("ĐANG CHỜ DUYỆT"), "{said}");
+    assert!(said.contains("đang chờ người quyết định"), "{said}");
+}
+
+#[test]
+fn khong_co_de_xuat_nao_thi_noi_vay() {
+    let p = Project::new("empty");
+    let out = p.run(&["proposals"]);
+    assert_eq!(code(&out), 0);
+    assert!(text(&out).contains("Không có đề xuất nào"), "{}", text(&out));
+}
+
+#[test]
+fn quyet_dinh_tren_id_khong_ton_tai_bi_tu_choi() {
+    let p = Project::new("missing-id");
+    let out = p.run(&["accept", "p-000000", "--reason", "x"]);
+    assert_eq!(code(&out), 64);
+    assert!(text(&out).contains("không có đề xuất"), "{}", text(&out));
+}
+
+#[test]
+fn ngoai_du_an_co_arch_thi_bao_loi_ro_rang() {
+    let out = Command::new(env!("CARGO_BIN_EXE_archctl"))
+        .args(["check", "--root"])
+        .arg(Path::new("/"))
+        .output()
+        .unwrap();
+    assert_eq!(code(&out), 64);
+    assert!(text(&out).contains(".arch/system.arch"), "{}", text(&out));
+}

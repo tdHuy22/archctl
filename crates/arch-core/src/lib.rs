@@ -12,6 +12,7 @@ pub mod glob;
 pub mod json;
 pub mod model;
 pub mod parser;
+pub mod protocol;
 pub mod resolve;
 pub mod scan;
 pub mod validate;
