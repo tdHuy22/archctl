@@ -33,7 +33,8 @@ pub fn place(doc: &Document, saved: &Saved) -> BTreeMap<String, Point> {
     let edges = edge_list(doc, &nodes);
     let mut layers = assign_layers(&nodes, &edges);
     sink_apis(doc, &mut layers);
-    let ordered = order_within_layers(&nodes, &edges, &layers);
+    let mut ordered = order_within_layers(&nodes, &edges, &layers);
+    cluster_boundaries(doc, &mut ordered);
     let mut out = coordinates(&ordered);
 
     for (name, point) in saved {
@@ -118,6 +119,7 @@ fn sink_apis(doc: &Document, layers: &mut BTreeMap<String, usize>) {
 
 /// Thứ tự trong mỗi tầng, giảm số cạnh cắt nhau bằng trọng tâm các node liền
 /// trước. Khởi đầu theo thứ tự chữ cái để kết quả không đổi giữa các lần chạy.
+#[allow(clippy::type_complexity)]
 fn order_within_layers(
     nodes: &[String],
     edges: &[(String, String)],
@@ -172,6 +174,49 @@ fn order_within_layers(
         }
     }
     grid
+}
+
+/// Gom thành viên của cùng một `boundary` lại cạnh nhau trong mỗi cột.
+///
+/// Khung boundary được vẽ bằng hình chữ nhật bao quanh các thành viên. Nếu
+/// chúng nằm rải rác thì một component **không thuộc** boundary sẽ tình cờ lọt
+/// vào trong khung, và người xem đọc sai kiến trúc.
+fn cluster_boundaries(doc: &Document, grid: &mut [Vec<String>]) {
+    if doc.boundaries.is_empty() {
+        return;
+    }
+    let group_of = |name: &str| {
+        doc.boundaries.iter().position(|b| b.contains.iter().any(|m| m == name))
+    };
+
+    for column in grid.iter_mut() {
+        // Tâm của mỗi nhóm trong cột này. Node không thuộc nhóm nào giữ nguyên
+        // chỗ, nên phần còn lại của sơ đồ không bị xáo theo.
+        let mut sums: BTreeMap<usize, (f64, f64)> = BTreeMap::new();
+        for (at, name) in column.iter().enumerate() {
+            if let Some(group) = group_of(name) {
+                let entry = sums.entry(group).or_insert((0.0, 0.0));
+                entry.0 += at as f64;
+                entry.1 += 1.0;
+            }
+        }
+
+        let mut keyed: Vec<(f64, usize, usize, String)> = column
+            .iter()
+            .enumerate()
+            .map(|(at, name)| {
+                let group = group_of(name);
+                let center = group
+                    .and_then(|g| sums.get(&g))
+                    .map_or(at as f64, |(total, count)| total / count);
+                // Khoá phụ là chỉ số nhóm: cùng tâm thì thành viên của một
+                // nhóm vẫn phải dính vào nhau, và node ngoài nhóm bị đẩy ra.
+                (center, group.unwrap_or(usize::MAX), at, name.clone())
+            })
+            .collect();
+        keyed.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        *column = keyed.into_iter().map(|(_, _, _, n)| n).collect();
+    }
 }
 
 fn coordinates(grid: &[Vec<String>]) -> BTreeMap<String, Point> {

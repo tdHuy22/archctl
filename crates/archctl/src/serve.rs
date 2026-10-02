@@ -306,6 +306,20 @@ fn model_json(root: &Path) -> String {
         })
         .collect();
 
+    let missing: Vec<String> = report
+        .missing
+        .iter()
+        .map(|m| {
+            format!(
+                r#"{{"name":{},"source":{},"line":{},"hint":{}}}"#,
+                json::string(&m.name),
+                json::string(&m.source),
+                m.line,
+                json::string(&m.hint),
+            )
+        })
+        .collect();
+
     let (proposals, _) = protocol::parse_proposals(
         &std::fs::read_to_string(root.join(PROPOSALS_FILE)).unwrap_or_default(),
     );
@@ -325,12 +339,13 @@ fn model_json(root: &Path) -> String {
         .collect();
 
     format!(
-        r#"{{"archHash":{},"nodes":[{}],"edges":[{}],"boundaries":[{}],"violations":[{}],"proposals":[{}],"stats":{{"files":{},"checked":{},"unchecked":{}}}}}"#,
+        r#"{{"archHash":{},"nodes":[{}],"edges":[{}],"boundaries":[{}],"violations":[{}],"missing":[{}],"proposals":[{}],"stats":{{"files":{},"checked":{},"unchecked":{}}}}}"#,
         json::string(&hash),
         nodes.join(","),
         edges.join(","),
         boundaries.join(","),
         violations.join(","),
+        missing.join(","),
         pending.join(","),
         report.files_scanned,
         json::strings(report.checked.iter().map(String::as_str)),

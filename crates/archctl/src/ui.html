@@ -102,6 +102,7 @@
   <span class="pill" id="scanned"></span>
   <span class="pill bad" id="broken" hidden></span>
   <span class="pill warn" id="waiting" hidden></span>
+  <span class="pill warn" id="stale" hidden></span>
   <span class="spacer"></span>
   <button id="relayout">Sắp xếp lại</button>
 </header>
@@ -112,10 +113,12 @@
     <nav>
       <button data-tab="detail" aria-selected="true">Chi tiết</button>
       <button data-tab="violations" aria-selected="false">Vi phạm</button>
+      <button data-tab="stale" aria-selected="false">Lạc hậu</button>
       <button data-tab="proposals" aria-selected="false">Đề xuất</button>
     </nav>
     <div class="tab" data-tab="detail" data-on></div>
     <div class="tab" data-tab="violations"></div>
+    <div class="tab" data-tab="stale"></div>
     <div class="tab" data-tab="proposals"></div>
   </aside>
 </main>
@@ -138,6 +141,8 @@ const STATUS_ORDER = ["#draft", "#proposed", "#accepted", "#locked"];
 const canvas = document.getElementById("canvas");
 const view = { x: 0, y: 0, k: 1 };
 let model = null, selected = null, drag = null, fitNext = true;
+// Người đã tự kéo hoặc phóng thì đừng canh lại nữa — đó là khung nhìn của họ.
+let userMoved = false;
 // Nhãn cạnh hay rơi trùng chỗ khi nhiều cạnh cùng đi qua một vùng.
 const usedLabels = new Set();
 
@@ -202,6 +207,7 @@ function summarize() {
   const fresh = model.violations.filter((v) => !v.baselined);
   toggle("broken", fresh.length, `${fresh.length} vi phạm`);
   toggle("waiting", model.proposals.length, `${model.proposals.length} chờ duyệt`);
+  toggle("stale", model.missing.length, `${model.missing.length} khai báo lạc hậu`);
 }
 const toggle = (id, count, text) => {
   const node = document.getElementById(id);
@@ -245,20 +251,40 @@ function draw() {
   for (const n of model.nodes) drawNode(root, n, broken);
 }
 
+// Khung chỉ được vẽ khi nó bao đúng thành viên của boundary. Một component
+// ngoài lọt vào trong khung thì người xem đọc sai kiến trúc — nên trường hợp
+// đó chuyển sang gắn nhãn lên từng hộp, cách này không bao giờ sai.
+const boundaryTags = new Map();
+
 function drawBoundaries(root) {
+  boundaryTags.clear();
   for (const b of model.boundaries) {
     const inside = b.contains.map((n) => model.byName[n]).filter(Boolean);
     if (!inside.length) continue;
     const pad = 22;
-    const x = Math.min(...inside.map((n) => n.x)) - pad;
-    const y = Math.min(...inside.map((n) => n.y)) - pad - 14;
-    const w = Math.max(...inside.map((n) => n.x + NODE_W)) + pad - x;
-    const h = Math.max(...inside.map((n) => n.y + NODE_H)) + pad - y;
+    const box = {
+      x: Math.min(...inside.map((n) => n.x)) - pad,
+      y: Math.min(...inside.map((n) => n.y)) - pad - 14,
+    };
+    box.w = Math.max(...inside.map((n) => n.x + NODE_W)) + pad - box.x;
+    box.h = Math.max(...inside.map((n) => n.y + NODE_H)) + pad - box.y;
+
+    const members = new Set(b.contains);
+    const intruder = model.nodes.some((n) =>
+      !members.has(n.name) &&
+      n.x + NODE_W > box.x && n.x < box.x + box.w &&
+      n.y + NODE_H > box.y && n.y < box.y + box.h);
+
+    if (intruder) {
+      for (const n of inside) boundaryTags.set(n.name, b.name);
+      continue;
+    }
     root.append(el("rect", {
-      x, y, width: w, height: h, rx: 14,
+      x: box.x, y: box.y, width: box.w, height: box.h, rx: 14,
       fill: "none", stroke: "var(--line)", "stroke-width": 1.5, "stroke-dasharray": "2 4",
     }));
-    root.append(el("text", { x: x + 12, y: y + 16, fill: "var(--muted)", "font-size": 11 }, b.name));
+    root.append(el("text",
+      { x: box.x + 12, y: box.y + 16, fill: "var(--muted)", "font-size": 11 }, b.name));
   }
 }
 
@@ -348,6 +374,12 @@ function drawNode(root, n, broken) {
       x: cx, y: n.y + 39, "text-anchor": "middle", "font-size": 11, fill: "var(--muted)",
     }, short));
   }
+  const tag = boundaryTags.get(n.name);
+  if (tag) {
+    g.append(el("text", {
+      x: n.x + 9, y: n.y - 5, "font-size": 10, fill: "var(--muted)",
+    }, `⌜ ${tag}`));
+  }
   if (n.status === "#locked") {
     // Chấm tròn thay cho emoji: emoji hiện thành ô vuông trên nhiều hệ.
     g.append(el("circle", { cx: n.x + NODE_W - 13, cy: n.y + 13, r: 3.2, fill: "var(--muted)" }));
@@ -383,6 +415,7 @@ canvas.addEventListener("pointerdown", (ev) => {
 
 canvas.addEventListener("pointermove", (ev) => {
   if (!drag) return;
+  userMoved = true;
   if (drag.pan) {
     view.x = ev.clientX - drag.x;
     view.y = ev.clientY - drag.y;
@@ -413,11 +446,12 @@ canvas.addEventListener("wheel", (ev) => {
   view.x = px - (px - view.x) * (next / view.k);
   view.y = py - (py - view.y) * (next / view.k);
   view.k = next;
+  userMoved = true;
   draw();
 }, { passive: false });
 
 document.getElementById("relayout").addEventListener("click", async () => {
-  if (await post("/api/relayout", {})) { fitNext = true; refresh(); }
+  if (await post("/api/relayout", {})) { fitNext = true; userMoved = false; refresh(); }
 });
 
 document.querySelectorAll("nav button").forEach((button) => {
@@ -436,7 +470,22 @@ const tab = (name) => document.querySelector(`.tab[data-tab="${name}"]`);
 function renderTabs() {
   renderDetail();
   renderViolations();
+  renderStale();
   renderProposals();
+}
+
+// Khai báo nói một đằng, mã làm một nẻo. Không phải vi phạm luật, nhưng là
+// dấu hiệu sơ đồ đã lạc hậu — và sơ đồ sai còn tệ hơn không có sơ đồ.
+function renderStale() {
+  const box = tab("stale");
+  box.innerHTML = model.missing.length
+    ? model.missing.map((m) => `
+        <div class="card">
+          <h4>${esc(m.source)} <span class="mono">${esc(m.name)}</span></h4>
+          <p class="where mono">system.arch:${m.line}</p>
+          <p class="hint">→ ${esc(m.hint)}</p>
+        </div>`).join("")
+    : `<p class="empty">Mọi tên trong khai báo đều có trong mã.</p>`;
 }
 
 function renderDetail() {
@@ -519,7 +568,11 @@ function renderProposals() {
 // ---------- cập nhật trực tiếp ----------
 
 new EventSource("/api/events").onmessage = refresh;
-addEventListener("resize", draw);
+addEventListener("resize", () => {
+  // Cửa sổ đổi kích thước mà người chưa đụng vào thì canh lại cho vừa.
+  if (!userMoved) fitToView();
+  draw();
+});
 refresh();
 </script>
 </html>

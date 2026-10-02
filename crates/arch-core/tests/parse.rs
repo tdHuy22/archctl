@@ -258,3 +258,21 @@ fn retry_tro_toi_contract_khong_ton_tai_bi_canh_bao() {
     );
     assert!(diags.iter().any(|d| d.msg.contains("retry P.charge")), "nhận: {diags:#?}");
 }
+
+/// Khung boundary vẽ bằng hình chữ nhật bao quanh thành viên, nên thành viên
+/// phải nằm cạnh nhau — nếu không, component ngoài sẽ lọt vào trong khung và
+/// người xem đọc sai kiến trúc.
+#[test]
+fn thanh_vien_cua_boundary_nam_canh_nhau() {
+    use arch_core::layout::{Saved, place};
+    let (doc, _) = load(
+        "component A at a/**\ncomponent B at b/**\ncomponent C at c/**\n\
+         boundary Vung contains A, C:\n  verify x\n",
+    );
+    let p = place(&doc, &Saved::new());
+    let (a, b, c) = (p["A"].y, p["B"].y, p["C"].y);
+    assert!(
+        (a < b && c < b) || (a > b && c > b),
+        "B không được nằm giữa A và C: A={a} B={b} C={c}"
+    );
+}

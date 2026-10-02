@@ -14,6 +14,7 @@ chỉ làm được vế sau. Đây là vế đầu.
 | --- | --- |
 | Kéo thả hộp | `.arch/layout.json` |
 | Bấm `#locked` / `#accepted` / `#draft` | đúng một dòng trong `.arch/system.arch` |
+| Tab **Lạc hậu** | chỉ đọc — tên khai báo nhưng không có trong mã |
 | Duyệt hoặc từ chối đề xuất | `.arch/system.arch` và `.arch/decisions.md` |
 | Sắp xếp lại | xoá `.arch/layout.json` |
 
@@ -33,6 +34,12 @@ Và quan sát: sơ đồ **tự cập nhật** khi mã hoặc luật đổi. Age
 | Viền và chữ đỏ | đang có vi phạm xuất phát từ đây |
 | Cạnh đỏ đậm | vi phạm thật trong mã, **không có** trong luật |
 | Cạnh nét đứt vàng | `deny` |
+| Khung nét đứt, hoặc nhãn `⌜ Tên` | thành viên của một `boundary` |
+
+Khung boundary **chỉ được vẽ khi nó bao đúng thành viên**. Khi một component
+ngoài lọt vào trong khung — thường xảy ra khi boundary trải qua nhiều cột —
+khung bị bỏ và thay bằng nhãn trên từng hộp. Một khung bao nhầm làm người xem
+đọc sai kiến trúc, mà đó đúng là thứ sơ đồ sinh ra để tránh.
 
 Nhóm `api` luôn nằm ở cột cuối: không gì phụ thuộc vào chúng, còn mọi nơi đều
 có thể gọi vào.
