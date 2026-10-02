@@ -416,3 +416,90 @@ fn strict_khong_lam_hong_du_an_sach() {
     let p = Project::new("strict-clean");
     assert_eq!(code(&p.run(&["check", "--strict"])), 0);
 }
+
+/// `--changed` là đường mà hook của agent chạy sau mỗi lần sửa file. Bỏ sót ở
+/// đây nghĩa là agent nghe "sạch" trong khi mã đang vi phạm — chế độ hỏng tệ
+/// nhất mà công cụ này có thể mắc.
+mod changed {
+    use super::*;
+
+    fn git(root: &PathBuf, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("chạy được git");
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// Repo đã commit, rồi `src/web/<name>` được sửa thành một vi phạm
+    /// `Web -> Report`. Luật không nằm trong danh sách thay đổi, nên
+    /// `--changed` thật sự chỉ xét file vừa sửa.
+    fn project(test: &str, name: &str) -> Option<Project> {
+        if Command::new("git").arg("--version").output().is_err() {
+            return None;
+        }
+        let p = Project::new(test);
+        std::fs::create_dir_all(p.0.join("src/report")).unwrap();
+        std::fs::write(p.0.join("src/report/x.ts"), "export const r = 1\n").unwrap();
+        std::fs::write(p.0.join(format!("src/web/{name}")), "export const a = 1\n").unwrap();
+        git(&p.0, &["init", "-q", "."]);
+        git(&p.0, &["add", "-A"]);
+        git(&p.0, &["commit", "-qm", "init"]);
+        std::fs::write(p.0.join(format!("src/web/{name}")), "import { r } from '../report/x'\n")
+            .unwrap();
+        Some(p)
+    }
+
+    #[test]
+    fn ten_file_khong_thuan_ascii_van_duoc_kiem() {
+        // git bọc nháy và thoát bát phân những tên này, nên đường dẫn đọc ra
+        // không có thật trên đĩa và file bị bỏ qua trong im lặng.
+        let Some(p) = project("changed-unicode", "trang-chủ.ts") else { return };
+        let out = text(&p.run(&["check", "--changed"]));
+        assert!(out.contains("Web -> Report"), "{out}");
+    }
+
+    #[test]
+    fn ten_file_co_khoang_trang_van_duoc_kiem() {
+        let Some(p) = project("changed-space", "trang chủ.ts") else { return };
+        let out = text(&p.run(&["check", "--changed"]));
+        assert!(out.contains("Web -> Report"), "{out}");
+    }
+
+    #[test]
+    fn doi_ten_thi_xet_ten_moi() {
+        let Some(p) = project("changed-rename", "cũ.ts") else { return };
+        git(&p.0, &["add", "-A"]);
+        git(&p.0, &["commit", "-qm", "wip"]);
+        git(&p.0, &["mv", "src/web/cũ.ts", "src/web/mới.ts"]);
+        let out = text(&p.run(&["check", "--changed"]));
+        assert!(out.contains("Web -> Report"), "{out}");
+    }
+
+    #[test]
+    fn xoa_file_khong_lam_hong_gi() {
+        let Some(p) = project("changed-delete", "a.ts") else { return };
+        git(&p.0, &["add", "-A"]);
+        git(&p.0, &["commit", "-qm", "wip"]);
+        git(&p.0, &["rm", "-q", "src/web/a.ts"]);
+        let out = text(&p.run(&["check", "--changed"]));
+        assert!(out.contains("0 vi phạm mới"), "{out}");
+    }
+
+    #[test]
+    fn sua_luat_thi_kiem_lai_ca_repo() {
+        let Some(p) = project("changed-law", "a.ts") else { return };
+        git(&p.0, &["add", "-A"]);
+        git(&p.0, &["commit", "-qm", "wip"]);
+        // Chỉ luật đổi, không file nguồn nào đổi — mà vi phạm vẫn phải hiện.
+        std::fs::write(p.0.join(".arch/system.arch"), format!("{ARCH}# ghi chú\n")).unwrap();
+        let out = text(&p.run(&["check", "--changed"]));
+        assert!(out.contains("Web -> Report"), "{out}");
+    }
+}

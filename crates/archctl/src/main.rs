@@ -667,30 +667,53 @@ fn relative_to(root: &Path, paths: &[String]) -> Vec<String> {
 ///
 /// `None` nghĩa là không dùng được chế độ này — không phải repo git, hoặc
 /// chính file luật vừa đổi nên phải quét lại toàn bộ.
+/// File đã đổi theo git. `None` nghĩa là "không rút gọn được, kiểm hết" — và
+/// mọi chỗ không chắc đều trả về `None`, vì kiểm thừa chỉ tốn thời gian còn
+/// kiểm thiếu thì để lọt vi phạm.
 fn changed_files(root: &Path) -> Option<Vec<String>> {
+    // `-z` thay vì đầu ra mặc định: mặc định git bọc nháy và đổi tên có dấu
+    // thành chuỗi thoát bát phân (`"src/trang-ch\341\273\247.ts"`). Đường dẫn
+    // đó không có thật trên đĩa nên file bị bỏ qua **trong im lặng** — tức là
+    // mọi file tên không thuần ASCII đều không được hook kiểm.
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(root)
-        .args(["status", "--porcelain", "--untracked-files=all", "."])
+        .args(["status", "--porcelain", "-z", "--untracked-files=all", "."])
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
+    // Tên file không phải UTF-8 thì đã bị thay ký tự, và đường dẫn sai còn tệ
+    // hơn không có đường dẫn nào.
+    let text = std::str::from_utf8(&out.stdout).ok()?;
 
     let mut files = Vec::new();
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        if line.len() < 4 {
+    let mut records = text.split('\0');
+    while let Some(record) = records.next() {
+        // `XY <đường dẫn>`, X là trạng thái trong index, Y là trong thư mục.
+        if record.len() < 4 {
             continue;
         }
-        // `R  cũ -> mới`: chỉ tên mới mới tồn tại trên đĩa.
-        let path = line[3..].rsplit(" -> ").next().unwrap_or_default().trim_matches('"');
+        let (code, path) = record.split_at(3);
+        let code = code.as_bytes();
+        // Đổi tên và sao chép kèm một bản ghi nữa là đường dẫn cũ.
+        if code[0] == b'R' || code[0] == b'C' {
+            records.next();
+        }
         // Luật đổi thì mọi file đều phải xét lại, không chỉ file vừa sửa.
         if path.ends_with(".arch/system.arch") {
             return None;
         }
-        if arch_core::scan::is_supported(path) && root.join(path).is_file() {
+        if !arch_core::scan::is_supported(path) {
+            continue;
+        }
+        if root.join(path).is_file() {
             files.push(path.to_string());
+        } else if code[0] != b'D' && code[1] != b'D' {
+            // Không phải xoá mà vẫn không thấy file: không hiểu đầu ra của
+            // git nữa, nên quay về kiểm cả repo.
+            return None;
         }
     }
     Some(files)
