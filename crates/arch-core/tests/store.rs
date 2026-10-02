@@ -6,7 +6,7 @@
 use arch_core::scan::Lang;
 
 fn tables(lang: Lang, src: &str, needles: &[&str]) -> Vec<(String, usize)> {
-    lang.scan_all(src, &[], needles).tables.into_iter().map(|h| (h.symbol, h.line)).collect()
+    lang.scan_all(src, &Default::default(), needles).tables.into_iter().map(|h| (h.symbol, h.line)).collect()
 }
 
 #[test]
@@ -49,7 +49,7 @@ fn ten_bang_trong_chu_thich_khong_duoc_tinh() {
 
 #[test]
 fn khong_khai_bao_store_thi_khong_quet_gi() {
-    assert!(Lang::TypeScript.scan_all("\"FROM packets\"", &[], &[]).tables.is_empty());
+    assert!(Lang::TypeScript.scan_all("\"FROM packets\"", &Default::default(), &[]).tables.is_empty());
 }
 
 // ---------- ngữ nghĩa quyền sở hữu ----------

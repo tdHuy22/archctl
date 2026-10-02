@@ -220,7 +220,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
     // `--strict` coi cảnh báo là vi phạm. Dành cho CI: một import không phân
     // giải được nghĩa là có một phần mã đang không được kiểm, và trên nhánh
     // chính thì đó không nên là chuyện bỏ qua được.
-    let unchecked = report.unresolved.len() + report.ambiguous.len();
+    let unchecked = report.unresolved.len() + report.ambiguous.len() + report.missing.len();
     let failed = fresh > 0 || (strict && unchecked > 0);
     if strict && fresh == 0 && unchecked > 0 {
         crate::say!(
@@ -310,6 +310,7 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
             Reason::Denied => "bị cấm",
             Reason::NoAllow => "không được phép",
             Reason::NotOwner => "không phải chủ sở hữu",
+            Reason::Leaked => "lọt ra ngoài vùng",
         };
         crate::say!("✗ VI PHẠM  {} -> {}  ({what}, {})", v.from, v.to, v.status.as_str());
         match v.via {
@@ -340,6 +341,10 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
                         "    archctl block --on '{}' --reason \"...\"",
                         v.rule
                     ),
+                    Reason::Leaked => crate::say!(
+                        "    archctl block --on '{}' --reason \"...\"",
+                        v.rule
+                    ),
                     Reason::NoAllow | Reason::NotOwner => crate::say!(
                         "    archctl propose 'allow {} -> {}' --reason \"...\"",
                         v.from, v.to
@@ -350,6 +355,13 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
             _ => {}
         }
         crate::say!();
+    }
+
+    // Khai báo nói một đằng, mã làm một nẻo. Không phải vi phạm luật, nhưng
+    // là dấu hiệu sơ đồ đã lạc hậu — và sơ đồ sai còn tệ hơn không có sơ đồ.
+    for m in &report.missing {
+        crate::say!("⚠ KHAI BÁO LẠC HẬU  {} `{}`", m.source, m.name);
+        crate::say!("  {}:{}  — {}\n", arch_core::ARCH_FILE, m.line, m.hint);
     }
 
     for u in &report.unresolved {
@@ -398,7 +410,8 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
         crate::say!("⏸ {what}  {id}  {statement}");
     }
 
-    let warnings = report.unresolved.len()
+    let warnings = report.missing.len()
+        + report.unresolved.len()
         + report.ambiguous.len()
         + usize::from(!report.unchecked.is_empty())
         + usize::from(report.files_unmapped > 0)
@@ -431,10 +444,25 @@ fn print_json(hash: &str, report: &Report) {
                     Reason::Denied => "denied",
                     Reason::NoAllow => "no_allow",
                     Reason::NotOwner => "not_owner",
+                    Reason::Leaked => "leaked",
                 }),
                 json::string(&v.rule),
                 json::string(v.status.as_str()),
                 json::string(&v.hint),
+            )
+        })
+        .collect();
+
+    let missing: Vec<String> = report
+        .missing
+        .iter()
+        .map(|m| {
+            format!(
+                r#"{{"name":{},"source":{},"line":{},"hint":{}}}"#,
+                json::string(&m.name),
+                json::string(&m.source),
+                m.line,
+                json::string(&m.hint),
             )
         })
         .collect();
@@ -455,7 +483,7 @@ fn print_json(hash: &str, report: &Report) {
         .collect();
 
     crate::say!(
-        r#"{{"archHash":{},"filesScanned":{},"filesUnmapped":{},"checked":{},"unchecked":{},"violations":[{}],"unresolved":[{}]}}"#,
+        r#"{{"archHash":{},"filesScanned":{},"filesUnmapped":{},"checked":{},"unchecked":{},"violations":[{}],"unresolved":[{}],"missing":[{}]}}"#,
         json::string(hash),
         report.files_scanned,
         report.files_unmapped,
@@ -463,6 +491,7 @@ fn print_json(hash: &str, report: &Report) {
         json::strings(report.unchecked.iter().map(String::as_str)),
         violations.join(","),
         unresolved.join(","),
+        missing.join(","),
     );
 }
 

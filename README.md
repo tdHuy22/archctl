@@ -31,14 +31,20 @@ kiến trúc c8bd3bd9 · 15 file quét (5 Rust, 4 C/C++, 4 Python, 2 Go) · 7/8 
   → gọi Capture thay vì chạm thẳng vào dữ liệu của nó
 ```
 
-Bốn loại luật, **năm ngôn ngữ**: TypeScript/JavaScript, Python, C/C++, Rust, Go.
+**Năm ngôn ngữ**: TypeScript/JavaScript, Python, C/C++, Rust, Go.
 
 | Luật | Kiểm bằng |
 | --- | --- |
 | `allow` / `deny` giữa component | đồ thị import, phân giải theo từng ngôn ngữ |
 | `api` — hàm và từ khoá bị cấm | dò định danh trên dòng token |
 | `store owned_by` — truy cập dữ liệu | dò tên bảng trong chuỗi |
+| `boundary ... contain` — lỗi không được lọt ra ngoài vùng | dò định danh ngoài vùng |
+| `flow`, `contract`, `invariant state` | mọi tên khai báo phải tồn tại trong mã |
 | trạng thái `#draft`…`#locked` | quyết định luật nào đang có hiệu lực |
+
+Bốn khai báo cuối bắt đúng chế độ hỏng hay gặp nhất khi làm việc với agent:
+**khai báo lạc hậu**. Agent đổi tên một bước, gỡ một năng lực — và sơ đồ im
+lặng nói dối từ đó.
 
 ## Sơ đồ để thao tác, không chỉ để nhìn
 
@@ -107,7 +113,7 @@ Và trong CI, nơi agent không với tới:
 | | |
 | --- | --- |
 | Dependency ngoài std | **0** |
-| Test | 188 |
+| Test | 197 |
 | Binary | 832 KB |
 | Khởi động | 3ms |
 
@@ -120,6 +126,7 @@ agent, nên mỗi dependency thêm vào là một bề mặt tấn công thêm.
 | | |
 | --- | --- |
 | [docs/check.md](docs/check.md) | Ngữ nghĩa kiểm chứng, phân giải từng ngôn ngữ, giới hạn |
+| [docs/declarations.md](docs/declarations.md) | `flow`, `contract`, `boundary`, `invariant` |
 | [docs/api.md](docs/api.md) | Hàm và từ khoá bị cấm |
 | [docs/protocol.md](docs/protocol.md) | Giao thức agent–người |
 | [docs/adopt.md](docs/adopt.md) | `init --from-code` và `baseline` |
@@ -135,8 +142,10 @@ https://claude.ai/code/artifact/2b26df5d-d6b0-40d0-a398-7e574c7d1387
 - **Cạnh liên ngôn ngữ vô hình.** FFI, liên kết thư viện, con trỏ hàm, IPC đều
   không xuất hiện trong câu lệnh import nào. Với C/C++ thì `#include` là điều
   kiện cần nhưng rất xa điều kiện đủ — đó là lý do có `api`.
-- **`flow`, `contract`, `boundary`, `invariant` đọc được nhưng chưa kiểm.** Luật
-  nào không có cách kiểm đều bị cảnh báo là "chỉ là lời hứa".
+- **Thứ tự bước trong `flow` chưa kiểm.** Bộ quét không phân biệt được lời gọi
+  với định nghĩa hàm, nên kiểm thứ tự sẽ báo nhầm. Cần trace runtime.
+  `requires`/`ensures` của `contract` và `invariant data`/`money` cũng vậy — và
+  chúng vẫn bị cảnh báo là "chỉ là lời hứa" nếu thiếu `verify`.
 - **Đây là lan can, không phải hàng rào an ninh.** Agent chạy được shell nên vẫn
   ghi đè được file luật. Cưỡng chế thật nằm ở CI, CODEOWNERS trên `.arch/**`, và
   việc tên người duyệt bị ghi vào nhật ký.

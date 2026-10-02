@@ -41,6 +41,8 @@ pub enum Reason {
     NoAllow,
     /// Chạm vào kho dữ liệu của component khác.
     NotOwner,
+    /// Tên lẽ ra chỉ nằm trong một vùng nhưng lọt ra ngoài.
+    Leaked,
 }
 
 /// Phụ thuộc được phát hiện bằng cách nào.
@@ -103,6 +105,18 @@ pub struct Unresolved {
     pub reason: UnresolvedReason,
 }
 
+/// Một cái tên mà kiến trúc nói là phải có trong mã, nhưng không tìm thấy.
+///
+/// Thường nghĩa là khai báo đã lạc hậu: bước bị đổi tên, năng lực bị gỡ, loại
+/// lỗi không còn. Sơ đồ nói một đằng, mã làm một nẻo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Missing {
+    pub name: String,
+    pub source: String,
+    pub line: usize,
+    pub hint: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Report {
     pub files_scanned: usize,
@@ -120,6 +134,8 @@ pub struct Report {
     pub by_lang: Vec<(Lang, usize)>,
     /// Chỉ quét một phần repo, nên các con số tổng không đầy đủ.
     pub partial: bool,
+    /// Tên được khai báo nhưng không có trong mã.
+    pub missing: Vec<Missing>,
 }
 
 impl Report {
@@ -171,6 +187,16 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
     };
     let needles = dedup(&watched);
     let table_needles = dedup(&tables);
+    // Kỳ vọng từ flow, contract, boundary và invariant cũng là tên cần dò,
+    // nên gộp chung một lượt quét với nhóm `api`.
+    let expectations: Vec<_> =
+        doc.expectations().into_iter().filter(|e| e.status.is_enforced()).collect();
+    let mut needle_set: crate::scan::Needles =
+        needles.iter().map(String::as_str).collect();
+    needle_set.extend(expectations.iter().map(|e| e.name.as_str()));
+    // Tên nào xuất hiện ở component nào, để biết cái gì thiếu và cái gì lọt ra.
+    let mut sightings: std::collections::BTreeMap<&str, Vec<(String, String, usize)>> =
+        std::collections::BTreeMap::new();
     fn as_refs(v: &[String]) -> Vec<&str> {
         v.iter().map(String::as_str).collect()
     }
@@ -197,13 +223,25 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
         let Ok(src) = std::fs::read_to_string(root.join(path)) else {
             continue;
         };
-        let scan = lang.scan_all(&src, &as_refs(&needles), &as_refs(&table_needles));
+        let scan = lang.scan_all(&src, &needle_set, &as_refs(&table_needles));
         for import in &scan.imports {
             inspect(&resolver, doc, lang, path, from, import, &mut report);
         }
         inspect_hits(doc, &watched, path, from, &scan.symbols, Via::Symbol, &mut report);
         inspect_hits(doc, &tables, path, from, &scan.tables, Via::Table, &mut report);
+
+        for hit in &scan.symbols {
+            if let Some(name) = needle_set.get(hit.symbol.as_str()) {
+                sightings.entry(*name).or_default().push((
+                    from.clone(),
+                    path.clone(),
+                    hit.line,
+                ));
+            }
+        }
     }
+
+    judge_expectations(&expectations, &sightings, &mut report);
 
     counts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     report.by_lang = counts;
@@ -214,6 +252,87 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Đối chiếu kỳ vọng với những gì thật sự thấy trong mã.
+fn judge_expectations(
+    expectations: &[crate::model::Expectation],
+    sightings: &std::collections::BTreeMap<&str, Vec<(String, String, usize)>>,
+    report: &mut Report,
+) {
+    use crate::model::Expect;
+
+    for want in expectations {
+        let seen = sightings.get(want.name.as_str()).map(Vec::as_slice).unwrap_or_default();
+        match &want.expect {
+            Expect::Exists { within } => {
+                let ok = seen
+                    .iter()
+                    .any(|(owner, _, _)| within.is_empty() || within.contains(owner));
+                if ok {
+                    continue;
+                }
+                let hint = if within.is_empty() {
+                    format!("`{}` không có trong mã — sửa mã, hoặc sửa khai báo", want.name)
+                } else if seen.is_empty() {
+                    format!("`{}` không có trong mã", want.name)
+                } else {
+                    // Có thật nhưng nằm sai chỗ: thông tin này cụ thể hơn hẳn
+                    // "không tìm thấy", nên nói ra.
+                    let elsewhere: Vec<&str> =
+                        seen.iter().map(|(owner, _, _)| owner.as_str()).collect();
+                    format!(
+                        "`{}` chỉ thấy trong {}, lẽ ra phải có trong {}",
+                        want.name,
+                        elsewhere.join(", "),
+                        within.join(", ")
+                    )
+                };
+                report.missing.push(Missing {
+                    name: want.name.clone(),
+                    source: want.source.clone(),
+                    line: want.line,
+                    hint,
+                });
+            }
+            Expect::Confined { to } => {
+                // Gộp theo file như mọi vi phạm theo ký hiệu khác: in từng vị
+                // trí một sẽ làm ngập báo cáo.
+                let mut per_file: std::collections::BTreeMap<(&str, &str), (usize, usize)> =
+                    std::collections::BTreeMap::new();
+                for (owner, file, line) in seen {
+                    if to.contains(owner) {
+                        continue;
+                    }
+                    per_file
+                        .entry((owner, file))
+                        .and_modify(|(_, n)| *n += 1)
+                        .or_insert((*line, 1));
+                }
+                for ((owner, file), (line, count)) in per_file {
+                    report.violations.push(Violation {
+                        from: owner.to_string(),
+                        to: want.name.clone(),
+                        file: file.to_string(),
+                        line,
+                        spec: want.name.clone(),
+                        via: Via::Symbol,
+                        count,
+                        reason: Reason::Leaked,
+                        rule: want.source.clone(),
+                        status: want.status,
+                        hint: format!(
+                            "`{}` chỉ được nằm trong {} — ở ngoài phải chuyển thành lỗi khác",
+                            want.name,
+                            to.join(", ")
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    report.missing.sort_by(|a, b| (&a.source, &a.name).cmp(&(&b.source, &b.name)));
+    report.missing.dedup();
+}
+
 fn inspect(
     resolver: &Resolver,
     doc: &Document,

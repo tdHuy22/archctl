@@ -44,6 +44,9 @@ boundary Checkout contains Order, Stock, Payment:   @human #accepted
   compensate  charge.fail => releaseStock
   verify      chaos(Payment.down)
 
+# `updateAnalytics` cố ý không có trong mã: đó là một khai báo đã lạc hậu, và
+# `archctl check` phải chỉ ra.
+
 invariant data   [Order]    order.total == sum(items.price * items.qty) verify property_test
 invariant state  [Order]    CREATED -> RESERVED -> PAID -> SHIPPED verify property_test
 invariant money  [system]   tổng tiền trừ khách == tổng tiền ghi nhận verify daily_reconcile

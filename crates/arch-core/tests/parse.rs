@@ -239,3 +239,22 @@ fn viet_lai_chu_thich_giu_nguyen_noi_dung() {
     let out = rewrite_annotations("allow A -> B", Owner::Ai, Status::Accepted);
     assert_eq!(out, "allow A -> B  @ai #accepted");
 }
+
+#[test]
+fn on_fail_tro_toi_buoc_khong_co_trong_flow_la_loi() {
+    let errs = errors("flow F:\n  a -> b\n  on_fail(c): a\n");
+    assert!(errs.iter().any(|e| e.contains("on_fail(c)")), "nhận: {errs:?}");
+}
+
+#[test]
+fn on_fail_tro_toi_buoc_co_that_thi_khong_sao() {
+    ok("flow F:\n  a -> b\n  on_fail(b): a\n");
+}
+
+#[test]
+fn retry_tro_toi_contract_khong_ton_tai_bi_canh_bao() {
+    let (_, diags) = load(
+        "component P at p/**\nboundary B contains P:\n  retry P.charge: 3 lần\n  verify x\n",
+    );
+    assert!(diags.iter().any(|d| d.msg.contains("retry P.charge")), "nhận: {diags:#?}");
+}

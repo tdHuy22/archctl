@@ -207,6 +207,31 @@ fn list(items: &[String]) -> String {
     sorted.join(", ")
 }
 
+/// Điều mà một khai báo kiến trúc nói về mã nguồn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Expect {
+    /// Tên này phải xuất hiện trong mã. `within` rỗng nghĩa là ở đâu cũng được.
+    Exists { within: Vec<String> },
+    /// Tên này **không được** xuất hiện ngoài các component đã nêu.
+    Confined { to: Vec<String> },
+}
+
+/// Một cái tên mà `flow`, `contract`, `boundary` hay `invariant` nhắc tới, kèm
+/// điều kiện đi với nó.
+///
+/// Đây là phần kiểm được của bốn khai báo đó. Phần ngữ nghĩa — thứ tự thực
+/// thi, `requires`/`ensures`, bất biến về dữ liệu — cần trace runtime, contract
+/// test hoặc property test, và vẫn chưa kiểm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Expectation {
+    pub name: String,
+    /// Khai báo nào sinh ra kỳ vọng này, để thông báo nói rõ nguồn gốc.
+    pub source: String,
+    pub expect: Expect,
+    pub line: usize,
+    pub status: Status,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Document {
     pub components: Vec<Component>,
@@ -262,6 +287,114 @@ impl Document {
     pub fn enforced_count(&self) -> usize {
         self.rules.iter().filter(|r| r.meta.status.is_enforced()).count()
             + self.stores.iter().filter(|s| s.meta.status.is_enforced()).count()
+    }
+
+    /// Mọi tên mà khai báo kiến trúc nói là phải có trong mã.
+    ///
+    /// Chỉ rút từ những trường **có cấu trúc**: bước của `flow`, năng lực và
+    /// `errors` của `contract`, `contain` và `compensate` của `boundary`, các
+    /// trạng thái của `invariant state`. Những trường còn lại là văn xuôi —
+    /// moi tên ra từ đó chỉ sinh kỳ vọng rác.
+    pub fn expectations(&self) -> Vec<Expectation> {
+        let mut out = Vec::new();
+
+        for flow in &self.flows {
+            for line in &flow.lines {
+                for step in flow_steps(line) {
+                    out.push(Expectation {
+                        name: step,
+                        source: format!("bước của flow {}", flow.name),
+                        expect: Expect::Exists { within: Vec::new() },
+                        line: flow.meta.line,
+                        status: flow.meta.status,
+                    });
+                }
+            }
+        }
+
+        for contract in &self.contracts {
+            let within = vec![contract.component.clone()];
+            let label = format!("{}.{}", contract.component, contract.capability);
+            out.push(Expectation {
+                name: contract.capability.clone(),
+                source: format!("năng lực trong contract {label}"),
+                expect: Expect::Exists { within: within.clone() },
+                line: contract.meta.line,
+                status: contract.meta.status,
+            });
+            for field in &contract.fields {
+                if field.key != "errors" {
+                    continue;
+                }
+                for name in split_names(&field.values.join(" "), &['|', ',']) {
+                    out.push(Expectation {
+                        name,
+                        source: format!("loại lỗi trong contract {label}"),
+                        expect: Expect::Exists { within: within.clone() },
+                        line: field.line,
+                        status: contract.meta.status,
+                    });
+                }
+            }
+        }
+
+        for boundary in &self.boundaries {
+            for field in &boundary.fields {
+                let text = field.values.join(" ");
+                match field.key.as_str() {
+                    // Lỗi hạ tầng không được lọt ra ngoài vùng.
+                    "contain" => {
+                        for name in split_names(&text, &[',']) {
+                            out.push(Expectation {
+                                name,
+                                source: format!("`contain` của boundary {}", boundary.name),
+                                expect: Expect::Confined { to: boundary.contains.clone() },
+                                line: field.line,
+                                status: boundary.meta.status,
+                            });
+                        }
+                    }
+                    // `compensate charge.fail => releaseStock`
+                    "compensate" => {
+                        for name in compensate_names(&text) {
+                            out.push(Expectation {
+                                name,
+                                source: format!("`compensate` của boundary {}", boundary.name),
+                                expect: Expect::Exists { within: boundary.contains.clone() },
+                                line: field.line,
+                                status: boundary.meta.status,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        for inv in &self.invariants {
+            if inv.kind != "state" {
+                continue;
+            }
+            let within = inv
+                .scope
+                .as_deref()
+                .filter(|s| *s != "system")
+                .map(|s| vec![s.to_string()])
+                .unwrap_or_default();
+            for name in split_names(&inv.expr.replace("->", ","), &[',']) {
+                out.push(Expectation {
+                    name,
+                    source: "trạng thái trong invariant state".into(),
+                    expect: Expect::Exists { within: within.clone() },
+                    line: inv.meta.line,
+                    status: inv.meta.status,
+                });
+            }
+        }
+
+        out.sort_by(|a, b| (&a.name, &a.source).cmp(&(&b.name, &b.source)));
+        out.dedup_by(|a, b| a.name == b.name && a.source == b.source);
+        out
     }
 
     /// Mọi phần tử dưới dạng chung, để so sánh hai phiên bản và để băm.
@@ -348,6 +481,44 @@ impl Rule {
         }
         out
     }
+}
+
+pub(crate) fn flow_steps(line: &FlowLine) -> Vec<String> {
+    match line {
+        FlowLine::Sequence(steps) | FlowLine::Parallel(steps) => steps.clone(),
+        FlowLine::Cond { steps, .. } => steps.clone(),
+        FlowLine::OnFail { step, steps } => {
+            let mut all = vec![step.clone()];
+            all.extend(steps.clone());
+            all
+        }
+    }
+}
+
+/// Tách danh sách tên, chỉ giữ những gì trông như định danh. Văn xuôi lẫn vào
+/// thì bị loại, nên một trường viết tự do không sinh ra kỳ vọng rác.
+fn split_names(text: &str, separators: &[char]) -> Vec<String> {
+    text.split(|c| separators.contains(&c))
+        .map(str::trim)
+        .filter(|s| is_identifier(s))
+        .map(str::to_string)
+        .collect()
+}
+
+fn is_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && s.starts_with(|c: char| c.is_alphabetic() || c == '_')
+        && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// `charge.fail => releaseStock` → `charge`, `releaseStock`.
+fn compensate_names(text: &str) -> Vec<String> {
+    text.split("=>")
+        .flat_map(|side| side.split(','))
+        .map(|side| side.trim().split('.').next().unwrap_or("").trim())
+        .filter(|s| is_identifier(s))
+        .map(str::to_string)
+        .collect()
 }
 
 fn flow_line_text(line: &FlowLine) -> String {

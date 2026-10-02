@@ -97,8 +97,9 @@ tệ hơn hẳn việc nói thẳng là chưa biết.
 - **Include path của C/C++ chưa đọc từ build.** CMake, Makefile và
   `compile_commands.json` đều chưa được đọc, nên chỉ xấp xỉ bằng vài thư mục
   thường gặp.
-- **`flow`, `contract`, `boundary`, `invariant` chưa kiểm.** Đọc được, kiểm
-  tham chiếu được, nhưng chưa đối chiếu với mã.
+- **`flow`, `contract`, `boundary`, `invariant` kiểm được một phần** — xem
+  [declarations.md](declarations.md). Thứ tự bước và nội dung ngữ nghĩa thì
+  chưa.
 - **Chỉ thị tiền xử lý không được diễn giải.** Include trong `#ifdef` vẫn được
   tính. Có chủ ý: đoán nhánh nào được biên dịch cần biết toàn bộ cờ build, và
   phân tích phụ thuộc nên thận trọng.

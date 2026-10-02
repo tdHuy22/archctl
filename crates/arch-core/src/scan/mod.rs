@@ -13,6 +13,12 @@ mod rustlang;
 mod ts;
 
 use lexer::{CharLit, LexConfig, Tok, Token};
+use std::collections::HashSet;
+
+/// Tập tên cần tìm. Dựng một lần rồi dùng cho mọi file: số tên tăng theo số
+/// khai báo `flow`, `contract` và `invariant`, nên quét tuyến tính từng tên
+/// một sẽ không chịu nổi.
+pub type Needles<'a> = HashSet<&'a str>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Lang {
@@ -96,7 +102,7 @@ impl Lang {
     }
 
     pub fn scan(self, src: &str, needles: &[&str]) -> FileScan {
-        self.scan_all(src, needles, &[])
+        self.scan_all(src, &needles.iter().copied().collect(), &[])
     }
 
     /// Đọc file một lần, lấy import, ký hiệu bị theo dõi, và tên bảng dữ liệu.
@@ -105,7 +111,7 @@ impl Lang {
     /// Tên bảng **chỉ** được dò trong chuỗi: `"SELECT ... FROM payments"`,
     /// `knex('payments')`, `db.collection('payments')`. Lý do ở
     /// [`find_tables`].
-    pub fn scan_all(self, src: &str, needles: &[&str], tables: &[&str]) -> FileScan {
+    pub fn scan_all(self, src: &str, needles: &Needles, tables: &[&str]) -> FileScan {
         let toks = lexer::lex(src, &self.config());
         let imports = match self {
             Lang::TypeScript => ts::extract(&toks),
@@ -176,36 +182,34 @@ fn in_text(text: &str, needle: &str) -> bool {
     })
 }
 
-fn find_symbols(toks: &[Token], needles: &[&str]) -> Vec<SymbolHit> {
+fn find_symbols(toks: &[Token], needles: &Needles) -> Vec<SymbolHit> {
     if needles.is_empty() {
         return Vec::new();
     }
     let mut out = Vec::new();
     for t in toks {
         let Tok::Word(word) = &t.tok else { continue };
-        for needle in needles {
-            if word_matches(word, needle) {
-                out.push(SymbolHit { symbol: (*needle).to_string(), line: t.line });
-            }
+        // Tra bảng băm thay vì duyệt từng tên: với vài chục tên và vài triệu
+        // token thì duyệt tuyến tính là không chạy nổi.
+        if let Some(found) = needles.get(word.as_str()) {
+            out.push(SymbolHit { symbol: (*found).to_string(), line: t.line });
+            continue;
+        }
+        // `builtins.eval` khớp `eval`, `std::ptr::copy` khớp `copy`.
+        if let Some(tail) = last_segment(word)
+            && let Some(found) = needles.get(tail)
+        {
+            out.push(SymbolHit { symbol: (*found).to_string(), line: t.line });
         }
     }
     out
 }
 
-/// Khớp khi từ đúng bằng ký hiệu, hoặc là ký hiệu đó có tiền tố đủ điều kiện:
-/// `builtins.eval` khớp `eval`, `std::ptr::copy` khớp `copy`.
-///
-/// Điều quan trọng là việc này chạy trên **dòng token**, không phải văn bản
-/// thô. Một `strcpy` nằm trong chú thích hay trong chuỗi sẽ không bao giờ
-/// khớp — thứ mà `grep` không làm được.
-fn word_matches(word: &str, symbol: &str) -> bool {
-    if word == symbol {
-        return true;
-    }
-    match word.strip_suffix(symbol) {
-        Some(prefix) => prefix.ends_with('.') || prefix.ends_with("::"),
-        None => false,
-    }
+fn last_segment(word: &str) -> Option<&str> {
+    let dot = word.rfind('.').map(|i| i + 1);
+    let colon = word.rfind("::").map(|i| i + 2);
+    let at = dot.max(colon)?;
+    word.get(at..).filter(|s| !s.is_empty())
 }
 
 /// Đọc import của một file, nếu phần mở rộng thuộc ngôn ngữ đã hỗ trợ.

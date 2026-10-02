@@ -14,8 +14,56 @@ pub fn validate(doc: &Document) -> Vec<Diag> {
     let mut diags = Vec::new();
     check_unique_names(doc, &mut diags);
     check_references(doc, &mut diags);
+    check_flows(doc, &mut diags);
     check_verifiability(doc, &mut diags);
     diags
+}
+
+/// Nhất quán bên trong `flow` và `boundary`. Những lỗi này bắt được ngay khi
+/// đọc file, không cần nhìn mã.
+fn check_flows(doc: &Document, diags: &mut Vec<Diag>) {
+    for flow in &doc.flows {
+        let declared: Vec<String> = flow
+            .lines
+            .iter()
+            .filter(|l| !matches!(l, crate::model::FlowLine::OnFail { .. }))
+            .flat_map(crate::model::flow_steps)
+            .collect();
+
+        for line in &flow.lines {
+            let crate::model::FlowLine::OnFail { step, .. } = line else { continue };
+            if !declared.contains(step) {
+                diags.push(
+                    Diag::error(
+                        flow.meta.line,
+                        format!("`on_fail({step})` nhưng `{step}` không phải bước của flow `{}`", flow.name),
+                    )
+                    .with_hint("bù trừ phải gắn vào một bước có thật trong luồng"),
+                );
+            }
+        }
+    }
+
+    for boundary in &doc.boundaries {
+        for field in boundary.fields.iter().filter(|f| f.key == "retry") {
+            let text = field.values.join(" ");
+            let Some(target) = text.split(':').next().map(str::trim) else { continue };
+            let Some((component, capability)) = target.split_once('.') else { continue };
+            if !doc
+                .contracts
+                .iter()
+                .any(|c| c.component == component && c.capability == capability)
+            {
+                diags.push(
+                    Diag::warning(
+                        field.line,
+                        format!("`retry {target}` nhưng không có contract nào tên đó"),
+                    )
+                    .with_hint("thử lại chỉ an toàn khi năng lực đó được khai báo là idempotent"),
+                );
+            }
+        }
+    }
 }
 
 /// `allow` và `deny` trỏ tới cả component lẫn store, nên hai loại dùng chung
