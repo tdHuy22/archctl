@@ -89,7 +89,8 @@ tệ hơn hẳn việc nói thẳng là chưa biết.
 | `@/lib/x` khi không có khai báo nào | **báo ra** |
 | `#include "x.h"` không tìm thấy | **báo ra**, có thể nằm trong include path của build |
 | `#include <x.h>` nằm trong một thư mục `-I` của dự án | file của dự án — đúng như trình biên dịch sẽ thấy |
-| `use crate::x` không có module | **báo ra** |
+| `use super::Thing` | module cha — `Thing` là item chứ không phải module |
+| `use crate::x` không ra file nào | `mod` viết lồng trong file; không có cạnh, và **không báo** — trình biên dịch đã bảo đảm đường dẫn tồn tại |
 | `from .x import y` không có file | **báo ra** |
 | `import numpy` không có trong dự án | coi là gói — với import tuyệt đối của Python, không phân biệt được |
 

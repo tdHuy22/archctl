@@ -118,3 +118,37 @@ fn component_chua_co_allow_thi_chua_vao_dien_kiem() {
     let r = report();
     assert_eq!(r.unchecked, ["Report"]);
 }
+
+/// `use super::Import` không có đoạn module nào sau `super`, nên đích chính là
+/// module cha. Trước đây bộ phân giải chỉ thử từ đoạn thứ nhất trở đi nên bỏ
+/// qua chính nó — và một cạnh thật biến mất.
+#[test]
+fn super_tro_thang_vao_module_cha() {
+    use arch_core::resolve::{Resolved, Resolver};
+    use arch_core::scan::Import;
+
+    let root = root();
+    let r = Resolver::new(&root);
+    let at = |spec: &str| r.resolve(Lang::Rust, "src/capture/decoder.rs", &Import { spec: spec.into(), line: 1, system: false });
+
+    // `src/capture/mod.rs` tồn tại trong fixture; `super::Thing` phải ra nó.
+    assert_eq!(at("super::Thing"), Resolved::Path("src/capture/mod.rs".into()));
+    assert_eq!(at("super::*"), Resolved::Path("src/capture/mod.rs".into()));
+}
+
+/// `mod` viết lồng trong file không có file đích. Trình biên dịch đã bảo đảm
+/// đường dẫn tồn tại, nên báo "không tìm thấy module" là nói sai — và nói sai
+/// ở quy mô mỗi `#[cfg(test)] mod tests { use super::*; }` một lần.
+#[test]
+fn mod_long_trong_file_khong_bi_bao_la_thieu() {
+    use arch_core::resolve::{Resolved, Resolver};
+    use arch_core::scan::Import;
+
+    let r = Resolver::new(&root());
+    let at = |from: &str, spec: &str| r.resolve(Lang::Rust, from, &Import { spec: spec.into(), line: 1, system: false });
+
+    assert_eq!(at("src/report.rs", "crate::khong_he_co_module_nay"), Resolved::Internal);
+    assert_eq!(at("src/capture/mod.rs", "super::*"), Resolved::Internal, "`src` không phải module");
+    // `self::helper` ra chính file đang xét; cạnh tự trỏ vào mình bị bỏ sau đó.
+    assert_eq!(at("src/report.rs", "self::helper"), Resolved::Path("src/report.rs".into()));
+}

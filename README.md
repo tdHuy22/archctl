@@ -96,11 +96,14 @@ phần còn lại tạm để yên. Không cần mô tả cả repo trước khi
 { "type": "command", "command": "archctl check --changed" }
 ```
 
-| Phạm vi | 2000 file TypeScript |
+| Phạm vi | 2000 file TypeScript, 7.8 MB |
 | --- | --- |
-| `archctl check` | ~120ms |
-| `archctl check --changed` | ~24ms |
-| `archctl check <file>...` | **~11ms** |
+| `archctl check` | 65ms |
+| `archctl check --changed` | 28ms |
+| `archctl check <file>...` | **13ms** |
+
+Đo bằng trung vị của chín lần chạy, tính cả thời gian khởi động tiến trình —
+hai hàng dưới gần như chỉ còn phần đó.
 
 Và trong CI, nơi agent không với tới:
 
@@ -113,8 +116,8 @@ Và trong CI, nơi agent không với tới:
 | | |
 | --- | --- |
 | Dependency ngoài std | **0** |
-| Test | 234 |
-| Binary | 832 KB |
+| Test | 253 |
+| Binary | 945 KB |
 | Khởi động | 3ms |
 
 Không gói ngoài nào cả — kể cả bộ quét import, bộ đọc JSON, máy chủ HTTP và
@@ -142,6 +145,8 @@ https://claude.ai/code/artifact/2b26df5d-d6b0-40d0-a398-7e574c7d1387
 - **Cạnh liên ngôn ngữ vô hình.** FFI, liên kết thư viện, con trỏ hàm, IPC đều
   không xuất hiện trong câu lệnh import nào. Với C/C++ thì `#include` là điều
   kiện cần nhưng rất xa điều kiện đủ — đó là lý do có `api`.
+- **File trên 4 MB không được dò**, và được báo ra. Bộ dò giữ cả dãy token
+  trong bộ nhớ, nên một bundle đã minify 32 MB ngốn hơn một gigabyte.
 - **Thứ tự bước trong `flow` chưa kiểm.** Bộ quét không phân biệt được lời gọi
   với định nghĩa hàm, nên kiểm thứ tự sẽ báo nhầm. Cần trace runtime.
   `requires`/`ensures` của `contract` và `invariant data`/`money` cũng vậy — và

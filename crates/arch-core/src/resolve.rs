@@ -19,6 +19,11 @@ pub enum Resolved {
     Package(String),
     /// Trông như alias cần cấu hình build mà ta chưa đọc.
     Alias,
+    /// Trỏ vào trong chính crate này nhưng không ra file nào: `mod` viết lồng
+    /// trong file, hoặc một item của chính file đang xét. Không có cạnh, và
+    /// cũng không có gì để báo — trình biên dịch đã bảo đảm đường dẫn này tồn
+    /// tại, nên nói "không tìm thấy" chỉ là nói sai.
+    Internal,
     /// Đường dẫn tương đối nhưng không tìm thấy gì ở đó.
     Missing,
 }
@@ -210,11 +215,12 @@ impl Resolver {
 
     // ---- Rust ----
 
+    /// Không bao giờ trả `Missing`: đường dẫn Rust hoặc ra một file, hoặc là
+    /// một crate bên ngoài, hoặc nằm trong `mod` viết lồng. Không có trường
+    /// hợp thứ tư — trình biên dịch đã lo.
     fn rust(&self, importer: &str, spec: &str) -> Resolved {
+        // `split` luôn trả ít nhất một phần tử, kể cả với chuỗi rỗng.
         let mut parts: Vec<&str> = spec.split("::").collect();
-        if parts.is_empty() {
-            return Resolved::Missing;
-        }
         let crate_src = self.crate_src(importer);
 
         let base = match parts[0] {
@@ -231,7 +237,7 @@ impl Resolver {
                 let d = module_dir(importer);
                 match d.rsplit_once('/') {
                     Some((up, _)) => up.to_string(),
-                    None => return Resolved::Missing,
+                    None => return Resolved::Internal,
                 }
             }
             "std" | "core" | "alloc" => return Resolved::Package(parts[0].to_string()),
@@ -257,7 +263,10 @@ impl Resolver {
         };
         match self.rust_module(&base, &parts) {
             Some(found) => Resolved::Path(found),
-            None => Resolved::Missing,
+            // `crate::`, `self::` và `super::` luôn nằm trong crate này, và
+            // trình biên dịch đã bảo đảm đường dẫn tồn tại. Không ra file nào
+            // nghĩa là `mod` viết lồng trong file — không có cạnh để vẽ.
+            None => Resolved::Internal,
         }
     }
 
@@ -265,9 +274,16 @@ impl Resolver {
     /// biết trước có bao nhiêu đoạn như vậy. Thử từ đường dẫn dài nhất xuống
     /// ngắn nhất, lấy cái đầu tiên ra file.
     fn rust_module(&self, base: &str, parts: &[&str]) -> Option<String> {
-        for take in (1..=parts.len()).rev() {
+        // `take == 0` là chính `base`: `use super::Import` không có đoạn module
+        // nào sau `super`, nên đích là chính module cha.
+        for take in (0..=parts.len()).rev() {
             let joined = parts[..take].join("/");
-            let path = if base.is_empty() { joined } else { format!("{base}/{joined}") };
+            let path = match (base.is_empty(), take) {
+                (true, 0) => continue,
+                (true, _) => joined,
+                (false, 0) => base.to_string(),
+                (false, _) => format!("{base}/{joined}"),
+            };
             if let Some(found) =
                 self.first_file([format!("{path}.rs"), format!("{path}/mod.rs")])
             {

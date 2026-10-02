@@ -88,9 +88,6 @@ impl UnresolvedReason {
             (UnresolvedReason::Missing, Lang::C) => {
                 "không tìm thấy header, có thể nằm trong include path của build"
             }
-            (UnresolvedReason::Missing, Lang::Rust) => {
-                "không tìm thấy module này trong crate"
-            }
             (UnresolvedReason::Missing, _) => "không tìm thấy file nào ở đường dẫn này",
         }
     }
@@ -429,6 +426,9 @@ fn inspect(
         },
         Resolved::Alias => return unresolved(UnresolvedReason::Alias),
         Resolved::Missing => return unresolved(UnresolvedReason::Missing),
+        // Trỏ vào `mod` viết lồng trong file: không có file đích, không có
+        // cạnh, và không có gì để báo.
+        Resolved::Internal => return,
     };
 
     if to == from {

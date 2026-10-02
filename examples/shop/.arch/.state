@@ -1,5 +1,5 @@
 # archctl sinh tự động. Không cần đưa vào git.
 arch_hash 40030ba6
-attempt Stock->Payment|src/stock/reserve.ts 6
-attempt Web->Stripe|src/web/checkout-page.ts 6
-attempt Web->Timeout|src/web/checkout-page.ts 5
+attempt Stock->Payment|src/stock/reserve.ts 7
+attempt Web->Stripe|src/web/checkout-page.ts 7
+attempt Web->Timeout|src/web/checkout-page.ts 6
