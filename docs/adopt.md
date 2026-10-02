@@ -54,11 +54,21 @@ Thử trên tám repo thật:
 | tokio | `tokio/src/` | 15 |
 | flask | `src/flask/` | 3 |
 | curl | `lib/` | 7 |
+| zstd-rs | gốc repo | 4 |
+| rusqlite | `src/` | 6 |
 
-Thư mục test, ví dụ, tài liệu và thư viện nhúng (`deps/`, `vendor/`) **không
-tính khi chọn bố cục** — nhưng vẫn được kiểm bình thường sau đó. Nếu bỏ chúng
-đi mà còn lại quá ít thì repo này chủ yếu *là* test, và khi đó bỏ chúng chỉ
-làm mất thông tin.
+Hai thứ không tính **khi chọn bố cục** — nhưng vẫn được kiểm bình thường sau
+đó:
+
+- **Test, ví dụ, tài liệu, `deps/`, `vendor/`.** Nếu bỏ chúng đi mà còn lại
+  quá ít thì repo này chủ yếu *là* test, và khi đó bỏ chúng chỉ làm mất
+  thông tin.
+- **Ngôn ngữ không phải của dự án này**, theo manifest ở gốc repo
+  (`Cargo.toml`, `go.mod`, `package.json`, `pyproject.toml`). `zstd-rs` có 45
+  file Rust và 279 file C, mà C là một bản sao zstd nhúng sẵn — chọn theo số
+  file thì gốc rơi vào `zstd-safe/zstd-sys/zstd/` và toàn bộ mã Rust nằm
+  ngoài sơ đồ. Manifest nói thẳng đây là dự án gì, nên không phải đoán. Repo
+  không có manifest nào, như redis và curl, thì bỏ qua bước này.
 
 Khi không đoán được chắc chắn thì nó **không đoán** — dùng gốc repo và nói ra.
 
@@ -69,7 +79,7 @@ lại phải ra **0 vi phạm**. Mỗi vi phạm còn lại là một chỗ bộ
 kiểm chứng nhìn khác nhau về cùng một import — tức là một lỗi, không phải một
 phát hiện.
 
-Bất biến này được kiểm trên cả tám repo ở trên, và có test giữ lại trong
+Bất biến này được kiểm trên cả mười repo ở trên, và có test giữ lại trong
 `tests/discover.rs`.
 
 ### Kết quả là mô tả, không phải thiết kế

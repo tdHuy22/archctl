@@ -28,6 +28,8 @@ const MAX_PREFIX_DEPTH: usize = 3;
 /// Tiền tố phủ quá ít file thì không đáng xét, và xét hết mọi thư mục của một
 /// repo lớn thì tốn.
 const MIN_PREFIX_SHARE: usize = 8;
+/// Dưới mức này thì lọc theo ngôn ngữ của manifest không còn gì để chia.
+const MIN_NATIVE_FILES: usize = 8;
 
 /// Quá nhiều component thì sơ đồ vô dụng và file luật không ai đọc. Phần dư
 /// được liệt kê riêng để người tự quyết.
@@ -55,7 +57,7 @@ pub fn discover(root: &Path, ignores: &[String]) -> Discovery {
     }
 
     out.by_lang = tally(files.iter().filter_map(|f| Lang::for_path(f)));
-    out.source_root = pick_source_root(&files);
+    out.source_root = pick_source_root(root, &files);
     let prefix = if out.source_root.is_empty() {
         String::new()
     } else {
@@ -203,8 +205,8 @@ fn root_group_name(prefix: &str) -> String {
 /// nhóm nuốt gần hết và cũng chẳng nói lên gì. `crates/` của ripgrep thắng
 /// gốc repo vì chia được thành mười một; gốc repo của hugo thắng `tpl/` vì
 /// `tpl` chỉ là một phần.
-fn pick_source_root(files: &[String]) -> String {
-    let main = architectural(files);
+fn pick_source_root(root: &Path, files: &[String]) -> String {
+    let main = architectural(root, files);
     let floor = main.len() / MIN_PREFIX_SHARE;
 
     let mut best: Option<(usize, usize, String)> = None;
@@ -230,11 +232,19 @@ fn pick_source_root(files: &[String]) -> String {
     best.map(|(_, _, p)| p.trim_end_matches('/').to_string()).unwrap_or_default()
 }
 
-/// File nói được điều gì đó về kiến trúc sản phẩm. Test và ví dụ thì không —
-/// nhưng nếu bỏ chúng đi mà còn lại quá ít thì repo này chủ yếu **là** test,
-/// và khi đó bỏ chúng chỉ làm mất thông tin.
-fn architectural(files: &[String]) -> Vec<String> {
-    let kept: Vec<String> = files
+/// File nói được điều gì đó về kiến trúc sản phẩm. Dùng để **chọn gốc**; sau
+/// khi có gốc thì nhóm vẫn tính mọi file.
+///
+/// Hai thứ bị loại. Thứ nhất là test, ví dụ và tài liệu — nhưng nếu bỏ chúng
+/// đi mà còn lại quá ít thì repo này chủ yếu **là** test, và khi đó bỏ chúng
+/// chỉ làm mất thông tin.
+///
+/// Thứ hai là ngôn ngữ không phải của dự án này. `zstd-rs` có 45 file Rust và
+/// 279 file C, mà C là một bản sao zstd nhúng sẵn: chọn theo số file thì gốc
+/// rơi vào `zstd-safe/zstd-sys/zstd/` và toàn bộ mã Rust nằm ngoài sơ đồ.
+/// Manifest ở gốc repo nói thẳng đây là dự án gì, nên không phải đoán.
+fn architectural(root: &Path, files: &[String]) -> Vec<String> {
+    let mut kept: Vec<String> = files
         .iter()
         .filter(|f| {
             let dirs = f.rsplit_once('/').map_or("", |(d, _)| d);
@@ -242,7 +252,43 @@ fn architectural(files: &[String]) -> Vec<String> {
         })
         .cloned()
         .collect();
-    if kept.len() * 4 >= files.len() { kept } else { files.to_vec() }
+    if kept.len() * 4 < files.len() {
+        kept = files.to_vec();
+    }
+
+    let langs = manifest_langs(root);
+    if langs.is_empty() {
+        return kept;
+    }
+    let native: Vec<String> = kept
+        .iter()
+        .filter(|f| Lang::for_path(f).is_some_and(|l| langs.contains(&l)))
+        .cloned()
+        .collect();
+    // Manifest là bằng chứng chứ không phải phỏng đoán, nên không cần ngưỡng
+    // tỉ lệ — chỉ cần còn đủ file để chia thành component.
+    if native.len() >= MIN_NATIVE_FILES { native } else { kept }
+}
+
+/// Ngôn ngữ mà manifest ở gốc repo khai đây là dự án của nó. Một repo có thể
+/// khai nhiều cái cùng lúc: `pydantic-core` vừa là crate Rust vừa là gói
+/// Python.
+fn manifest_langs(root: &Path) -> Vec<Lang> {
+    const MANIFESTS: &[(&str, Lang)] = &[
+        ("Cargo.toml", Lang::Rust),
+        ("go.mod", Lang::Go),
+        ("package.json", Lang::TypeScript),
+        ("tsconfig.json", Lang::TypeScript),
+        ("pyproject.toml", Lang::Python),
+        ("setup.py", Lang::Python),
+    ];
+    let mut out: Vec<Lang> = MANIFESTS
+        .iter()
+        .filter(|(name, _)| root.join(name).is_file())
+        .map(|(_, lang)| *lang)
+        .collect();
+    out.dedup();
+    out
 }
 
 /// Tiền tố đáng thử: gốc repo, và mọi thư mục tới độ sâu `MAX_PREFIX_DEPTH`
@@ -387,18 +433,25 @@ mod tests {
         assert_eq!(unique_name("Web", &taken), "Web");
     }
 
-    #[test]
-    fn goc_ma_nguon_theo_ten_quy_uoc() {
-        let files: Vec<String> =
-            ["src/a/x.ts", "src/b/y.ts", "docs/z.ts"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(pick_source_root(&files), "src");
+    /// Không có manifest ở đó nên lọc theo ngôn ngữ không tham gia; chỉ còn
+    /// thước đo bố cục.
+    fn root_for(files: &[&str]) -> String {
+        let owned: Vec<String> = files.iter().map(|s| s.to_string()).collect();
+        pick_source_root(Path::new("/khong-ton-tai-o-dau-ca"), &owned)
     }
 
     #[test]
-    fn khong_co_thu_muc_nao_chiem_uu_the_thi_dung_goc_repo() {
-        let files: Vec<String> =
-            ["aa/x.ts", "bb/y.ts", "cc/z.ts"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(pick_source_root(&files), "", "đoán sai còn tệ hơn không đoán");
+    fn di_vao_thu_muc_chia_ra_duoc_nhieu_nhat() {
+        assert_eq!(root_for(&["src/a/x.ts", "src/b/y.ts", "src/c/z.ts", "docs/w.ts"]), "src");
+    }
+
+    #[test]
+    fn khong_co_thu_muc_nao_chia_ra_duoc_thi_dung_goc_repo() {
+        assert_eq!(
+            root_for(&["aa/x.ts", "bb/y.ts", "cc/z.ts"]),
+            "",
+            "đoán sâu hơn khi không có gì để chia là đoán bừa"
+        );
     }
 
     #[test]

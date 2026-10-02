@@ -151,6 +151,40 @@ fn canh_toi_package_cap_mot_cua_go_khong_bi_gom_vao_nhom_goc() {
     assert!(edges.contains(&"Cache->Helpers".to_string()), "{edges:?}");
 }
 
+/// Bố cục của zstd-rs và rusqlite: một bản sao thư viện C nhúng sẵn, đông file
+/// hơn hẳn mã Rust thật. Chọn gốc theo số file thì gốc rơi vào trong thư viện
+/// đó và toàn bộ mã của dự án nằm ngoài sơ đồ.
+#[test]
+fn thu_vien_c_nhung_san_khong_duoc_keo_goc_vao_trong_no() {
+    let mut files = vec!["Cargo.toml|[package]\nname = \"w\"".to_string()];
+    for d in ["a", "b", "c", "d"] {
+        for i in 0..4 {
+            files.push(format!("vendored/clib/{d}/f{i}.c|int f{i}(void) {{ return 0; }}"));
+        }
+    }
+    for i in 0..5 {
+        files.push(format!("src/f{i}.rs|pub fn f{i}() {{}}"));
+        files.push(format!("wrapper/src/g{i}.rs|pub fn g{i}() {{}}"));
+    }
+    let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+    let names = Repo::new("vendored", &refs).names();
+    assert!(names.contains(&"Src".to_string()), "{names:?}");
+    assert!(names.contains(&"Wrapper".to_string()), "{names:?}");
+    assert!(!names.contains(&"A".to_string()), "gốc không được rơi vào thư viện nhúng: {names:?}");
+}
+
+#[test]
+fn khong_co_manifest_thi_khong_loc_theo_ngon_ngu() {
+    // redis và curl là C thuần, không manifest nào. Lọc theo ngôn ngữ ở đó
+    // sẽ không có gì để dựa vào.
+    let repo = Repo::new("nomanifest", &[
+        "src/a/x.c|int x(void) { return 0; }",
+        "src/b/y.c|int y(void) { return 0; }",
+        "src/c/z.c|int z(void) { return 0; }",
+    ]);
+    assert!(repo.names().len() >= 3, "{:?}", repo.names());
+}
+
 #[test]
 fn luat_sinh_ra_tu_ma_nay_thi_kiem_lai_phai_sach() {
     for (name, files) in [

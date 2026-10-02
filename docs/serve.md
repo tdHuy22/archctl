@@ -5,7 +5,7 @@ archctl serve            # http://127.0.0.1:4000
 archctl serve --port 8080
 ```
 
-Đặc tả gốc nói sơ đồ là để con người **thao tác và quan sát**. `export --mermaid`
+Đặc tả gốc nói sơ đồ là để con người **thao tác và quan sát**. `archctl export`
 chỉ làm được vế sau. Đây là vế đầu.
 
 ## Làm được gì
