@@ -78,6 +78,21 @@ impl Server {
         format!("{}|{payload}", status.trim())
     }
 
+    /// Gửi thẳng byte thô, để dựng được những yêu cầu mà client tử tế không
+    /// bao giờ gửi.
+    fn raw(&self, request: &str) -> String {
+        let Ok(mut stream) = TcpStream::connect(("127.0.0.1", self.port)) else {
+            return String::new();
+        };
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+        if stream.write_all(request.as_bytes()).is_err() {
+            return String::new();
+        }
+        let mut reply = String::new();
+        let _ = BufReader::new(stream).read_line(&mut reply);
+        reply.trim().to_string()
+    }
+
     fn get(&self, path: &str) -> String {
         self.request("GET", path, "")
     }
@@ -265,6 +280,44 @@ fn file_luat_hong_thi_bao_loi_chu_khong_sap() {
     assert!(out.contains("200 OK"), "{out}");
     assert!(out.contains(r#""error""#), "{out}");
     assert!(out.contains("compoent"), "phải nói rõ sai ở đâu: {out}");
+}
+
+#[test]
+fn content_length_bia_khong_giet_may_chu() {
+    let s = Server::start("hugebody", 4745);
+    // `vec![0u8; usize::MAX]`: cấp phát hỏng thì Rust kết thúc cả tiến trình,
+    // nên một yêu cầu dị dạng từng đủ để giết máy chủ.
+    s.raw("POST /api/layout HTTP/1.1\r\nHost: x\r\nContent-Length: 18446744073709551615\r\n\r\n");
+    s.raw("POST /api/layout HTTP/1.1\r\nHost: x\r\nContent-Length: 99999999\r\n\r\n");
+    assert!(s.get("/api/model").contains("200 OK"), "máy chủ phải còn sống");
+}
+
+#[test]
+fn post_tu_trang_web_khac_bi_tu_choi() {
+    // Máy chủ chỉ gắn vào 127.0.0.1, nhưng trang web bất kỳ người dùng đang mở
+    // vẫn `fetch` tới đây được. Kẻ gửi không đọc được trả lời, nhưng thao tác
+    // ghi vẫn xảy ra — đủ để duyệt một đề xuất mà không ai xem.
+    let s = Server::start("csrf", 4746);
+    let before = s.law();
+    let body = r##"{"name":"Report","status":"#locked"}"##;
+    let reply = s.raw(&format!(
+        "POST /api/status HTTP/1.1\r\nHost: x\r\nOrigin: https://evil.example\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    ));
+    assert!(reply.contains("403"), "{reply}");
+    assert_eq!(s.law(), before, "từ chối thì không được đụng vào file");
+}
+
+#[test]
+fn post_tu_chinh_giao_dien_van_di_qua() {
+    let s = Server::start("csrf-ok", 4747);
+    let body = r##"{"name":"Report","status":"#locked"}"##;
+    let reply = s.raw(&format!(
+        "POST /api/status HTTP/1.1\r\nHost: x\r\nOrigin: http://127.0.0.1:4747\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    ));
+    assert!(reply.contains("200 OK"), "{reply}");
+    assert!(s.law().contains("@ai #locked"), "{}", s.law());
 }
 
 #[test]

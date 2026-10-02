@@ -26,6 +26,15 @@ const LAYOUT_FILE: &str = ".arch/layout.json";
 /// Khoảng dò thay đổi file. Đủ nhanh để thấy agent làm việc gần như tức thì,
 /// đủ chậm để không tốn CPU khi ngồi yên.
 const POLL_MS: u64 = 400;
+/// Thân yêu cầu lớn nhất. Thân thật chỉ là vài chục byte JSON; mức này rộng
+/// rãi gấp nhiều lần mà vẫn chặn được `Content-Length` bịa.
+const MAX_BODY: usize = 1 << 20;
+/// Số dòng tiêu đề tối đa, để một client gửi tiêu đề vô tận không ngốn hết
+/// bộ nhớ.
+const MAX_HEADERS: usize = 64;
+/// Hết hạn đọc và ghi. Không có nó thì một kết nối mở rồi im lặng giữ một
+/// luồng mãi mãi.
+const IO_TIMEOUT_S: u64 = 15;
 
 type Clients = Arc<Mutex<Vec<TcpStream>>>;
 
@@ -61,7 +70,7 @@ pub fn cmd_serve(args: &[String]) -> ExitCode {
     for stream in listener.incoming().flatten() {
         let root = root.clone();
         let clients = Arc::clone(&clients);
-        std::thread::spawn(move || handle(stream, &root, &clients));
+        std::thread::spawn(move || handle(stream, &root, &clients, port));
     }
     ExitCode::from(exit::OK)
 }
@@ -71,7 +80,30 @@ pub fn cmd_serve(args: &[String]) -> ExitCode {
 struct Request {
     method: String,
     path: String,
+    /// Trang web nào gửi yêu cầu này, nếu là trình duyệt gửi.
+    origin: String,
     body: String,
+}
+
+/// Yêu cầu có đổi trạng thái không được đến từ một trang web khác.
+///
+/// Máy chủ chỉ gắn vào `127.0.0.1`, nhưng trang web bất kỳ mà người dùng đang
+/// mở vẫn `fetch` tới đây được: `POST` dạng đơn giản không cần hỏi trước, và
+/// kẻ gửi không đọc được trả lời — nhưng **thao tác ghi vẫn xảy ra**. Nghĩa là
+/// một trang web lạ có thể duyệt một đề xuất đang chờ, đúng thứ mà cả hệ thống
+/// này dựng lên để bắt buộc phải có người xem.
+///
+/// Trình duyệt luôn gửi `Origin` cho yêu cầu khác nguồn. Client không phải
+/// trình duyệt không gửi gì, và vẫn dùng được như cũ.
+fn same_origin(origin: &str, port: u16) -> bool {
+    origin.is_empty()
+        || [
+            format!("http://127.0.0.1:{port}"),
+            format!("http://localhost:{port}"),
+            format!("http://[::1]:{port}"),
+        ]
+        .iter()
+        .any(|allowed| origin == allowed)
 }
 
 fn read_request(stream: &TcpStream) -> Option<Request> {
@@ -83,22 +115,32 @@ fn read_request(stream: &TcpStream) -> Option<Request> {
     let path = parts.next()?.to_string();
 
     let mut length = 0usize;
-    loop {
+    let mut origin = String::new();
+    for _ in 0..MAX_HEADERS {
         let mut header = String::new();
         if reader.read_line(&mut header).ok()? == 0 || header.trim().is_empty() {
             break;
         }
-        if let Some((name, value)) = header.split_once(':')
-            && name.eq_ignore_ascii_case("content-length")
-        {
-            length = value.trim().parse().unwrap_or(0);
+        let Some((name, value)) = header.split_once(':') else { continue };
+        if name.eq_ignore_ascii_case("content-length") {
+            // `Content-Length: 18446744073709551615` từng cấp phát `usize::MAX`
+            // byte, và cấp phát hỏng thì Rust kết thúc **cả tiến trình**: một
+            // yêu cầu dị dạng giết máy chủ.
+            length = value.trim().parse().ok().filter(|n| *n <= MAX_BODY)?;
+        } else if name.eq_ignore_ascii_case("origin") {
+            origin = value.trim().to_string();
         }
     }
     let mut body = vec![0u8; length];
     if length > 0 {
         reader.read_exact(&mut body).ok()?;
     }
-    Some(Request { method, path, body: String::from_utf8_lossy(&body).into_owned() })
+    Some(Request {
+        method,
+        path,
+        origin,
+        body: String::from_utf8_lossy(&body).into_owned(),
+    })
 }
 
 fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &str) {
@@ -111,7 +153,11 @@ fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &str)
     let _ = stream.write_all(body.as_bytes());
 }
 
-fn handle(mut stream: TcpStream, root: &Path, clients: &Clients) {
+fn handle(mut stream: TcpStream, root: &Path, clients: &Clients, port: u16) {
+    let timeout = Some(std::time::Duration::from_secs(IO_TIMEOUT_S));
+    let _ = stream.set_read_timeout(timeout);
+    let _ = stream.set_write_timeout(timeout);
+
     let Some(req) = read_request(&stream) else { return };
     let path = req.path.split('?').next().unwrap_or("/");
 
@@ -123,11 +169,21 @@ fn handle(mut stream: TcpStream, root: &Path, clients: &Clients) {
         ("GET", "/api/events") => {
             let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
                         Cache-Control: no-store\r\nConnection: keep-alive\r\n\r\n";
-            if stream.write_all(head.as_bytes()).is_ok() {
-                if let Ok(mut open) = clients.lock() {
-                    open.push(stream);
-                }
+            // Luồng sự kiện mở lâu dài, nên bỏ hạn ghi đã đặt ở trên.
+            let _ = stream.set_write_timeout(None);
+            if stream.write_all(head.as_bytes()).is_ok()
+                && let Ok(mut open) = clients.lock()
+            {
+                open.push(stream);
             }
+        }
+        ("POST", _) if !same_origin(&req.origin, port) => {
+            respond(
+                &mut stream,
+                "403 Forbidden",
+                "application/json",
+                r#"{"ok":false,"error":"yêu cầu từ trang khác"}"#,
+            );
         }
         ("POST", _) => {
             // Mỗi kết nối một luồng, nên hai tab mở cùng lúc có thể cùng

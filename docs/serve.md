@@ -66,6 +66,27 @@ dõi.
 
 Muốn xếp lại từ đầu thì bấm **Sắp xếp lại**.
 
+## Máy chủ chịu được yêu cầu dị dạng
+
+Chỉ gắn vào `127.0.0.1`, nhưng "chỉ trong máy" không có nghĩa là "chỉ có giao
+diện này gửi tới".
+
+| | |
+| --- | --- |
+| `Content-Length` quá lớn | từ chối. `vec![0u8; usize::MAX]` cấp phát hỏng, mà cấp phát hỏng thì Rust kết thúc **cả tiến trình**: một yêu cầu dị dạng từng đủ giết máy chủ |
+| Tiêu đề vô tận | tối đa 64 dòng |
+| Kết nối mở rồi im lặng | hết hạn sau 15 giây, không giữ luồng mãi |
+| `POST` kèm `Origin` lạ | 403 |
+
+Chỗ cuối đáng nói nhất. Trang web bất kỳ mà người dùng đang mở vẫn `fetch` tới
+`127.0.0.1` được: `POST` dạng đơn giản không cần hỏi trước. Kẻ gửi không đọc
+được trả lời — nhưng **thao tác ghi vẫn xảy ra**. Nghĩa là một trang lạ có thể
+duyệt một đề xuất đang chờ, tức là đúng thứ mà cả hệ thống này dựng lên để bắt
+buộc phải có người xem.
+
+Trình duyệt luôn gửi `Origin` cho yêu cầu khác nguồn, nên chỉ cần đối chiếu nó.
+Client không phải trình duyệt (`curl`, test) không gửi gì và vẫn dùng như cũ.
+
 ## Ghi file
 
 Máy chủ tạo một luồng cho mỗi kết nối, nên hai tab cùng mở có thể cùng
