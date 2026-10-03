@@ -37,7 +37,15 @@ boundary Checkout contains Order, Stock, Payment:
 Tên tách khỏi lệnh vì hai thứ đó phục vụ hai người đọc khác nhau:
 `verify property_test` đọc được trên sơ đồ, `npm run test:props` thì không.
 
-Một cái tên chưa khai báo, hay một khai báo không ai dùng, đều được báo ra.
+Một cái tên chưa khai báo thì được báo ra: `verify benchmark` không trỏ tới
+đâu cả thì luật gắn với nó vẫn chỉ là lời hứa, và đổi lại được một cảnh báo
+chỉ bằng cách gõ thêm một cái tên thì cảnh báo đó vô dụng.
+
+Chiều ngược lại **không** bị báo. Một cách kiểm không invariant nào trỏ tới
+vẫn được `archctl verify` chạy và vẫn bị `check` đòi biên nhận, nên gọi nó là
+"không ai dùng" là sai. Bắt mỗi `verify` phải gắn vào một luật chỉ làm người
+ta bịa luật ra để gắn, trong khi "test đạt" hay "không dependency ngoài std"
+là thứ đáng kiểm thật mà không phải quan hệ giữa hai component nào.
 
 ## Chạy
 

@@ -411,10 +411,78 @@ fn strict_coi_import_khong_phan_giai_duoc_la_vi_pham() {
     assert!(text(&out).contains("--strict"), "{}", text(&out));
 }
 
+/// `ARCH` có `allow Web -> Order` và không có gì cho `Order`, `Report`, nên dự
+/// án này *có* cảnh báo — loại "chưa khai báo". `--strict` phải cho qua: áp
+/// dần là cách dùng được thiết kế, và chặn ở đây nghĩa là không ai bật được
+/// `--strict` cho tới khi đã mô tả xong cả repo.
 #[test]
-fn strict_khong_lam_hong_du_an_sach() {
-    let p = Project::new("strict-clean");
-    assert_eq!(code(&p.run(&["check", "--strict"])), 0);
+fn strict_khong_chan_du_an_moi_ap_luat_mot_phan() {
+    let p = Project::new("strict-partial");
+    let out = p.run(&["check", "--strict"]);
+    assert!(text(&out).contains("CHƯA KIỂM"), "mong có cảnh báo chưa khai báo: {}", text(&out));
+    assert_eq!(code(&out), 0, "{}", text(&out));
+}
+
+/// Một luật không ai kiểm được là loại "chưa kiểm được" tệ nhất: nó *có* mặt
+/// trong file, đọc lên y như luật đang được áp. `--strict` chạy trên nhánh
+/// chính nên nó phải chặn, chứ không phải in ra rồi đi tiếp.
+#[test]
+fn strict_coi_canh_bao_cua_file_luat_la_vi_pham() {
+    let p = Project::new("strict-law");
+    std::fs::write(
+        p.0.join(".arch/system.arch"),
+        format!("{ARCH}invariant money [system] tổng tiền khớp   @human #accepted\n"),
+    )
+    .unwrap();
+    let out = p.run(&["check"]);
+    assert_eq!(code(&out), 0, "không có --strict thì vẫn chỉ là cảnh báo: {}", text(&out));
+    assert!(text(&out).contains("lời hứa"), "{}", text(&out));
+
+    let out = p.run(&["check", "--strict"]);
+    assert_eq!(code(&out), 1, "{}", text(&out));
+}
+
+/// In ba dòng ⚠ rồi kết luận "0 cảnh báo" thì dòng cuối — dòng duy nhất nhiều
+/// người đọc — nói ngược lại những dòng ngay trên nó.
+///
+/// So hai lần chạy thay vì khẳng định một con số: con số đúng tình cờ không
+/// chứng minh được gì, còn "thêm một luật không kiểm được thì đếm tăng đúng
+/// một" thì có.
+#[test]
+fn tong_ket_dem_ca_canh_bao_cua_file_luat() {
+    fn dem(out: &str) -> usize {
+        out.lines()
+            .find_map(|l| l.split_once(" cảnh báo"))
+            .and_then(|(head, _)| head.rsplit(' ').next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("không thấy dòng tổng kết trong:\n{out}"))
+    }
+
+    let p = Project::new("count-law");
+    let truoc = dem(&text(&p.run(&["check"])));
+    std::fs::write(
+        p.0.join(".arch/system.arch"),
+        format!("{ARCH}invariant money [system] tổng tiền khớp   @human #accepted\n"),
+    )
+    .unwrap();
+    let sau = text(&p.run(&["check"]));
+    assert!(sau.contains("lời hứa"), "{sau}");
+    assert_eq!(dem(&sau), truoc + 1, "{sau}");
+}
+
+/// Bản người đọc cắt ở mười hai mục và bảo "xem `--json`". Nếu `--json` thiếu
+/// hẳn một loại thì mã thoát và nội dung JSON nói hai chuyện khác nhau.
+#[test]
+fn json_co_canh_bao_cua_file_luat() {
+    let p = Project::new("json-law");
+    std::fs::write(
+        p.0.join(".arch/system.arch"),
+        format!("{ARCH}invariant money [system] tổng tiền khớp   @human #accepted\n"),
+    )
+    .unwrap();
+    let out = text(&p.run(&["check", "--json"]));
+    assert!(out.contains(r#""lawWarnings":[{"#), "{out}");
+    assert!(out.contains("lời hứa"), "{out}");
 }
 
 /// `--changed` là đường mà hook của agent chạy sau mỗi lần sửa file. Bỏ sót ở

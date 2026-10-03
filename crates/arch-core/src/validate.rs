@@ -210,14 +210,12 @@ fn check_verify_targets(doc: &Document, diags: &mut Vec<Diag>) {
             );
         }
     }
-    for v in &doc.verifies {
-        if !doc.verify_uses().iter().any(|(name, _, _)| *name == v.name) {
-            diags.push(Diag::warning(
-                v.meta.line,
-                format!("cách kiểm `{}` không được chỗ nào dùng", v.name),
-            ));
-        }
-    }
+    // Không có cảnh báo "cách kiểm này không ai dùng". Nó từng có, và nó sai:
+    // `archctl verify` chạy mọi cách kiểm đang có hiệu lực, và `check` đòi
+    // biên nhận còn hiệu lực cho từng cái — kể cả cái không invariant nào trỏ
+    // tới. Đòi mỗi `verify` phải gắn vào một luật chỉ làm người ta bịa ra luật
+    // để gắn, trong khi "test đạt" hay "không dependency ngoài std" là thứ
+    // đáng kiểm thật mà không phải quan hệ giữa hai component nào.
 }
 
 fn check_verifiability(doc: &Document, diags: &mut Vec<Diag>) {
@@ -253,15 +251,29 @@ fn check_verifiability(doc: &Document, diags: &mut Vec<Diag>) {
     }
 
     for inv in &doc.invariants {
+        // Có cách kiểm **đã khai báo** thì hết là lời hứa: `archctl verify`
+        // chạy lệnh thật và `check` đòi biên nhận còn hiệu lực. Điều đó đúng
+        // cả với loại `algo` — chính nó là đường ra cho những gì phân tích
+        // tĩnh không làm được, nên gọi một `algo` đã có cách kiểm là "chỉ là
+        // ghi chú" thì sai.
+        //
+        // Phải là đã khai báo, chứ không chỉ có tên: `verify benchmark` trỏ
+        // tới một cách kiểm không tồn tại thì invariant đó vẫn đúng là ghi
+        // chú, và thoát được cảnh báo chỉ bằng cách gõ thêm một cái tên là
+        // một lỗ để lách.
+        let names = inv.verify_names();
+        if !names.is_empty() && names.iter().all(|n| doc.verify(n).is_some()) {
+            continue;
+        }
         if inv.kind == "algo" {
             diags.push(
                 Diag::warning(
                     inv.meta.line,
                     "invariant loại `algo` không kiểm được bằng máy, chỉ là ghi chú",
                 )
-                .with_hint("đừng dựa vào nó như một ràng buộc"),
+                .with_hint("gắn `verify <tên>` để có cái kiểm thật, hoặc đừng dựa vào nó như một ràng buộc"),
             );
-        } else if inv.verify.is_empty() && inv.meta.status.is_enforced() {
+        } else if inv.meta.status.is_enforced() {
             diags.push(Diag::warning(
                 inv.meta.line,
                 format!("invariant {} không có verify, đây chỉ là lời hứa", inv.kind),

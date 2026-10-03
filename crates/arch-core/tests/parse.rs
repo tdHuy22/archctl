@@ -214,13 +214,48 @@ fn invariant_khong_co_verify_bi_canh_bao_la_loi_hua() {
     );
 }
 
+/// `verify benchmark` trỏ tới một cách kiểm không ai khai báo. Cái tên đó
+/// không dẫn tới đâu, nên invariant vẫn đúng là ghi chú — thoát được cảnh báo
+/// chỉ bằng cách gõ thêm một cái tên thì cảnh báo này vô dụng.
 #[test]
-fn invariant_algo_luon_bi_canh_bao_khong_kiem_duoc() {
+fn invariant_algo_tro_toi_cach_kiem_khong_co_thi_van_la_ghi_chu() {
     let (_, diags) = load("component S at s/**\ninvariant algo [S] O(log n) verify benchmark");
     assert!(
         diags.iter().any(|d| d.msg.contains("không kiểm được bằng máy")),
         "nhận: {diags:#?}"
     );
+}
+
+/// Khai báo cách kiểm thật thì `algo` hết là ghi chú: `archctl verify` chạy
+/// lệnh và `check` đòi biên nhận. Gọi nó là "chỉ là ghi chú" lúc này là sai,
+/// và là kiểu sai dạy người ta bỏ qua cảnh báo.
+#[test]
+fn invariant_algo_co_cach_kiem_that_thi_het_la_ghi_chu() {
+    let (_, diags) = load(
+        "component S at s/**\n\
+         verify benchmark runs \"cargo bench\"\n\
+         invariant algo [S] O(log n) verify benchmark",
+    );
+    let warnings: Vec<String> = diags
+        .iter()
+        .filter(|d| d.severity == Severity::Warning)
+        .map(|d| d.msg.clone())
+        .collect();
+    assert!(warnings.is_empty(), "không mong cảnh báo nào, nhận: {warnings:#?}");
+}
+
+/// Cách kiểm không invariant nào trỏ tới vẫn được chạy và vẫn bị đòi biên
+/// nhận, nên "không ai dùng" là sai. Bắt mỗi `verify` phải gắn vào một luật
+/// chỉ làm người ta bịa luật ra để gắn.
+#[test]
+fn cach_kiem_khong_ai_tro_toi_khong_bi_canh_bao() {
+    let (_, diags) = load("component S at s/**\nverify tests runs \"cargo test\"");
+    let warnings: Vec<String> = diags
+        .iter()
+        .filter(|d| d.severity == Severity::Warning)
+        .map(|d| d.msg.clone())
+        .collect();
+    assert!(warnings.is_empty(), "không mong cảnh báo nào, nhận: {warnings:#?}");
 }
 
 #[test]

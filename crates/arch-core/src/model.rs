@@ -150,6 +150,13 @@ pub struct Invariant {
     pub meta: Meta,
 }
 
+impl Invariant {
+    /// Tên các cách kiểm mà invariant này trỏ tới, tách y như lúc đọc file.
+    pub fn verify_names(&self) -> Vec<String> {
+        self.verify.iter().flat_map(|v| split_names(v, &[','])).collect()
+    }
+}
+
 /// Cách kiểm một lời hứa, kèm lệnh chạy được.
 ///
 /// `contract`, `boundary` và `invariant` đều có trường `verify` trỏ tới một
@@ -295,7 +302,7 @@ impl Document {
         }
         for i in &self.invariants {
             let label = format!("invariant {}", i.kind);
-            for name in i.verify.iter().flat_map(|v| split_names(v, &[','])) {
+            for name in i.verify_names() {
                 out.push((name, label.clone(), i.meta.line));
             }
         }

@@ -103,7 +103,8 @@ Lệnh chung:
   archctl check [--root <dir>] [--json] [--changed] [--strict] [<file>...]
                                           Đối chiếu mã nguồn với luật.
                                           Cho thẳng đường dẫn thì nhanh nhất.
-                                          --strict coi cảnh báo là vi phạm.
+                                          --strict: mọi cảnh báo, kể cả
+                                          của file luật, thành vi phạm.
   archctl diff [<git-ref>] [--root <dir>] So luật hiện tại với một bản trước
   archctl parse <file.arch>               Chỉ đọc và kiểm tra file luật
   archctl verify [<tên>...] [--quiet]     Chạy các cách kiểm đã khai báo và
@@ -138,7 +139,11 @@ Mã thoát:
 }
 
 /// Đọc file luật ở gốc đã cho. In chẩn đoán và trả `None` nếu DSL có lỗi.
-fn load_arch(root: &Path, as_json: bool) -> Option<(Document, String)> {
+///
+/// Trả về cả cảnh báo của bộ kiểm tra mô hình, vì người gọi cần đếm chúng:
+/// in ra ba dòng ⚠ rồi kết luận "0 cảnh báo" thì dòng cuối — dòng duy nhất
+/// nhiều người đọc — nói ngược lại những dòng ngay trên nó.
+fn load_arch(root: &Path, as_json: bool) -> Option<(Document, String, Vec<Diag>)> {
     let path = root.join(arch_core::ARCH_FILE);
     let src = match std::fs::read_to_string(&path) {
         Ok(s) => s,
@@ -162,9 +167,9 @@ fn load_arch(root: &Path, as_json: bool) -> Option<(Document, String)> {
     // `archctl parse` in chúng, mà không ai chạy `parse` thường xuyên — nên
     // "contract này không có verify, đây chỉ là lời hứa" chưa bao giờ tới
     // được người cần đọc nó.
+    let warnings: Vec<Diag> =
+        diags.into_iter().filter(|d| d.severity == Severity::Warning).collect();
     if !as_json {
-        let warnings: Vec<&Diag> =
-            diags.iter().filter(|d| d.severity == Severity::Warning).collect();
         for d in warnings.iter().take(MAX_LISTED) {
             crate::say!("⚠ {}:{d}", arch_core::ARCH_FILE);
             if let Some(hint) = &d.hint {
@@ -178,7 +183,7 @@ fn load_arch(root: &Path, as_json: bool) -> Option<(Document, String)> {
             crate::say!();
         }
     }
-    Some((doc, hash))
+    Some((doc, hash, warnings))
 }
 
 fn cmd_check(args: &[String]) -> ExitCode {
@@ -225,7 +230,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
         return ExitCode::from(exit::USAGE);
     };
 
-    let Some((doc, hash)) = load_arch(&root, as_json) else {
+    let Some((doc, hash, law)) = load_arch(&root, as_json) else {
         return ExitCode::from(exit::DSL_INVALID);
     };
 
@@ -242,26 +247,36 @@ fn cmd_check(args: &[String]) -> ExitCode {
     let memory = remember(&root, &hash, &report);
 
     if as_json {
-        print_json(&hash, &report);
+        print_json(&hash, &report, &law);
     } else {
-        print_human(&hash, &report, &memory);
+        print_human(&hash, &report, &memory, law.len());
     }
 
     let fresh = arch_core::baseline::split(&report.violations, &memory.baseline).fresh.len();
     // `--strict` coi cảnh báo là vi phạm. Dành cho CI: một import không phân
     // giải được nghĩa là có một phần mã đang không được kiểm, và trên nhánh
     // chính thì đó không nên là chuyện bỏ qua được.
+    //
+    // Cảnh báo của chính file luật tính vào đây. Chúng là loại tệ nhất trong
+    // các loại "chưa kiểm được": `contract` không có verify hay `invariant`
+    // chỉ là ghi chú nghĩa là luật *có* mà không ai kiểm, và trên nhánh chính
+    // một luật như vậy đọc lên y như một luật đang được áp.
+    //
+    // `report.unchecked` (component chưa có `allow`) và `files_unmapped` thì
+    // **không** tính, dù chúng vẫn được in và vẫn vào dòng tổng kết. Chúng
+    // không phải chỗ hỏng mà là phần chưa khai báo, và áp dần là cách dùng
+    // được thiết kế. Tính chúng vào đây nghĩa là không ai bật được `--strict`
+    // cho tới khi đã mô tả xong cả repo.
     let unchecked = report.unresolved.len()
         + report.ambiguous.len()
         + report.missing.len()
         + report.vacuous.len()
         + report.oversized.len()
-        + report.unproven.len();
+        + report.unproven.len()
+        + law.len();
     let failed = fresh > 0 || (strict && unchecked > 0);
     if strict && fresh == 0 && unchecked > 0 {
-        crate::say!(
-            "\n--strict: {unchecked} chỗ không phân giải được, coi như vi phạm"
-        );
+        crate::say!("\n--strict: {unchecked} chỗ chưa kiểm được, coi như vi phạm");
     }
     ExitCode::from(if failed { exit::VIOLATION } else { exit::OK })
 }
@@ -311,7 +326,7 @@ fn remember(root: &Path, hash: &str, report: &Report) -> Memory {
     }
 }
 
-fn print_human(hash: &str, report: &Report, memory: &Memory) {
+fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize) {
     // Báo trước mọi thứ khác: agent đang làm theo một bản luật đã cũ.
     if !memory.previous_hash.is_empty() && memory.previous_hash != hash {
         crate::say!(
@@ -507,7 +522,8 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
         crate::say!("⏸ {what}  {id}  {statement}");
     }
 
-    let warnings = report.missing.len()
+    let warnings = law_warnings
+        + report.missing.len()
         + report.vacuous.len()
         + report.unproven.len()
         + report.oversized.len()
@@ -522,7 +538,7 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
     }
 }
 
-fn print_json(hash: &str, report: &Report) {
+fn print_json(hash: &str, report: &Report, law: &[Diag]) {
     let violations: Vec<String> = report
         .violations
         .iter()
@@ -627,8 +643,25 @@ fn print_json(hash: &str, report: &Report) {
         })
         .collect();
 
+    // Cảnh báo của chính file luật cũng vào đây, vì `--strict` tính chúng là
+    // vi phạm. Thiếu chúng thì bản JSON và mã thoát nói hai chuyện khác nhau.
+    let law_warnings: Vec<String> = law
+        .iter()
+        .map(|d| {
+            format!(
+                r#"{{"line":{},"msg":{},"hint":{}}}"#,
+                d.line,
+                json::string(&d.msg),
+                match &d.hint {
+                    Some(h) => json::string(h),
+                    None => "null".to_string(),
+                }
+            )
+        })
+        .collect();
+
     crate::say!(
-        r#"{{"archHash":{},"filesScanned":{},"filesUnmapped":{},"checked":{},"unchecked":{},"violations":[{}],"unresolved":[{}],"missing":[{}],"vacuous":[{}],"unproven":[{}],"oversized":[{}],"ambiguous":[{}]}}"#,
+        r#"{{"archHash":{},"filesScanned":{},"filesUnmapped":{},"checked":{},"unchecked":{},"violations":[{}],"unresolved":[{}],"missing":[{}],"vacuous":[{}],"unproven":[{}],"oversized":[{}],"ambiguous":[{}],"lawWarnings":[{}]}}"#,
         json::string(hash),
         report.files_scanned,
         report.files_unmapped,
@@ -641,6 +674,7 @@ fn print_json(hash: &str, report: &Report) {
         unproven.join(","),
         oversized.join(","),
         ambiguous.join(","),
+        law_warnings.join(","),
     );
 }
 

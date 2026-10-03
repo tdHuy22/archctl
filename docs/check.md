@@ -192,6 +192,32 @@ tới mức đó thì người đọc bỏ qua cả những dòng đáng đọc,
 
 `--json` vẫn đưa đủ, không cắt gì.
 
+## Ba nhóm cảnh báo, và `--strict` chặn hai nhóm
+
+Mọi cảnh báo đều được in, và đều vào con số ở dòng tổng kết. Nhưng chúng không
+cùng một loại, nên `--strict` không đối xử như nhau.
+
+**Đã thử kiểm và không kiểm được** — `--strict` chặn. Tên không phân giải
+được, file quá 4 MB, khai báo lạc hậu, `allow` không bao giờ áp được vào đâu,
+mẫu `at` chồng nhau, biên nhận hết hạn. Mỗi cái là một chỗ báo cáo đang im
+lặng mà không phải vì sạch.
+
+**Luật không ai kiểm được** — `--strict` chặn. `contract` không có verify,
+`invariant` chỉ là ghi chú, component không có `at`. Nhóm này đáng chặn hơn
+nhóm trên: một import không phân giải được chỉ là một chỗ tối, còn một
+`contract` không có verify là một luật **có mặt trong file**, đọc lên y như
+luật đang được áp — ai xem sơ đồ cũng tưởng nó đang được giữ.
+
+**Chưa khai báo** — `--strict` **không** chặn. Component chưa có `allow` nào,
+file không thuộc component nào. Áp dần là cách dùng được thiết kế: `init
+--from-code` sinh ra toàn `#draft`, và một repo đang chạy thì luôn có phần
+chưa vào sơ đồ. Chặn nhóm này nghĩa là không ai áp được `--strict` cho tới khi
+đã mô tả xong cả repo, và chẳng ai làm thế. Xem [adopt.md](adopt.md).
+
+Trước đây nhóm thứ hai chỉ được in chứ không được đếm: dòng cuối nói "0 cảnh
+báo" trong khi ba dòng ⚠ nằm ngay phía trên, và `--strict` trong CI cho qua
+một file luật đầy luật không ai kiểm.
+
 ## Giới hạn tài nguyên
 
 File trên **4 MB** không được dò, và được báo ra:
