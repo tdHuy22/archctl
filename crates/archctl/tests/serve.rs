@@ -20,6 +20,8 @@ struct Server {
     child: Child,
     port: u16,
     root: PathBuf,
+    /// Khoá phiên mà máy chủ in ra lúc khởi động.
+    key: String,
 }
 
 impl Server {
@@ -38,17 +40,25 @@ impl Server {
         // Vi phạm có sẵn: Web đã vào diện kiểm nhưng không được gọi Report.
         std::fs::write(root.join("src/web/page.ts"), "import { r } from '../report/x'\n").unwrap();
 
+        let log = root.join("serve.log");
         let child = Command::new(env!("CARGO_BIN_EXE_archctl"))
             .args(["serve", "--port", &port.to_string(), "--root"])
             .arg(&root)
-            .stdout(std::process::Stdio::null())
+            .stdout(std::fs::File::create(&log).unwrap())
             .spawn()
             .expect("chạy được archctl serve");
 
-        let server = Server { child, port, root };
+        let mut server = Server { child, port, root, key: String::new() };
         for _ in 0..60 {
             if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                return server;
+                // Khoá chỉ đi ra màn hình của người dùng, nên test cũng phải
+                // lấy nó từ đó.
+                let printed = std::fs::read_to_string(&log).unwrap_or_default();
+                if let Some(key) = printed.split("?k=").nth(1).and_then(|r| r.split_whitespace().next())
+                {
+                    server.key = key.to_string();
+                    return server;
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
@@ -58,7 +68,9 @@ impl Server {
     fn request(&self, method: &str, path: &str, body: &str) -> String {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).expect("kết nối được");
         let head = format!(
-            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nX-Archctl-Key: {}\r\n\
+             Content-Length: {}\r\n\r\n",
+            self.key,
             body.len()
         );
         stream.write_all(head.as_bytes()).unwrap();
@@ -302,7 +314,9 @@ fn post_tu_trang_web_khac_bi_tu_choi() {
     let before = s.law();
     let body = r##"{"name":"Report","status":"#locked"}"##;
     let reply = s.raw(&format!(
-        "POST /api/status HTTP/1.1\r\nHost: x\r\nOrigin: https://evil.example\r\nContent-Length: {}\r\n\r\n{body}",
+        "POST /api/status HTTP/1.1\r\nHost: x\r\nOrigin: https://evil.example\r\n\
+         X-Archctl-Key: {}\r\nContent-Length: {}\r\n\r\n{body}",
+        s.key,
         body.len()
     ));
     assert!(reply.contains("403"), "{reply}");
@@ -314,7 +328,9 @@ fn post_tu_chinh_giao_dien_van_di_qua() {
     let s = Server::start("csrf-ok", 4747);
     let body = r##"{"name":"Report","status":"#locked"}"##;
     let reply = s.raw(&format!(
-        "POST /api/status HTTP/1.1\r\nHost: x\r\nOrigin: http://127.0.0.1:4747\r\nContent-Length: {}\r\n\r\n{body}",
+        "POST /api/status HTTP/1.1\r\nHost: x\r\nOrigin: http://127.0.0.1:4747\r\n\
+         X-Archctl-Key: {}\r\nContent-Length: {}\r\n\r\n{body}",
+        s.key,
         body.len()
     ));
     assert!(reply.contains("200 OK"), "{reply}");
@@ -363,6 +379,34 @@ fn khong_ai_mo_so_do_thi_van_phuc_vu_duoc_client_moi() {
     let mut buf = [0u8; 256];
     let n = stream.read(&mut buf).expect("nhận được sự kiện sau khi máy chủ ngủ");
     assert!(String::from_utf8_lossy(&buf[..n]).contains("changed"));
+}
+
+/// Agent chạy ngay trên máy này, nên "chỉ gắn vào 127.0.0.1" không phân biệt
+/// được nó với người dùng. Một lệnh `curl` vào `/api/decide` là nó tự duyệt
+/// được đề xuất của chính mình — đúng thứ mà cả giao thức dựng lên để ngăn.
+#[test]
+fn khong_co_khoa_phien_thi_khong_ghi_duoc_gi() {
+    let s = Server::start("nokey", 4750);
+    let before = s.law();
+    let body = r##"{"name":"Report","status":"#locked"}"##;
+    let reply = s.raw(&format!(
+        "POST /api/status HTTP/1.1
+Host: x
+Content-Length: {}
+
+{body}",
+        body.len()
+    ));
+    assert!(reply.contains("403"), "{reply}");
+    assert_eq!(s.law(), before);
+}
+
+#[test]
+fn khoa_phien_doi_moi_lan_khoi_dong() {
+    let a = Server::start("key-a", 4751);
+    let b = Server::start("key-b", 4752);
+    assert_eq!(a.key.len(), 32, "khoá quá ngắn: {:?}", a.key);
+    assert_ne!(a.key, b.key, "hai lần chạy không được dùng chung khoá");
 }
 
 #[test]

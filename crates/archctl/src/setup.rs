@@ -11,9 +11,29 @@ use std::process::ExitCode;
 
 const ARCHITECTURE_MD: &str = include_str!("../../../templates/ARCHITECTURE.md");
 
-/// Hook chạy sau mỗi lần agent sửa file. Cho thẳng đường dẫn vào `check` nên
-/// chỉ mất khoảng 10ms — đủ nhanh để agent không có cớ bỏ qua.
+/// Hook chạy sau mỗi lần agent sửa file, cộng ranh giới ghi cho `.arch/`.
+///
+/// Hook mất khoảng 10ms vì đường dẫn được đưa thẳng vào `check` — đủ nhanh để
+/// agent không có cớ bỏ qua.
+///
+/// Phần `permissions.deny` mới là chỗ biến "agent không được ghi file luật"
+/// từ một câu trong tài liệu thành một ràng buộc. Không có nó, cả mô hình
+/// quyền chỉ là lời đề nghị: agent ghi thẳng `system.arch` là tự cho mình
+/// quyền, và ghi `.verified` là tự cấp cho mình một biên nhận. `proposals.arch`
+/// được chừa ra vì đó đúng là chỗ agent phải ghi.
 const CLAUDE_SETTINGS: &str = r#"{
+  "permissions": {
+    "deny": [
+      "Write(./.arch/system.arch)",
+      "Edit(./.arch/system.arch)",
+      "Write(./.arch/.verified)",
+      "Edit(./.arch/.verified)",
+      "Write(./.arch/baseline.arch)",
+      "Edit(./.arch/baseline.arch)",
+      "Write(./.git/config)",
+      "Edit(./.git/config)"
+    ]
+  },
   "hooks": {
     "PostToolUse": [
       {
@@ -31,10 +51,15 @@ const CI_SNIPPET: &str = r#"
 Chạy trong CI để vi phạm mới chặn được pull request:
 
   - run: archctl check --strict
+  - run: archctl verify
 
 Và khoá file luật lại bằng CODEOWNERS, để agent không tự duyệt được:
 
   .arch/**  @ten-cua-ban
+
+CI quan trọng vì nó chạy ngoài tầm với của agent. Mọi ranh giới ở máy cục bộ
+đều dựa vào việc agent không ghi được `.arch/` — `.claude/settings.json` đã
+cấm, nhưng cấm bằng cấu hình thì chỉ chắc bằng chính cấu hình đó.
 "#;
 const POINTER: &str = "Kiến trúc dự án: đọc `.arch/ARCHITECTURE.md` trước khi viết mã.";
 

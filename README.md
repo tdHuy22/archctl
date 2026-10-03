@@ -119,7 +119,7 @@ Và trong CI, nơi agent không với tới:
 | | |
 | --- | --- |
 | Dependency ngoài std | **0** |
-| Test | 330 |
+| Test | 332 |
 | Binary | 1058 KB |
 | Khởi động | 3ms |
 

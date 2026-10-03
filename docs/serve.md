@@ -128,6 +128,7 @@ diện này gửi tới".
 | Tiêu đề vô tận | tối đa 64 dòng |
 | Kết nối mở rồi im lặng | hết hạn sau 15 giây, không giữ luồng mãi |
 | `POST` kèm `Origin` lạ | 403 |
+| `POST` không có khoá phiên | 403 |
 
 Chỗ cuối đáng nói nhất. Trang web bất kỳ mà người dùng đang mở vẫn `fetch` tới
 `127.0.0.1` được: `POST` dạng đơn giản không cần hỏi trước. Kẻ gửi không đọc
@@ -136,7 +137,25 @@ duyệt một đề xuất đang chờ, tức là đúng thứ mà cả hệ th�
 buộc phải có người xem.
 
 Trình duyệt luôn gửi `Origin` cho yêu cầu khác nguồn, nên chỉ cần đối chiếu nó.
-Client không phải trình duyệt (`curl`, test) không gửi gì và vẫn dùng như cũ.
+
+Nhưng `curl` **không** gửi `Origin`, nên bước đó một mình không chặn được nó —
+và "chỉ gắn vào 127.0.0.1" cũng không, vì agent chạy ngay trên máy này. Một
+dòng lệnh là nó tự duyệt được đề xuất của chính mình:
+
+```
+curl -X POST http://127.0.0.1:4000/api/decide \
+     -d '{"id":"p-aaa111","verdict":"accept","reason":"x"}'
+```
+
+Nên `serve` sinh một khoá phiên lúc khởi động và in nó trong địa chỉ:
+
+```
+archctl serve · http://127.0.0.1:4000/?k=f93986017075681d53133f31f37c8b95
+```
+
+Khoá chỉ đi ra màn hình của người dùng. Nó không vào file, không vào `argv`
+nên `ps` không thấy, và không sống qua lần chạy sau. Giao diện đọc nó từ địa
+chỉ rồi gửi kèm mọi thao tác ghi.
 
 ## Luồng theo dõi không được ngốn CPU khi ngồi yên
 

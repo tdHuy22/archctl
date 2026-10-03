@@ -174,8 +174,16 @@ const el = (name, attrs = {}, text) => {
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
+// Khoá phiên nằm trong địa chỉ mà `archctl serve` in ra. Nó phân biệt người
+// đang mở trang với agent đang chạy cùng máy — `curl` vào đây không có nó.
+const sessionKey = new URLSearchParams(location.search).get("k") || "";
+
 async function post(path, body) {
-  const res = await fetch(path, { method: "POST", body: JSON.stringify(body) });
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "X-Archctl-Key": sessionKey },
+    body: JSON.stringify(body),
+  });
   const data = await res.json().catch(() => ({ ok: false, error: "máy chủ không trả lời" }));
   if (!data.ok) alert(data.error || "không thực hiện được");
   return data.ok;

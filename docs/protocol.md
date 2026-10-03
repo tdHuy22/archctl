@@ -120,3 +120,24 @@ Chốt chặn thật sự nằm ở nơi agent không với tới:
 
 Trong máy cá nhân, đây là sự **hợp tác**. Việc **cưỡng chế** thuộc về CI và quy
 trình review, giống hệt cách một đội kiểm soát lẫn nhau.
+
+## Ranh giới này dựa vào đâu
+
+"Agent không ghi `.arch/system.arch`" là nền của cả giao thức, nên nó phải là
+ràng buộc chứ không phải lời đề nghị. `archctl init` ghi vào
+`.claude/settings.json`:
+
+```json
+"permissions": { "deny": [
+  "Write(./.arch/system.arch)", "Edit(./.arch/system.arch)",
+  "Write(./.arch/.verified)",   "Edit(./.arch/.verified)",
+  "Write(./.git/config)",       "Edit(./.git/config)"
+] }
+```
+
+`.git/config` nằm trong danh sách vì git thực thi `core.fsmonitor` và
+`core.pager` như lệnh shell — `archctl` tự gọi git với những khoá đó đã tắt,
+nhưng mọi công cụ khác trong vòng lặp thì không.
+
+Cấm bằng cấu hình thì chỉ chắc bằng chính cấu hình đó. Lớp cưỡng chế thật vẫn
+là CI và CODEOWNERS trên `.arch/**`, vì chúng chạy ngoài tầm với của agent.

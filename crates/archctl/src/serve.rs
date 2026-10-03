@@ -44,6 +44,32 @@ const IO_TIMEOUT_S: u64 = 15;
 
 type Clients = Arc<Mutex<Vec<TcpStream>>>;
 
+/// Khoá phiên, sinh mới mỗi lần `serve` khởi động.
+///
+/// Chỉ gắn vào `127.0.0.1` thì chưa đủ: agent chạy ngay trên máy này, và một
+/// lệnh `curl` vào `/api/decide` là nó **tự duyệt được đề xuất của chính nó**
+/// — đúng thứ mà cả giao thức dựng lên để ngăn.
+///
+/// Khoá chỉ đi ra màn hình của người dùng. Nó không vào file, không vào
+/// `argv` (nên `ps` không thấy), và không sống qua lần chạy sau.
+fn session_key() -> String {
+    let mut bytes = [0u8; 16];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        let _ = f.read_exact(&mut bytes);
+    }
+    // Nếu không đọc được nguồn ngẫu nhiên thì trộn thêm thứ khó đoán từ xa,
+    // còn hơn trả về một khoá cố định.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let salt = u64::from(nanos) ^ u64::from(std::process::id()) << 32;
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b ^= (salt >> ((i % 8) * 8)) as u8;
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 pub fn cmd_serve(args: &[String]) -> ExitCode {
     let parsed = match parse_args(args, &["root", "port"], &["no-open"]) {
         Ok(a) => a,
@@ -70,13 +96,16 @@ pub fn cmd_serve(args: &[String]) -> ExitCode {
     let clients: Clients = Arc::new(Mutex::new(Vec::new()));
     spawn_watcher(root.clone(), Arc::clone(&clients));
 
-    crate::say!("archctl serve · http://127.0.0.1:{port}");
-    crate::say!("Sơ đồ tự cập nhật khi mã hoặc luật thay đổi. Ctrl-C để dừng.");
+    let key = Arc::new(session_key());
+    crate::say!("archctl serve · http://127.0.0.1:{port}/?k={key}");
+    crate::say!("Mở đúng địa chỉ trên: khoá trong đó là thứ phân biệt bạn với");
+    crate::say!("agent đang chạy cùng máy. Ctrl-C để dừng.");
 
     for stream in listener.incoming().flatten() {
         let root = root.clone();
         let clients = Arc::clone(&clients);
-        std::thread::spawn(move || handle(stream, &root, &clients, port));
+        let key = Arc::clone(&key);
+        std::thread::spawn(move || handle(stream, &root, &clients, port, &key));
     }
     ExitCode::from(exit::OK)
 }
@@ -88,6 +117,8 @@ struct Request {
     path: String,
     /// Trang web nào gửi yêu cầu này, nếu là trình duyệt gửi.
     origin: String,
+    /// Khoá phiên, từ header `X-Archctl-Key`.
+    key: String,
     body: String,
 }
 
@@ -122,6 +153,7 @@ fn read_request(stream: &TcpStream) -> Option<Request> {
 
     let mut length = 0usize;
     let mut origin = String::new();
+    let mut key = String::new();
     for _ in 0..MAX_HEADERS {
         let mut header = String::new();
         if reader.read_line(&mut header).ok()? == 0 || header.trim().is_empty() {
@@ -135,6 +167,8 @@ fn read_request(stream: &TcpStream) -> Option<Request> {
             length = value.trim().parse().ok().filter(|n| *n <= MAX_BODY)?;
         } else if name.eq_ignore_ascii_case("origin") {
             origin = value.trim().to_string();
+        } else if name.eq_ignore_ascii_case("x-archctl-key") {
+            key = value.trim().to_string();
         }
     }
     let mut body = vec![0u8; length];
@@ -145,6 +179,7 @@ fn read_request(stream: &TcpStream) -> Option<Request> {
         method,
         path,
         origin,
+        key,
         body: String::from_utf8_lossy(&body).into_owned(),
     })
 }
@@ -159,7 +194,7 @@ fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &str)
     let _ = stream.write_all(body.as_bytes());
 }
 
-fn handle(mut stream: TcpStream, root: &Path, clients: &Clients, port: u16) {
+fn handle(mut stream: TcpStream, root: &Path, clients: &Clients, port: u16, key: &str) {
     let timeout = Some(std::time::Duration::from_secs(IO_TIMEOUT_S));
     let _ = stream.set_read_timeout(timeout);
     let _ = stream.set_write_timeout(timeout);
@@ -182,6 +217,16 @@ fn handle(mut stream: TcpStream, root: &Path, clients: &Clients, port: u16) {
             {
                 open.push(stream);
             }
+        }
+        // Khoá trước, nguồn gốc sau: `curl` không gửi `Origin` nên bước kia
+        // không chặn được nó.
+        ("POST", _) if req.key != key => {
+            respond(
+                &mut stream,
+                "403 Forbidden",
+                "application/json",
+                r#"{"ok":false,"error":"thiếu khoá phiên — mở lại địa chỉ mà `archctl serve` in ra"}"#,
+            );
         }
         ("POST", _) if !same_origin(&req.origin, port) => {
             respond(
