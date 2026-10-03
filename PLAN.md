@@ -13,23 +13,25 @@ Cập nhật 2026-10-03.
   nhận ghi bằng `receipt.py` ngày 2026-10-03.
 - **Thử trên 10 repo thật** (hugo, tokio, ripgrep, vue core, flask, curl,
   redis, pydantic-core, zstd-rs, rusqlite) — 5078 file, 5 ngôn ngữ. Mỗi repo
-  32 kiểm tra phủ hết các lệnh: 10/10 qua.
+  33 kiểm tra phủ hết các lệnh: 10/10 qua.
 - **Bất biến tự nhất quán**: luật do `init --from-code` sinh ra, nâng lên
   `#accepted` rồi kiểm lại chính mã đó → 0 vi phạm trên cả 10 repo. Mỗi vi
   phạm còn lại sẽ là một chỗ bộ khám phá và bộ kiểm chứng nhìn khác nhau.
-- Hiệu năng: 2000 file TypeScript 58ms; đường hook (`check <file>`) 11ms;
+- **`verify` chạy thật.** `verify <tên> runs "<lệnh>"` khai báo cách kiểm,
+  `archctl verify` chạy và ghi biên nhận, `archctl check` nhắc khi biên nhận
+  đã cũ hơn mã hoặc luật. Chỉ `verify` thực thi lệnh; `check` không bao giờ,
+  và `propose`/`accept` đều từ chối đề xuất mang theo lệnh shell.
+- Hiệu năng: 2000 file TypeScript 57ms; đường hook (`check <file>`) 11ms;
   cây 5078 file: `init` 1.57s, `check` 1.08s, 35 MB.
 
 Bộ đo nằm ở `scratchpad/bench2/` (`run.py` đo chất lượng + hiệu năng,
 `flows.py` chạy hết các lệnh). Repo thử clone ở `scratchpad/real/`. Cả hai
 ngoài git; clone lại bằng `git clone --depth 1`.
 
-### Việc tiếp theo, theo thứ tự
+### Việc tiếp theo
 
-Không có việc nào đang dở. Những thứ dưới đây là tuỳ chọn, xếp theo giá trị:
-
-Không còn việc nào được coi là thiếu. Hai thứ đã cân nhắc rồi **loại**, ghi
-lại để khỏi nghĩ lại:
+Không có việc nào đang dở, và không còn thứ gì được coi là thiếu. Hai việc
+từng nằm trong danh sách đã cân nhắc rồi **loại**, ghi lại để khỏi nghĩ lại:
 
 1. **Component theo `[workspace] members`.** Đã dùng manifest để *không chia
    nhỏ hơn* ranh giới package, và đó là phần có giá trị. Lấy thẳng members
