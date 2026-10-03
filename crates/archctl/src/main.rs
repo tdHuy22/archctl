@@ -584,6 +584,34 @@ fn print_json(hash: &str, report: &Report) {
         })
         .collect();
 
+    // Bản người đọc bị cắt ở mười hai mục và bảo "xem `--json`", nên bản JSON
+    // phải có đủ mọi loại — nếu không thì CI và hook không bao giờ thấy chúng.
+    let unproven: Vec<String> = report
+        .unproven
+        .iter()
+        .map(|(name, why)| {
+            format!(r#"{{"name":{},"why":{}}}"#, json::string(name), json::string(why.describe()))
+        })
+        .collect();
+
+    let oversized: Vec<String> = report
+        .oversized
+        .iter()
+        .map(|(file, bytes)| format!(r#"{{"file":{},"bytes":{bytes}}}"#, json::string(file)))
+        .collect();
+
+    let ambiguous: Vec<String> = report
+        .ambiguous
+        .iter()
+        .map(|(file, owners)| {
+            format!(
+                r#"{{"file":{},"owners":{}}}"#,
+                json::string(file),
+                json::strings(owners.iter().map(String::as_str))
+            )
+        })
+        .collect();
+
     let unresolved: Vec<String> = report
         .unresolved
         .iter()
@@ -600,7 +628,7 @@ fn print_json(hash: &str, report: &Report) {
         .collect();
 
     crate::say!(
-        r#"{{"archHash":{},"filesScanned":{},"filesUnmapped":{},"checked":{},"unchecked":{},"violations":[{}],"unresolved":[{}],"missing":[{}],"vacuous":[{}]}}"#,
+        r#"{{"archHash":{},"filesScanned":{},"filesUnmapped":{},"checked":{},"unchecked":{},"violations":[{}],"unresolved":[{}],"missing":[{}],"vacuous":[{}],"unproven":[{}],"oversized":[{}],"ambiguous":[{}]}}"#,
         json::string(hash),
         report.files_scanned,
         report.files_unmapped,
@@ -610,6 +638,9 @@ fn print_json(hash: &str, report: &Report) {
         unresolved.join(","),
         missing.join(","),
         vacuous.join(","),
+        unproven.join(","),
+        oversized.join(","),
+        ambiguous.join(","),
     );
 }
 
@@ -739,6 +770,32 @@ fn relative_to(root: &Path, paths: &[String]) -> Vec<String> {
 ///
 /// `None` nghĩa là không dùng được chế độ này — không phải repo git, hoặc
 /// chính file luật vừa đổi nên phải quét lại toàn bộ.
+/// Gọi `git` mà không để cấu hình của repo chọn hộ mình một lệnh để chạy.
+///
+/// `core.fsmonitor` là một lệnh shell, và git chạy nó trong `git status`. Một
+/// dòng trong `.git/config` là đủ để `archctl check --changed` — chính lệnh
+/// mà `init` cài làm hook của agent — thực thi thứ người viết dòng đó chọn.
+/// `core.pager` và alias cũng vậy với các lệnh khác.
+///
+/// Repo là thứ agent ghi được, nên cấu hình trong đó không đáng tin hơn mã
+/// nguồn trong đó.
+fn git(root: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C").arg(root);
+    for (key, value) in [
+        ("core.fsmonitor", ""),
+        ("core.hooksPath", "/dev/null"),
+        ("core.pager", "cat"),
+        ("core.editor", "true"),
+        ("core.sshCommand", "false"),
+        ("protocol.ext.allow", "never"),
+    ] {
+        cmd.arg("-c").arg(format!("{key}={value}"));
+    }
+    cmd.arg("--no-optional-locks");
+    cmd
+}
+
 /// File đã đổi theo git. `None` nghĩa là "không rút gọn được, kiểm hết" — và
 /// mọi chỗ không chắc đều trả về `None`, vì kiểm thừa chỉ tốn thời gian còn
 /// kiểm thiếu thì để lọt vi phạm.
@@ -747,9 +804,7 @@ fn changed_files(root: &Path) -> Option<Vec<String>> {
     // thành chuỗi thoát bát phân (`"src/trang-ch\341\273\247.ts"`). Đường dẫn
     // đó không có thật trên đĩa nên file bị bỏ qua **trong im lặng** — tức là
     // mọi file tên không thuần ASCII đều không được hook kiểm.
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
+    let out = git(root)
         .args(["status", "--porcelain", "-z", "--untracked-files=all", "."])
         .output()
         .ok()?;
@@ -794,9 +849,7 @@ fn changed_files(root: &Path) -> Option<Vec<String>> {
 /// Lấy nội dung file luật ở một ref của git. Dùng `git` có sẵn thay vì thư
 /// viện, để giữ cây dependency bằng không.
 fn git_show(root: &Path, git_ref: &str) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
+    let out = git(root)
         .arg("show")
         // `./` bắt git tính đường dẫn từ thư mục hiện tại, không phải từ gốc
         // repo — cần thiết khi dự án nằm trong thư mục con của repo.

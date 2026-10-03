@@ -9,7 +9,7 @@ Cập nhật 2026-10-03.
 
 ### Đã xong, có bằng chứng
 
-- **322 test, clippy sạch với `-D warnings`, 0 dependency ngoài std.** Biên
+- **330 test, clippy sạch với `-D warnings`, 0 dependency ngoài std.** Biên
   nhận ghi bằng `receipt.py` ngày 2026-10-03.
 - **Thử trên 10 repo thật** (hugo, tokio, ripgrep, vue core, flask, curl,
   redis, pydantic-core, zstd-rs, rusqlite) — 5078 file, 5 ngôn ngữ. Mỗi repo

@@ -359,8 +359,26 @@ pub fn cmd_verify(args: &[String]) -> ExitCode {
     let wanted: Vec<&arch_core::model::Verify> = if parsed.positional.is_empty() {
         doc.verifies.iter().collect()
     } else {
+        // Một cái tên gõ sai mà vẫn thoát 0 thì trong CI nó là "đạt".
+        let unknown: Vec<&String> = parsed
+            .positional
+            .iter()
+            .filter(|name| doc.verify(name).is_none())
+            .collect();
+        if !unknown.is_empty() {
+            eprintln!(
+                "archctl: không có cách kiểm nào tên: {}",
+                unknown.iter().map(|n| n.as_str()).collect::<Vec<_>>().join(", ")
+            );
+            return ExitCode::from(exit::USAGE);
+        }
         doc.verifies.iter().filter(|v| parsed.positional.contains(&v.name)).collect()
     };
+    // Cách kiểm chưa có hiệu lực thì `check` không đòi, nên chạy nó ở đây là
+    // thực thi một lệnh mà không ai yêu cầu.
+    let wanted: Vec<&arch_core::model::Verify> =
+        wanted.into_iter().filter(|v| v.meta.status.is_enforced()).collect();
+
     if wanted.is_empty() {
         if doc.verifies.is_empty() {
             crate::say!("Chưa khai báo cách kiểm nào.");
@@ -379,6 +397,11 @@ pub fn cmd_verify(args: &[String]) -> ExitCode {
 
     for v in &wanted {
         crate::say!("▸ {}  {}", v.name, v.command);
+        // Lấy mốc **trước** khi chạy. Một bộ test chạy hai phút mà agent sửa
+        // file ở phút thứ nhất thì biên nhận lấy mốc lúc xong sẽ mới hơn file
+        // vừa sửa, và lần chạy đó im lặng được coi là chứng minh cho mã nó
+        // chưa từng thấy.
+        let at = arch_core::verify::now();
         let began = std::time::Instant::now();
         let status = std::process::Command::new("sh")
             .arg("-c")
@@ -400,7 +423,7 @@ pub fn cmd_verify(args: &[String]) -> ExitCode {
         receipts.push(arch_core::verify::Receipt {
             name: v.name.clone(),
             passed,
-            at: arch_core::verify::now(),
+            at,
             arch_hash: hash.clone(),
         });
     }

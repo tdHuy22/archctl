@@ -497,6 +497,19 @@ impl Document {
             let text = r.one_line();
             out.push(Element::new("rule", text.clone(), text, &r.meta));
         }
+        // Lệnh phải nằm trong thân, không chỉ cái tên. `archctl verify` thực
+        // thi đúng chuỗi này, và biên nhận gắn vào dấu vân tay của luật — nếu
+        // đổi lệnh mà vân tay không đổi thì biên nhận chứng minh cho một lệnh
+        // không còn tồn tại. Nó cũng làm `archctl diff` thấy được thay đổi,
+        // và đó đúng là phần tử người duyệt cần đọc kỹ nhất.
+        for v in &self.verifies {
+            out.push(Element::new(
+                "verify",
+                v.name.clone(),
+                format!("runs {:?}", v.command),
+                &v.meta,
+            ));
+        }
         for f in &self.flows {
             let body = f.lines.iter().map(flow_line_text).collect::<Vec<_>>().join("; ");
             out.push(Element::new("flow", f.name.clone(), body, &f.meta));

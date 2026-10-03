@@ -120,11 +120,32 @@ fn take_block<'a, 'b>(lines: &'b [Line<'a>], start: usize) -> (&'b [Line<'a>], u
 }
 
 /// Cắt các chú thích `@owner` và `#status` ở cuối dòng ra khỏi phần nội dung.
+/// Vị trí này có nằm trong một chuỗi nháy kép không — đếm số dấu nháy chưa
+/// bị gạch chéo ở phía trước.
+fn inside_quotes(line: &str, at: usize) -> bool {
+    let mut open = false;
+    let mut escaped = false;
+    for (i, c) in line.char_indices() {
+        if i >= at {
+            break;
+        }
+        match c {
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            '"' => open = !open,
+            _ => {}
+        }
+    }
+    open
+}
+
 fn split_meta<'a>(line: &'a str, no: usize, diags: &mut Vec<Diag>) -> (&'a str, Meta) {
     let mut cut = line.len();
     let mut annotations = Vec::new();
     for (offset, token) in whitespace_tokens(line).into_iter().rev() {
-        if token.starts_with('@') || token.starts_with('#') {
+        // Bên trong một chuỗi thì `@` và `#` là nội dung, không phải chú thích.
+        // `verify x runs "npm test -- --grep @slow"` từng làm hỏng cả file luật.
+        if (token.starts_with('@') || token.starts_with('#')) && !inside_quotes(line, offset) {
             annotations.push(token);
             cut = offset;
         } else {

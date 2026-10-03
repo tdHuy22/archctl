@@ -299,3 +299,17 @@ fn bom_dau_file_khong_lam_hong_bo_doc() {
 
     assert_eq!(arch_core::baseline::parse(&format!("{BOM}A -> B via import\n")).len(), 1);
 }
+
+
+/// `@` và `#` bên trong một chuỗi là nội dung, không phải chú thích. Một lệnh
+/// `npm test -- --grep @slow` từng làm hỏng cả file luật, nên cả `check` lẫn
+/// `verify` chết theo.
+#[test]
+fn ky_tu_chu_thich_trong_chuoi_khong_bi_cat() {
+    let doc = ok("verify v runs \"npm test -- --grep @slow\"  @human #locked");
+    assert_eq!(doc.verifies[0].command, "npm test -- --grep @slow");
+    assert_eq!(doc.verifies[0].meta.status, arch_core::Status::Locked);
+
+    let doc = ok("verify w runs \"curl http://x/#frag\"");
+    assert_eq!(doc.verifies[0].command, "curl http://x/#frag");
+}
