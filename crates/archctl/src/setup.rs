@@ -211,13 +211,15 @@ fn append_pointer(root: &Path, name: &str) -> Result<bool, String> {
 fn append_gitignore(root: &Path) -> Result<bool, String> {
     let path = root.join(".gitignore");
     let mut body = std::fs::read_to_string(&path).unwrap_or_default();
-    if body.contains(".arch/.state") {
+    if body.contains("/.arch/.state") {
         return Ok(false);
     }
     if !body.is_empty() && !body.ends_with('\n') {
         body.push('\n');
     }
-    body.push_str(".arch/.state\n");
+    // `**/` chứ không neo vào gốc: monorepo có thể có nhiều `.arch/` lồng
+    // trong các dự án con, và mẫu neo gốc bỏ sót hết chúng.
+    body.push_str("**/.arch/.state\n");
     arch_core::write_atomic(&path, &body).map_err(|e| e.to_string())?;
     Ok(true)
 }

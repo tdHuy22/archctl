@@ -222,7 +222,7 @@ fn init_dung_khung_arch_va_tro_cho_agent() {
     for f in ["AGENTS.md", "CLAUDE.md"] {
         assert!(p.read(f).contains(".arch/ARCHITECTURE.md"), "{f} không trỏ về hướng dẫn");
     }
-    assert!(p.read(".gitignore").contains(".arch/.state"));
+    assert!(p.read(".gitignore").contains("**/.arch/.state"), "{}", p.read(".gitignore"));
 }
 
 #[test]
