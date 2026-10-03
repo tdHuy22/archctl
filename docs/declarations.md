@@ -20,6 +20,10 @@ Sơ đồ sai còn tệ hơn không có sơ đồ.
 | `invariant state` | mọi trạng thái phải tồn tại | chuyển trạng thái có hợp lệ không |
 | `invariant data`/`money`/`access`/`algo` | — | tất cả |
 
+Cột bên phải không phải là chỗ dừng lại: nó trỏ ra công cụ ngoài qua `verify`,
+và `archctl verify` chạy thật rồi ghi biên nhận gắn với bản mã lúc chạy — xem
+[verify.md](verify.md).
+
 Chỉ những trường **có cấu trúc** mới sinh ra kỳ vọng: bước của `flow`, `errors`
 của `contract`, `contain` và `compensate` của `boundary`, các trạng thái trong
 `invariant state`. Những trường còn lại là văn xuôi; moi tên ra từ đó chỉ sinh

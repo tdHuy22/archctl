@@ -5,3 +5,9 @@
 # store <Tên> owned_by <Component>
 # allow <Nguồn> -> <Đích>
 # deny  <Nguồn> -> <Đích> [except <Component>]
+
+# Những gì phân tích tĩnh không kiểm được thì trỏ ra công cụ ngoài. Không có
+# dòng `verify ... runs`, một `verify <tên>` chỉ là cái tên không dẫn tới đâu.
+# `archctl verify` chạy lệnh và ghi biên nhận; `archctl check` đọc biên nhận
+# đó và nhắc khi nó đã cũ hơn mã.
+# verify <tên> runs "<lệnh>"

@@ -111,6 +111,9 @@ header ↔ `extern` này, nên chúng là nơi xem các dạng khai báo còn l�
 
 ## Ba thứ còn lại: trỏ ra ngoài, đừng tự kiểm
 
+> **Đã làm.** Cơ chế là `verify <tên> runs "<lệnh>"` cộng lệnh `archctl
+> verify`, với biên nhận gắn vào bản mã lúc chạy — xem [verify.md](verify.md).
+
 `contract` `requires`/`ensures`, `invariant data`/`money`, `boundary`
 `retry`/`timeout` đều cần công cụ chuyên dụng, và đều đã có công cụ tốt:
 
@@ -121,9 +124,8 @@ header ↔ `extern` này, nên chúng là nơi xem các dạng khai báo còn l�
 | property test | [Hypothesis](https://github.com/HypothesisWorks/hypothesis) 9k★, [fast-check](https://github.com/dubzzz/fast-check) 5.2k★, [quickcheck](https://github.com/BurntSushi/quickcheck) 2.8k★ | đọc LICENSE, MIT, Unlicense |
 | tiêm lỗi mạng | [Toxiproxy](https://github.com/Shopify/toxiproxy) 12.4k★ | MIT |
 
-Cơ chế đã có sẵn trong `.arch`: trường `verify`. archctl không nên tự kiểm
-ngữ nghĩa — nó nên kiểm rằng `verify` **tồn tại và đã chạy xong**. Điều đó
-khớp với cảnh báo "đây chỉ là lời hứa" đang có.
+Cơ chế đã có sẵn trong `.arch`: trường `verify`. archctl không tự kiểm ngữ
+nghĩa — nó kiểm rằng `verify` **tồn tại và đã chạy xong trên bản mã này**.
 
 ## Điều chưa chắc
 
