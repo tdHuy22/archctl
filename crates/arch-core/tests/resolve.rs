@@ -472,3 +472,166 @@ mod goc_crate {
         assert!(edges.iter().any(|e| e.starts_with("Blob -> Core")), "nhận: {edges:#?}");
     }
 }
+
+const MULTI_ARCH: &str = "\
+component Web  at web/**  @human #accepted
+component Api  at api/**  @human #accepted
+component Core at core/** @human #accepted
+component O    at o/**    @human #accepted
+allow Web -> O
+";
+
+#[test]
+fn go_nhieu_module_trong_mot_repo() {
+    // etcd: `api/go.mod` khai `go.etcd.io/etcd/api/v3`, gốc khai
+    // `go.etcd.io/etcd/v3`. Chỉ đọc `go.mod` ở gốc thì mọi import sang module
+    // anh em đều thành gói ngoài: repo hiện ra là không có quan hệ nào.
+    let repo = Repo::new("gomulti");
+    repo.write(".arch/system.arch", MULTI_ARCH)
+        .write("go.mod", "module example.com/proj/v3\n\ngo 1.22\n")
+        .write("core/c.go", "package core\n")
+        .write("api/go.mod", "module example.com/proj/api/v3\n\ngo 1.22\n")
+        .write("api/pb/p.go", "package pb\n")
+        // Go bỏ qua `testdata`: một `go.mod` trong đó không phải module thật.
+        .write("api/testdata/go.mod", "module example.com/proj/api/v3/pb\n")
+        .write(
+            "web/h.go",
+            "package web\n\n\
+             import (\n\t\
+             \"example.com/proj/api/v3/pb\"\n\t\
+             \"example.com/proj/v3/core\"\n\t\
+             \"example.com/other/v3\"\n)\n",
+        );
+    let (edges, unresolved) = repo.judge();
+    assert_eq!(edges, ["Web -> Api (4)", "Web -> Core (5)"], "{edges:?}");
+    assert!(unresolved.is_empty(), "{unresolved:?}");
+}
+
+#[test]
+fn python_moi_package_trong_monorepo_la_mot_goc() {
+    // langchain: `libs/core/langchain_core`, `libs/partners/x/langchain_x`.
+    // Mỗi thư mục có `pyproject.toml` là một gốc import riêng.
+    let repo = Repo::new("pymono");
+    repo.write(
+        ".arch/system.arch",
+        "\
+component Core at libs/core/** @human #accepted
+component Web  at libs/web/**  @human #accepted
+component O    at o/**         @human #accepted
+allow Web -> O
+allow Core -> O
+",
+    )
+    .write("libs/core/pyproject.toml", "[project]\nname = \"acme-core\"\n")
+    .write("libs/core/acme_core/msg.py", "class M: pass\n")
+    .write("libs/core/tests/helpers.py", "")
+    .write("libs/core/tests/test_msg.py", "from tests.helpers import h\n")
+    .write("libs/web/pyproject.toml", "[project]\nname = \"acme-web\"\n")
+    .write("libs/web/src/acme_web/view.py", "from acme_core.msg import M\n")
+    // Cùng tên `tests` ở package kia: `tests` của chính package thắng.
+    .write("libs/web/tests/helpers.py", "")
+    .write("libs/web/tests/test_view.py", "from tests.helpers import h\n");
+    let (edges, unresolved) = repo.judge();
+    assert_eq!(edges, ["Web -> Core (1)"], "{edges:?}");
+    assert!(unresolved.is_empty(), "{unresolved:?}");
+}
+
+#[test]
+fn python_goc_la_thu_muc_co_manage_py() {
+    // netbox: mã nằm trong `netbox/`, chạy từ đó, nên `from dcim.models`
+    // tính từ `netbox/` chứ không phải từ gốc repo.
+    let repo = Repo::new("django");
+    repo.write(
+        ".arch/system.arch",
+        "\
+component Dcim at site/dcim/** @human #accepted
+component Ipam at site/ipam/** @human #accepted
+component O    at o/**         @human #accepted
+allow Ipam -> O
+",
+    )
+    .write("site/manage.py", "")
+    .write("site/dcim/models.py", "class Device: pass\n")
+    .write("site/ipam/views.py", "from dcim.models import Device\nimport django\n");
+    let (edges, unresolved) = repo.judge();
+    assert_eq!(edges, ["Ipam -> Dcim (1)"], "{edges:?}");
+    assert!(unresolved.is_empty(), "{unresolved:?}");
+}
+
+#[test]
+fn python_ten_trung_o_hai_package_khac_thi_khong_doan() {
+    // Không package nào chứa file gọi, mà hai package cùng có `shared`: đoán
+    // một cái là có thể sinh cạnh sai. Coi như gói ngoài, như trước.
+    let repo = Repo::new("pyamb");
+    repo.write(
+        ".arch/system.arch",
+        "\
+component A   at a/**   @human #accepted
+component B   at b/**   @human #accepted
+component App at app/** @human #accepted
+component O   at o/**   @human #accepted
+allow App -> O
+",
+    )
+    .write("a/pyproject.toml", "")
+    .write("a/shared/x.py", "")
+    .write("b/pyproject.toml", "")
+    .write("b/shared/x.py", "")
+    .write("app/main.py", "from shared.x import y\n");
+    assert_eq!(repo.judge(), (vec![], vec![]));
+}
+
+const C_ARCH: &str = "\
+component Http at src/http/** @human #accepted
+component Core at src/core/** @human #accepted
+component O    at o/**        @human #accepted
+allow Http -> O
+";
+
+#[test]
+fn c_khong_co_file_build_thi_khop_ten_duy_nhat_trong_repo() {
+    // nginx: `-I src/core` nằm trong script `auto/`, không trong CMake hay
+    // Makefile. `#include <ngx_core.h>` từng bị coi là header hệ thống, và cả
+    // repo không có cạnh nào.
+    let repo = Repo::new("cnobuild");
+    repo.write(".arch/system.arch", C_ARCH)
+        .write("src/core/ngx_core.h", "")
+        .write("src/core/event/ngx_event.h", "")
+        .write("src/http/a/config.h", "")
+        .write("src/core/config.h", "")
+        .write(
+            "src/http/h.c",
+            "#include <stdio.h>\n\
+             #include <ngx_core.h>\n\
+             #include \"event/ngx_event.h\"\n\
+             #include <config.h>\n",
+        );
+    let (edges, unresolved) = repo.judge();
+    // `config.h` có ở hai nơi: không đoán.
+    assert_eq!(edges, ["Http -> Core (2)", "Http -> Core (3)"], "{edges:?}");
+    assert!(unresolved.is_empty(), "{unresolved:?}");
+}
+
+#[test]
+fn c_co_file_build_thi_khong_doan() {
+    // Build đã khai `-I` thì đó là sự thật; `<ngx_core.h>` ngoài các thư mục
+    // đó là header của hệ thống, dù repo có một file trùng tên.
+    let repo = Repo::new("cbuild");
+    repo.write(".arch/system.arch", C_ARCH)
+        .write("Makefile", "CFLAGS = -Isrc/http\n")
+        .write("src/core/ngx_core.h", "")
+        .write("src/http/h.c", "#include <ngx_core.h>\n");
+    assert_eq!(repo.judge(), (vec![], vec![]));
+}
+
+#[test]
+fn c_header_chuan_khong_khop_vao_shim_trong_repo() {
+    // zstd có `wasm-shim/stdio.h` chỉ dùng khi build wasm. Không có file build
+    // nào khai `-I`, nhưng `<stdio.h>` vẫn là của hệ thống.
+    let repo = Repo::new("cshim");
+    repo.write(".arch/system.arch", C_ARCH)
+        .write("src/core/shim/stdio.h", "")
+        .write("src/core/shim/sys/types.h", "")
+        .write("src/http/h.c", "#include <stdio.h>\n#include <sys/types.h>\n");
+    assert_eq!(repo.judge(), (vec![], vec![]));
+}

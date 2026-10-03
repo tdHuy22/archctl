@@ -68,10 +68,19 @@ impl Drop for Repo {
 }
 
 #[test]
-fn khong_co_file_build_thi_noi_thang_la_chua_phan_giai() {
+fn khong_co_file_build_thi_khop_ten_duy_nhat() {
+    // nginx khai `-I` trong script `auto/`: không đoán thì cả repo 0 cạnh.
+    // Repo chỉ có một `aes.h` thì `#include "aes.h"` là nó.
     let repo = Repo::new("none");
+    assert_eq!(repo.judge(), (vec!["App -> Crypto".to_string()], vec![]));
+}
+
+#[test]
+fn khong_co_file_build_va_ten_trung_thi_noi_thang_la_chua_phan_giai() {
+    let repo = Repo::new("none-twice");
+    repo.write("spare/aes.h", "");
     let (violations, unresolved) = repo.judge();
-    assert!(violations.is_empty(), "không biết header ở đâu thì không được đoán ra cạnh");
+    assert!(violations.is_empty(), "hai file cùng tên thì không được đoán ra cạnh");
     assert_eq!(unresolved, ["aes.h"], "nhưng phải nói ra là chưa biết");
 }
 
@@ -183,6 +192,9 @@ fn khong_di_theo_symlink_ra_ngoai_repo() {
     let _ = std::fs::create_dir_all(&outside);
     std::fs::write(outside.join("Makefile"), "CFLAGS = -Ivendor/crypto/include\n").unwrap();
     repo.mkdir("sub");
+    // Hai `aes.h`: không có file build thì cũng không đoán được, nên cạnh chỉ
+    // có thể đến từ `Makefile` bên ngoài.
+    repo.write("spare/aes.h", "");
     if std::os::unix::fs::symlink(&outside, repo.0.join("sub/link")).is_ok() {
         assert!(repo.judge().0.is_empty(), "cấu hình ngoài repo không phải luật của repo");
     }

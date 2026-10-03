@@ -37,10 +37,39 @@ const JS_TO_TS: &[(&str, &[&str])] =
 /// Nơi thường đặt header khi `#include "..."` không nằm cạnh file gọi.
 const C_INCLUDE_DIRS: &[&str] = &["", "include", "src", "lib"];
 
+/// Header của thư viện chuẩn C, POSIX và Windows. Repo hay có bản thay thế
+/// trùng tên — zstd có `wasm-shim/stdio.h`, redis có `msvc_compat/stdint.h` —
+/// chỉ dùng cho một đích build. Khớp tên duy nhất vào đó thì mọi file C đều có
+/// một cạnh sai tới shim: zstd từng có 363 cạnh như vậy.
+const STANDARD_HEADERS: &[&str] = &[
+    "assert.h", "complex.h", "ctype.h", "errno.h", "fenv.h", "float.h", "inttypes.h",
+    "iso646.h", "limits.h", "locale.h", "math.h", "setjmp.h", "signal.h", "stdalign.h",
+    "stdarg.h", "stdatomic.h", "stdbool.h", "stddef.h", "stdint.h", "stdio.h", "stdlib.h",
+    "stdnoreturn.h", "string.h", "tgmath.h", "threads.h", "time.h", "uchar.h", "wchar.h",
+    "wctype.h", "aio.h", "cpio.h", "dirent.h", "dlfcn.h", "fcntl.h", "fnmatch.h", "glob.h",
+    "grp.h", "iconv.h", "langinfo.h", "libgen.h", "monetary.h", "mqueue.h", "netdb.h",
+    "nl_types.h", "poll.h", "pthread.h", "pwd.h", "regex.h", "sched.h", "search.h",
+    "semaphore.h", "spawn.h", "strings.h", "syslog.h", "tar.h", "termios.h", "ulimit.h",
+    "unistd.h", "utime.h", "utmpx.h", "wordexp.h", "alloca.h", "malloc.h", "endian.h",
+    "execinfo.h", "getopt.h", "memory.h", "windows.h", "winsock2.h", "ws2tcpip.h", "io.h",
+    "process.h", "direct.h", "intrin.h",
+];
+/// Thư mục header của hệ thống: `<sys/types.h>`, `<netinet/in.h>`.
+const STANDARD_HEADER_DIRS: &[&str] = &["sys/", "arpa/", "netinet/", "net/", "linux/", "mach/"];
+
+fn is_standard_header(spec: &str) -> bool {
+    STANDARD_HEADERS.contains(&spec) || STANDARD_HEADER_DIRS.iter().any(|d| spec.starts_with(d))
+}
+
 /// Giữ những thứ đọc một lần từ đĩa, để không mở lại `go.mod` cho từng import.
 pub struct Resolver {
     root: PathBuf,
-    go_module: Option<String>,
+    /// Mọi module Go trong repo: đường dẫn module → thư mục, dài nhất trước.
+    /// Một repo có thể chứa nhiều `go.mod` (etcd có mười bốn); chỉ đọc cái ở
+    /// gốc thì mọi import sang module anh em đều thành gói ngoài.
+    /// Đọc muộn: đường hook không phải quét cây tìm `go.mod` cho một file
+    /// không phải Go.
+    go_modules: OnceCell<Vec<(String, String)>>,
     /// Crate trong cùng workspace: tên dùng trong `use` → thư mục `src` của nó.
     /// Thiếu bản đồ này thì mọi phụ thuộc giữa các crate anh em đều bị coi là
     /// gói ngoài, và Rust workspace nào cũng hiện ra là không có quan hệ nào.
@@ -57,9 +86,15 @@ pub struct Resolver {
     /// đối và không khớp alias nào, nên repo không phải TypeScript không tốn
     /// gì cả.
     npm_packages: OnceCell<Vec<(String, String)>>,
+    /// Gốc import của Python, tra theo tên cấp cao nhất. Xem [`find_py_roots`].
+    /// Đọc muộn như `npm_packages`.
+    py_roots: OnceCell<PyRoots>,
     /// Thư mục include mà build của C/C++ khai báo. Đọc muộn: repo không có
     /// file C nào thì không phải quét tìm `Makefile` làm gì.
     c_includes: OnceCell<Vec<String>>,
+    /// File C/C++ trong repo theo tên file, chỉ dựng khi build không khai thư
+    /// mục include nào. Xem [`Resolver::c_unique`].
+    c_files: OnceCell<HashMap<String, Vec<String>>>,
     /// Tên thật trong những thư mục đã dò, để kiểm hoa thường. Xem [`exact_case`].
     listing: RefCell<Listing>,
     /// File gốc crate của từng gói Rust, theo thư mục gói. Đọc một lần.
@@ -150,11 +185,13 @@ impl Resolver {
     pub fn new(root: &Path) -> Self {
         Resolver {
             root: root.to_path_buf(),
-            go_module: read_go_module(root),
+            go_modules: OnceCell::new(),
             rust_crates: find_rust_crates(root),
             ts_configs: find_ts_configs(root),
             npm_packages: OnceCell::new(),
+            py_roots: OnceCell::new(),
             c_includes: OnceCell::new(),
+            c_files: OnceCell::new(),
             listing: RefCell::new(HashMap::new()),
             rust_roots: RefCell::new(HashMap::new()),
             crate_of: RefCell::new(HashMap::new()),
@@ -270,30 +307,53 @@ impl Resolver {
 
     // ---- Python ----
 
+    /// Import tuyệt đối tính từ gốc nào thì tuỳ chương trình chạy từ đâu.
+    /// Thử trước các package chứa chính file gọi, sâu nhất trước — `tests` của
+    /// một package là `tests` của nó, không phải của package bên cạnh. Rồi mới
+    /// tới các package còn lại, và ở đó tên phải là duy nhất: hai package cùng
+    /// có `shared` thì đoán một cái là có thể sinh cạnh sai.
     fn python(&self, importer: &str, spec: &str) -> Resolved {
         if let Some(rest) = spec.strip_prefix('.') {
             return self.python_relative(importer, rest);
         }
         let path = spec.replace('.', "/");
-        let roots = ["", "src/", "lib/"];
-        let candidates = roots.iter().flat_map(|r| {
-            [format!("{r}{path}.py"), format!("{r}{path}/__init__.py"), format!("{r}{path}.pyi")]
-        });
-        if let Some(found) = self.first_file(candidates) {
+        let top = spec.split('.').next().unwrap_or(spec);
+        let roots = self.py_roots.get_or_init(|| find_py_roots(&self.root));
+        // `os`, `numpy`: không gốc nào có tên này, khỏi hỏi hệ thống file.
+        let Some(bases) = roots.get(top) else {
+            return Resolved::Package(top.to_string());
+        };
+        let (mut own, others): (Vec<_>, Vec<_>) =
+            bases.iter().partition(|(project, _)| within(project, importer));
+        // Ổn định: trong cùng một package giữ thứ tự gốc, `src/`, `lib/`.
+        own.sort_by_key(|(project, _)| std::cmp::Reverse(project.len()));
+
+        if let Some(found) = self.python_in(own.iter().map(|(_, b)| b.as_str()), &path) {
             return Resolved::Path(found);
         }
-        // Gói kiểu không gian tên (PEP 420) không có `__init__.py`, và đó là
-        // mặc định của Python hiện đại. Thư mục chính là gói.
-        if let Some(found) = roots
-            .iter()
-            .map(|r| format!("{r}{path}"))
-            .find(|candidate| self.dir_exists(candidate))
-        {
-            return Resolved::Path(found);
+        let mut found: Vec<String> =
+            others.iter().filter_map(|(_, b)| self.python_in([b.as_str()], &path)).collect();
+        found.dedup();
+        if let [one] = found.as_slice() {
+            return Resolved::Path(one.clone());
         }
         // Không tìm thấy trong dự án thì đây là gói bên thứ ba. Với import
         // tuyệt đối, hai khả năng đó không phân biệt được.
-        Resolved::Package(spec.split('.').next().unwrap_or(spec).to_string())
+        Resolved::Package(top.to_string())
+    }
+
+    /// Module `path` dưới các thư mục gốc `bases`, theo thứ tự.
+    fn python_in<'a>(&self, bases: impl IntoIterator<Item = &'a str>, path: &str) -> Option<String> {
+        let bases: Vec<&str> = bases.into_iter().collect();
+        let candidates = bases.iter().flat_map(|b| {
+            [format!("{b}{path}.py"), format!("{b}{path}/__init__.py"), format!("{b}{path}.pyi")]
+        });
+        if let Some(found) = self.first_file(candidates) {
+            return Some(found);
+        }
+        // Gói kiểu không gian tên (PEP 420) không có `__init__.py`, và đó là
+        // mặc định của Python hiện đại. Thư mục chính là gói.
+        bases.iter().map(|b| format!("{b}{path}")).find(|c| self.dir_exists(c))
     }
 
     fn python_relative(&self, importer: &str, rest: &str) -> Resolved {
@@ -342,15 +402,45 @@ impl Resolver {
         if let Some(found) = self.first_file(candidates) {
             return Resolved::Path(found);
         }
+        // Build không khai thư mục include nào mà ta đọc được — nginx đặt
+        // `-I` trong script `auto/`. Không có sự thật thì đành dựa vào tên:
+        // header trùng tên với **đúng một** file trong repo thì là file đó.
+        // Có build thì không đoán: `<x.h>` ngoài các thư mục nó khai là của
+        // hệ thống, dù repo có một file trùng tên.
+        if declared.is_empty() {
+            if !system
+                && let Some(found) =
+                    self.first_file(C_INCLUDE_DIRS.iter().filter_map(|d| join(d, spec)))
+            {
+                return Resolved::Path(found);
+            }
+            if !is_standard_header(spec)
+                && let Some(found) = self.c_unique(spec)
+            {
+                return Resolved::Path(found);
+            }
+        }
         if system {
             // Header hệ thống và thư viện bên ngoài. Khai báo bằng
             // `external LibC at "stdio.h"` nếu muốn đưa vào luật.
             return Resolved::Package(spec.to_string());
         }
-        // Phỏng đoán cuối, cho repo không có file build nào đọc được. Chỉ dùng
-        // cho `"..."`: đoán một thư mục rồi khớp `<stdio.h>` vào đó thì sai.
-        self.first_file(C_INCLUDE_DIRS.iter().filter_map(|d| join(d, spec)))
-            .map_or(Resolved::Missing, Resolved::Path)
+        Resolved::Missing
+    }
+
+    /// File duy nhất trong repo có đuôi đường dẫn là `spec`. Hai file khớp thì
+    /// không chọn: một cạnh sai tốn lòng tin hơn một cạnh bị bỏ sót.
+    fn c_unique(&self, spec: &str) -> Option<String> {
+        let spec = normalize(spec)?;
+        let name = spec.rsplit('/').next()?;
+        let files = self.c_files.get_or_init(|| find_c_files(&self.root));
+        let suffix = format!("/{spec}");
+        let mut hits =
+            files.get(name)?.iter().filter(|f| **f == spec || f.ends_with(&suffix));
+        match (hits.next(), hits.next()) {
+            (Some(one), None) => Some(one.clone()),
+            _ => None,
+        }
     }
 
     // ---- Rust ----
@@ -615,18 +705,28 @@ impl Resolver {
     // ---- Go ----
 
     fn go(&self, spec: &str) -> Resolved {
-        let Some(module) = &self.go_module else {
-            return Resolved::Package(spec.to_string());
-        };
-        if spec == module {
-            return Resolved::Path(String::new());
-        }
-        match spec.strip_prefix(&format!("{module}/")) {
+        // Dài nhất trước, nên `x/api/v3` thắng `x` khi cả hai cùng khớp.
+        for (module, dir) in self.go_modules.get_or_init(|| find_go_modules(&self.root)) {
+            let rest = if spec == module {
+                ""
+            } else if let Some(rest) = spec.strip_prefix(&format!("{module}/")) {
+                rest
+            } else {
+                continue;
+            };
+            let target = match (dir.is_empty(), rest.is_empty()) {
+                (true, _) => rest.to_string(),
+                (false, true) => dir.clone(),
+                (false, false) => format!("{dir}/{rest}"),
+            };
             // Import của Go trỏ tới cả package, nên đích là một thư mục.
-            Some(rest) if self.dir_exists(rest) => Resolved::Path(rest.to_string()),
-            Some(_) => Resolved::Missing,
-            None => Resolved::Package(spec.to_string()),
+            return if target.is_empty() || self.dir_exists(&target) {
+                Resolved::Path(target)
+            } else {
+                Resolved::Missing
+            };
         }
+        Resolved::Package(spec.to_string())
     }
 }
 
@@ -736,7 +836,7 @@ fn within(dir: &str, path: &str) -> bool {
 /// ứng với cả repo nên nó sẽ nuốt mọi import.
 fn find_npm_packages(root: &Path) -> Vec<(String, String)> {
     let mut dirs = Vec::new();
-    collect_dirs_with(root, "", 0, "package.json", &mut dirs);
+    collect_dirs_with(root, "", 0, &["package.json"], &mut dirs);
     let mut out: Vec<(String, String)> = dirs
         .iter()
         .filter(|dir| !dir.is_empty())
@@ -754,7 +854,7 @@ fn find_npm_packages(root: &Path) -> Vec<(String, String)> {
 
 fn find_ts_configs(root: &Path) -> Vec<TsConfig> {
     let mut dirs = Vec::new();
-    collect_dirs_with(root, "", 0, "tsconfig.json", &mut dirs);
+    collect_dirs_with(root, "", 0, &["tsconfig.json"], &mut dirs);
     let mut out: Vec<TsConfig> =
         dirs.iter().filter_map(|dir| read_ts_config(root, dir)).collect();
     // Gần nhất trước: thư mục sâu hơn thắng thư mục nông hơn.
@@ -818,8 +918,10 @@ fn read_ts_config(root: &Path, dir: &str) -> Option<TsConfig> {
     (!patterns.is_empty()).then_some(TsConfig { dir: dir.to_string(), base, patterns })
 }
 
-/// Thư mục chứa một file tên cho trước, quét tới độ sâu giới hạn.
-fn collect_dirs_with(root: &Path, prefix: &str, depth: usize, name: &str, out: &mut Vec<String>) {
+/// Thư mục chứa ít nhất một file có tên trong `names`, quét tới độ sâu giới
+/// hạn. Nhiều tên trong một lượt: đường hook `check <file>` trả cho mỗi lượt
+/// quét cây, và bốn lượt cho bốn dấu hiệu của Python từng làm nó chậm gấp ba.
+fn collect_dirs_with(root: &Path, prefix: &str, depth: usize, names: &[&str], out: &mut Vec<String>) {
     const MAX_DEPTH: usize = 4;
     const SKIP: &[&str] = &["target", "node_modules", ".git", ".arch", "vendor", "dist"];
 
@@ -827,29 +929,133 @@ fn collect_dirs_with(root: &Path, prefix: &str, depth: usize, name: &str, out: &
         return;
     }
     let dir = if prefix.is_empty() { root.to_path_buf() } else { root.join(prefix) };
-    if dir.join(name).is_file() {
-        out.push(prefix.to_string());
-    }
     let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let mut marked = false;
+    let mut children = Vec::new();
     for entry in entries.flatten() {
         let Ok(child) = entry.file_name().into_string() else { continue };
-        if SKIP.contains(&child.as_str()) || child.starts_with('.') {
-            continue;
+        // `file_type` không theo symlink và không tốn thêm một lần `stat`.
+        let Ok(kind) = entry.file_type() else { continue };
+        if kind.is_file() && names.contains(&child.as_str()) {
+            marked = true;
+        } else if kind.is_dir() && !SKIP.contains(&child.as_str()) && !child.starts_with('.') {
+            children.push(child);
         }
-        if entry.path().is_dir() {
-            let next = if prefix.is_empty() { child } else { format!("{prefix}/{child}") };
-            collect_dirs_with(root, &next, depth + 1, name, out);
-        }
+    }
+    if marked {
+        out.push(prefix.to_string());
+    }
+    for child in children {
+        let next = if prefix.is_empty() { child } else { format!("{prefix}/{child}") };
+        collect_dirs_with(root, &next, depth + 1, names, out);
     }
 }
 
-fn read_go_module(root: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(root.join("go.mod")).ok()?;
-    crate::strip_bom(&text)
-        .lines()
-        .map(str::trim)
-        .find_map(|l| l.strip_prefix("module "))
-        .map(|m| m.trim().to_string())
+/// Tên cấp cao nhất → `(package, thư mục gốc)` có tên đó, theo thứ tự
+/// package rồi gốc, `src/`, `lib/` của nó.
+type PyRoots = HashMap<String, Vec<(String, String)>>;
+
+/// Thư mục mà một chương trình Python trong repo có thể chạy từ đó: gốc repo,
+/// và mọi thư mục đánh dấu một package (`pyproject.toml`, `setup.py`,
+/// `setup.cfg`) hay một dự án Django (`manage.py`).
+///
+/// Đọc mỗi thư mục gốc một lần rồi lập bảng theo tên: monorepo có hàng chục
+/// gốc, mỗi file hàng chục import, và phần lớn import là thư viện ngoài —
+/// hỏi hệ thống file cho từng cặp thì `check` của langchain chậm gấp năm.
+fn find_py_roots(root: &Path) -> PyRoots {
+    let mut projects = vec![String::new()];
+    let markers = ["pyproject.toml", "setup.py", "setup.cfg", "manage.py"];
+    collect_dirs_with(root, "", 0, &markers, &mut projects);
+    projects.sort();
+    projects.dedup();
+
+    let mut out: PyRoots = HashMap::new();
+    for project in projects {
+        let p = if project.is_empty() { String::new() } else { format!("{project}/") };
+        for base in [p.clone(), format!("{p}src/"), format!("{p}lib/")] {
+            let Ok(entries) = std::fs::read_dir(root.join(&base)) else { continue };
+            let mut names: Vec<String> = entries
+                .flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().into_string().ok()?;
+                    let stem = name
+                        .strip_suffix(".py")
+                        .or_else(|| name.strip_suffix(".pyi"))
+                        .map(str::to_string);
+                    stem.or_else(|| e.file_type().ok()?.is_dir().then_some(name))
+                })
+                .collect();
+            names.sort();
+            names.dedup();
+            for name in names {
+                out.entry(name).or_default().push((project.clone(), base.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// File C/C++ trong repo, gom theo tên file. Chạm giới hạn thì trả bảng rỗng,
+/// tức là không đoán: dừng giữa chừng thì bảng tuỳ thứ tự `read_dir`, và
+/// "duy nhất" trên máy này có thể là "hai file" trên máy kia.
+fn find_c_files(root: &Path) -> HashMap<String, Vec<String>> {
+    const MAX_FILES: usize = 200_000;
+    const SKIP: &[&str] = &["target", "node_modules", ".git", ".arch", "dist"];
+    const EXTS: &[&str] =
+        &["h", "hh", "hpp", "hxx", "inl", "inc", "c", "cc", "cpp", "cxx", "def", "ipp", "tcc"];
+
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    let mut stack = vec![String::new()];
+    let mut seen = 0;
+    while let Some(prefix) = stack.pop() {
+        let dir = if prefix.is_empty() { root.to_path_buf() } else { root.join(&prefix) };
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let Ok(name) = entry.file_name().into_string() else { continue };
+            if name.starts_with('.') || SKIP.contains(&name.as_str()) {
+                continue;
+            }
+            let rel = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+            let Ok(kind) = entry.file_type() else { continue };
+            if kind.is_dir() {
+                stack.push(rel);
+            } else if kind.is_file()
+                && name.rsplit_once('.').is_some_and(|(_, ext)| EXTS.contains(&ext))
+            {
+                out.entry(name).or_default().push(rel);
+                seen += 1;
+                if seen >= MAX_FILES {
+                    return HashMap::new();
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Mọi `go.mod` trong repo. Bỏ những cái nằm trong `testdata`: công cụ Go bỏ
+/// qua thư mục đó, nên module khai trong ấy không phải module thật.
+fn find_go_modules(root: &Path) -> Vec<(String, String)> {
+    let mut dirs = Vec::new();
+    collect_dirs_with(root, "", 0, &["go.mod"], &mut dirs);
+    let mut out: Vec<(String, String)> = dirs
+        .into_iter()
+        .filter(|dir| !dir.split('/').any(|part| part == "testdata"))
+        .filter_map(|dir| {
+            let text = std::fs::read_to_string(root.join(&dir).join("go.mod")).ok()?;
+            let module = crate::strip_bom(&text)
+                .lines()
+                .map(str::trim)
+                .find_map(|l| l.strip_prefix("module "))?
+                .trim()
+                .trim_matches('"')
+                .to_string();
+            (!module.is_empty()).then_some((module, dir))
+        })
+        .collect();
+    out.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.cmp(b)));
+    out.dedup_by(|a, b| a.0 == b.0);
+    out
 }
 
 fn is_relative(spec: &str) -> bool {

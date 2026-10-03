@@ -9,7 +9,28 @@ Cập nhật 2026-10-03.
 
 ### Đã xong, có bằng chứng
 
-- **360 test, clippy sạch với `-D warnings`, 0 dependency ngoài std.** Biên
+- **Bộ đo lên mười tám repo, phủ đủ năm ngôn ngữ, mỗi ngôn ngữ ít nhất hai
+  repo** (C++ một: leveldb). Thêm etcd, excalidraw, langchain, leveldb, netbox,
+  nginx, scikit-learn, vllm; zstd-rs giờ kéo submodule C (cột submodule mới
+  trong `repos.tsv`). Tám repo mới bắt được bốn chỗ archctl ra **0 cạnh, 0
+  cảnh báo**, cả bốn đã sửa, có test: Go nhiều `go.mod` (etcd), gốc Python là
+  thư mục có `pyproject.toml`/`manage.py` (langchain, netbox), C không có file
+  build nào khai `-I` thì khớp tên duy nhất (nginx — bạn đã duyệt đổi nguyên
+  tắc). Lần chạy 2026-10-03: 17896 file, 0 bất nhất, 0 cảnh báo luật,
+  630/630 luồng, `sabotage.py` 6/6; tải 685 MB, 120 giây.
+- **`dist`, `build`, `out`, `coverage` không còn bị bỏ theo tên.** Có
+  `.gitignore` thì hỏi nó; không có thì bỏ như cũ. etcd từng mất package Go
+  `tests/robustness/coverage/` trong im lặng. Bộ đo giờ đòi số file archctl
+  quét bằng số file nguồn git có (`git ls-files`, phần ignore do `git
+  check-ignore` trả lời): 18/18 repo khớp, 17918 file. `sabotage.py` thêm
+  kiểu phá thứ bảy (quét thiếu một file), bắt đúng.
+- **Review trước commit sửa thêm bốn chỗ:** hook `check <file>` từng chậm gấp
+  ba trên repo Python (netbox 28→78ms; giờ 33ms) vì quét cây tìm `go.mod` và
+  bốn dấu hiệu Python mỗi lần; `<stdio.h>` từng khớp vào `wasm-shim/stdio.h`
+  của zstd (363 cạnh sai) — header chuẩn không bao giờ khớp tên; `.gitignore`
+  phía trên gốc archctl trong monorepo giờ được đọc; `dist/*` tính như bỏ
+  `dist`.
+- **381 test, clippy sạch với `-D warnings`, 0 dependency ngoài std.** Biên
   nhận ghi bằng `receipt.py` ngày 2026-10-03.
 - **Rust: `use crate::X` với `X` ở gốc crate giờ có đích.** Trước đó khoảng
   470 câu `use` như vậy ở năm repo Rust của bộ đo không sinh cạnh nào, không
@@ -38,7 +59,7 @@ Cập nhật 2026-10-03.
   4798 file (khớp đếm độc lập ở từng repo), **0 bất nhất**, **0 cảnh báo trong
   luật sinh ra**, luồng lệnh **350/350** (35 mỗi repo), 36 giây khi repo đã tải.
   Bộ đo đổ được, và điều đó cũng được kiểm bằng một lệnh:
-  `python3 bench/sabotage.py` phá archctl sáu kiểu, mỗi kiểu bị đúng phép kiểm
+  `python3 bench/sabotage.py` phá archctl bảy kiểu, mỗi kiểu bị đúng phép kiểm
   của nó bắt. Mất mạng, tên repo gõ sai, `repos.tsv` có tên `../..` hay SHA mở
   đầu bằng `-` đều ra mã thoát 2.
 - **Bất biến tự nhất quán**: luật do `init --from-code` sinh ra, nâng lên
@@ -64,6 +85,9 @@ Bộ đo ở [bench/](bench/README.md). Repo tải về `target/bench/repos/`, n
 git, `cargo clean` dọn.
 
 ### Việc tiếp theo
+
+1. Chưa có repo nào đo: Go dùng cgo, gói không gian tên PEP 420 thật, C++ cỡ
+   lớn (Bazel).
 
 Không có việc nào đang dở. **Đã quyết (2026-10-03): giữ repo private, CI là
 lời nhắc chứ không chặn** — gói GitHub Free không có branch protection cho repo

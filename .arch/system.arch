@@ -27,7 +27,7 @@ allow Setup   -> Model, Check, Resolve, Scan, Util
 allow Cli     -> Model, Check, View, Setup, Scan, Resolve, Util
 allow Tests   -> Model, Check, View, Setup, Scan, Resolve, Util, Cli
 
-# `bench/` là test chạy trên mười repo thật. Nó chỉ gọi binary qua tiến trình
+# `bench/` là test chạy trên repo thật. Nó chỉ gọi binary qua tiến trình
 # con, không import gì của crate, nên gộp vào Tests chứ không tách thành
 # component riêng: một component không có cạnh nào thì `allow` nào cho nó
 # cũng là luật vô nghĩa.

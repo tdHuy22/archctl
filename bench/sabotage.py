@@ -24,6 +24,7 @@ MODES = {
     "violation": "bất nhất",
     "lawwarn": "luật sinh ra đã có cảnh báo",
     "empty": "không có gì để kiểm",
+    "count": "số file lệch",
     "nokey": "thiếu khoá `lawWarnings`",
     "hash": "hash đổi sau khi luật đổi",
     "diff": "diff: thêm chú thích",
@@ -43,6 +44,8 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
             rep["lawWarnings"].append({"line": 3, "msg": "giả", "hint": None})
         elif mode == "empty":
             rep["filesScanned"] = 0
+        elif mode == "count":
+            rep["filesScanned"] -= 1
         elif mode == "nokey":
             rep.pop("lawWarnings", None)
         elif mode == "hash":

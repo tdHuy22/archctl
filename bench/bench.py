@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Đo archctl trên mười repo thật, ghim theo commit.
+"""Đo archctl trên các repo thật trong `repos.tsv`, ghim theo commit.
 
     python3 bench/bench.py                      # dựng archctl, tải repo còn thiếu, chạy hết
     python3 bench/bench.py --only hugo,tokio    # chỉ vài repo
@@ -58,6 +58,7 @@ def git(*args, cwd=None):
 # mục cache, còn một giá trị mở đầu bằng `-` thì git đọc thành tuỳ chọn.
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 SHA = re.compile(r"[0-9a-f]{40}")
+SUBPATH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 
 
 def die(msg):
@@ -71,14 +72,21 @@ def load_repos():
     for n, line in enumerate((HERE / "repos.tsv").read_text().splitlines(), 1):
         if not line.strip() or line.startswith("#"):
             continue
-        name, url, sha, *_ = line.split("\t")
+        cols = line.split("\t")
+        if len(cols) < 4:
+            die(f"repos.tsv:{n}: cần ít nhất bốn cột (tên, url, commit, submodule), có {len(cols)}")
+        name, url, sha, subs, *_ = cols
         if not NAME.fullmatch(name) or ".." in name:
             die(f"repos.tsv:{n}: tên không hợp lệ: {name!r}")
         if not url.startswith("https://"):
             die(f"repos.tsv:{n}: chỉ nhận URL https://, nhận {url!r}")
         if not SHA.fullmatch(sha):
             die(f"repos.tsv:{n}: commit phải là SHA đủ 40 ký tự, nhận {sha!r}")
-        repos.append((name, url, sha))
+        paths = [] if subs == "-" else subs.split(",")
+        for path in paths:
+            if not SUBPATH.fullmatch(path) or ".." in path.split("/"):
+                die(f"repos.tsv:{n}: đường dẫn submodule không hợp lệ: {path!r}")
+        repos.append((name, url, sha, paths))
     return repos
 
 
@@ -100,6 +108,98 @@ def fetch(name, url, sha, dest: Path):
             return f"git {args[0]}: {p.stderr.strip()[:200]}"
     head = git("rev-parse", "HEAD", cwd=dest).stdout.strip()
     return None if head == sha else f"HEAD là {head}, không phải {sha}"
+
+
+def fetch_submodule(dest: Path, path: str):
+    """Submodule ở đúng commit mà repo cha ghi lại. Trả về lỗi, hoặc None.
+
+    `--depth 1` không kéo submodule, nên trước đây zstd-rs vào bộ đo không có
+    dòng C nào dù được chọn chính vì phần C vendor. URL đọc từ `.gitmodules`
+    của repo cha ở commit đã ghim, và cũng phải là https.
+    """
+    tree = git("ls-tree", "HEAD", "--", path, cwd=dest).stdout.split()
+    if len(tree) < 3 or tree[1] != "commit":
+        return f"{path} không phải submodule ở commit đã ghim"
+    sha = tree[2]
+    url = None
+    keys = git("config", "-f", ".gitmodules", "--get-regexp", r"\.path$", cwd=dest).stdout
+    for line in keys.splitlines():
+        key, _, value = line.partition(" ")
+        if value == path:
+            url = git("config", "-f", ".gitmodules", "--get",
+                      key[: -len(".path")] + ".url", cwd=dest).stdout.strip()
+    if not url or not url.startswith("https://"):
+        return f"{path}: chỉ nhận URL https:// trong .gitmodules, nhận {url!r}"
+    err = fetch(path, url, sha, dest / path)
+    return f"{path}: {err}" if err else None
+
+
+def tracked_sources(dest: Path, subs) -> int:
+    """Số file nguồn archctl phải quét, đếm độc lập với archctl.
+
+    Lấy từ `git ls-files`: thứ được commit là mã thật. Bỏ symlink (archctl
+    không đi theo, có chủ ý), bỏ thư mục archctl luôn bỏ qua, và bỏ thư mục
+    tên output (`build`, `dist`…) khi chính git nói nó bị ignore — hoặc khi
+    không có `.gitignore` nào để hỏi. Phần `.gitignore` do `git check-ignore`
+    trả lời, nên nó kiểm luôn bộ đọc `.gitignore` của archctl.
+    """
+    files = []
+    for prefix in ["", *subs]:
+        here = dest / prefix if prefix else dest
+        p = git("ls-files", "-s", "-z", cwd=here)
+        if p.returncode != 0:
+            die(f"git ls-files ở {here}: {p.stderr.strip()[:200]}")
+        for entry in p.stdout.split("\0"):
+            if not entry:
+                continue
+            meta, _, path = entry.partition("\t")
+            if meta.split()[0] in ("120000", "160000"):  # symlink, submodule
+                continue
+            files.append(f"{prefix}/{path}" if prefix else path)
+
+    files = [f for f in files if Path(f).suffix in consistency.LANG_EXTS]
+    files = [f for f in files if not set(f.split("/")[:-1]) & consistency.ALWAYS_IGNORE]
+
+    # Mọi thư mục tên output trên đường dẫn của từng file.
+    output_dirs = {
+        "/".join(f.split("/")[: i + 1])
+        for f in files
+        for i, part in enumerate(f.split("/")[:-1])
+        if part in consistency.OUTPUT_DIRS
+    }
+    skipped = set()
+    for d in output_dirs:
+        parts = d.split("/")
+        has_gitignore = any(
+            (dest / "/".join(parts[:i]) / ".gitignore").is_file() for i in range(len(parts))
+        )
+        if not has_gitignore:
+            skipped.add(d)
+    asked = sorted(output_dirs - skipped)
+    if asked:
+        # Hỏi cả thư mục lẫn một file giả bên trong: `dist/*` không bỏ chính
+        # `dist` nhưng bỏ mọi thứ trong đó, và archctl coi như bỏ thư mục.
+        probe = "__archctl_probe__"
+        try:
+            p = subprocess.run(
+                ["git", *GIT_HARDENING, "-c", "core.excludesFile=/dev/null",
+                 "check-ignore", "--no-index", "--stdin", "-z"],
+                cwd=dest, env=GIT_ENV, capture_output=True, text=True, timeout=GIT_TIMEOUT_S,
+                input="".join(f"{d}/\0{d}/{probe}\0" for d in asked),
+            )
+        except subprocess.TimeoutExpired:
+            die(f"git check-ignore ở {dest}: quá {GIT_TIMEOUT_S} giây")
+        # 0: có thứ bị ignore, 1: không có gì. Mã khác là git hỏng, không
+        # phải archctl sai — đếm tiếp thì ra "số file lệch" giả.
+        if p.returncode not in (0, 1):
+            die(f"git check-ignore ở {dest}: {p.stderr.strip()[:200]}")
+        for d in p.stdout.split("\0"):
+            if d:
+                skipped.add(d.rstrip("/").removesuffix(f"/{probe}"))
+    return sum(
+        1 for f in files
+        if not any(f == d or f.startswith(d + "/") for d in skipped)
+    )
 
 
 def build():
@@ -132,18 +232,22 @@ def main():
     work = cache / "work"
 
     broken = []
-    for name, url, sha in repos:
-        err = fetch(name, url, sha, cache / "repos" / name)
+    for name, url, sha, subs in repos:
+        dest = cache / "repos" / name
+        err = fetch(name, url, sha, dest)
+        for path in [] if err else subs:
+            err = err or fetch_submodule(dest, path)
         if err:
             broken.append(f"{name}: {err}")
     if broken:
         die("không tải được:\n  " + "\n  ".join(broken))
 
     results = []
-    for name, _, sha in repos:
+    for name, _, sha, subs in repos:
         print(f"· {name}", flush=True)
         src = cache / "repos" / name
-        r = consistency.analyse(archctl, name, src, work, args.rounds)
+        expected = tracked_sources(src, subs)
+        r = consistency.analyse(archctl, name, src, work, expected, args.rounds)
         fl = flows.run_flows(archctl, name, src, work)
         r["commit"] = sha
         r["flows_passed"] = len(fl.passed)

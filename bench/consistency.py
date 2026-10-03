@@ -21,7 +21,14 @@ LANG_EXTS = {
     ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".py", ".pyi",
     ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx", ".inl", ".rs", ".go",
 }
-SKIP_DIRS = {".git", "node_modules", "target", "dist", "build", ".arch"}
+# Thư mục archctl luôn bỏ qua (`ALWAYS_IGNORE` trong `check.rs`) và những tên
+# chỉ bỏ khi `.gitignore` bỏ (`OUTPUT_DIRS`). Chép lại ở đây có chủ ý: đây là
+# điều archctl *định* làm, còn số file đếm độc lập cho biết nó có làm đúng không.
+ALWAYS_IGNORE = {
+    ".git", ".arch", "node_modules", "target", ".next", ".nuxt", ".svelte-kit",
+    "vendor", "__pycache__", ".venv",
+}
+OUTPUT_DIRS = {"dist", "build", "out", "coverage"}
 
 
 def _run(archctl, args, timeout=300):
@@ -36,31 +43,20 @@ def _median_ms(archctl, args, rounds):
     return statistics.median(_run(archctl, args)[1] for _ in range(rounds))
 
 
-def _count_files(root: Path) -> int:
-    """Đếm độc lập với archctl, để có cái mà so với `filesScanned`.
+def analyse(archctl: str, name: str, src: Path, work: Path, expected: int,
+            rounds: int = 5) -> dict:
+    """Trả về một dict kết quả. Khoá `problems` liệt kê mọi thứ làm phép thử đổ.
 
-    Phải xét đường dẫn **tương đối**: bản làm việc nằm trong `target/bench/`,
-    nên đường dẫn tuyệt đối của mọi file đều chứa `target`, và lần chạy đầu
-    tiên đếm ra 0 ở cả mười repo.
+    `expected` là số file nguồn archctl phải quét, đếm từ git chứ không từ
+    archctl — xem `tracked_sources` trong `bench.py`.
     """
-    return sum(
-        1
-        for p in root.rglob("*")
-        if p.is_file()
-        and p.suffix in LANG_EXTS
-        and not (set(p.relative_to(root).parts) & SKIP_DIRS)
-    )
-
-
-def analyse(archctl: str, name: str, src: Path, work: Path, rounds: int = 5) -> dict:
-    """Trả về một dict kết quả. Khoá `problems` liệt kê mọi thứ làm phép thử đổ."""
     work = work / name
     if work.exists():
         shutil.rmtree(work)
     shutil.copytree(src, work, symlinks=True, ignore=shutil.ignore_patterns(".git"))
     root = ["--root", str(work)]
 
-    out = {"repo": name, "files": _count_files(work), "problems": []}
+    out = {"repo": name, "files": expected, "problems": []}
 
     p, ms = _run(archctl, ["init", "--from-code", "--no-hooks", *root])
     out["init_ms"] = round(ms)
@@ -96,6 +92,13 @@ def analyse(archctl: str, name: str, src: Path, work: Path, rounds: int = 5) -> 
     if out["scanned"] == 0 or out["files"] == 0:
         out["problems"].append(
             f"không có gì để kiểm: archctl quét {out['scanned']} file, đếm độc lập ra {out['files']}"
+        )
+    # Lệch là archctl bỏ sót mã được commit, hoặc quét thứ nó định bỏ. etcd
+    # từng mất cả package `tests/robustness/coverage/` vì tên thư mục trùng
+    # tên output, và không có gì nói ra.
+    if out["scanned"] != out["files"]:
+        out["problems"].append(
+            f"số file lệch: archctl quét {out['scanned']}, git có {out['files']} file nguồn"
         )
     if out["checked"] == 0:
         out["problems"].append("không component nào vào diện kiểm, 0 vi phạm là vô nghĩa")

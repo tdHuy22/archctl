@@ -7,10 +7,10 @@ Hiện kiểm **luật phụ thuộc giữa component** cho năm ngôn ngữ.
 | Ngôn ngữ | Phần mở rộng | Nhận được | Phân giải |
 | --- | --- | --- | --- |
 | TypeScript, JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | `import`, `import type`, `export … from`, `require()`, `import()` | tương đối, `index.*`, `.js`→`.ts`, alias `paths` trong tsconfig, **gói anh em trong workspace npm** |
-| Python | `.py .pyi` | `import a.b`, `import a as b, c`, `from .x import y` | tương đối theo số dấu chấm; tuyệt đối thử gốc, `src/`, `lib/`; **gói không gian tên (PEP 420)** |
-| C, C++ | `.c .h .cc .cpp .cxx .hpp .hh .hxx .inl` | `#include "x"`, `#include <x>` | **thư mục `-I` đọc từ build**; `"…"` ưu tiên thư mục file gọi |
+| Python | `.py .pyi` | `import a.b`, `import a as b, c`, `from .x import y` | tương đối theo số dấu chấm; tuyệt đối thử gốc repo và **mọi thư mục có `pyproject.toml`, `setup.py`, `setup.cfg`, `manage.py`** (cùng `src/`, `lib/` của chúng), package chứa file gọi trước; **gói không gian tên (PEP 420)** |
+| C, C++ | `.c .h .cc .cpp .cxx .hpp .hh .hxx .inl` | `#include "x"`, `#include <x>` | **thư mục `-I` đọc từ build**; `"…"` ưu tiên thư mục file gọi; không có build thì khớp tên **duy nhất** trong repo |
 | Rust | `.rs` | `use`, `pub use`, cây `use a::{b::{c, d as e}, self}`, `use {a, b}`, `extern crate` | theo cây module; **gốc crate của từng file** (thư viện, binary, test, đường dẫn khai trong `Cargo.toml`); nhìn xuyên re-export ở gốc; các crate anh em trong workspace |
-| Go | `.go` | `import "x"`, khối `import ( … )` | đọc `module` trong `go.mod` để tách nội bộ với bên ngoài |
+| Go | `.go` | `import "x"`, khối `import ( … )` | đọc `module` trong mọi `go.mod` tới độ sâu 4 (trừ `testdata/`, `vendor/`, thư mục ẩn) để tách nội bộ với bên ngoài; module dài nhất thắng |
 
 Mọi ngôn ngữ dùng chung một lexer cấu hình được. Nó biết bỏ qua chú thích,
 chuỗi, char literal, raw string, docstring và regex theo từng ngôn ngữ — đó là
@@ -225,6 +225,27 @@ báo động giả tốn lòng tin nhiều hơn bỏ sót:
 
 Repo không có file C nào thì không phải quét tìm `Makefile`: phần này đọc muộn.
 
+### Không có file build nào khai `-I`
+
+nginx đặt thư mục include trong script `auto/` (`CORE_INCS="src/core"`), và
+`auto/configure` mới sinh `Makefile` lúc build. Đọc cây nguồn thì không thấy
+`-I` nào, nên `#include <ngx_core.h>` từng bị coi là header hệ thống: 415 file,
+0 cạnh, 0 cảnh báo.
+
+Khi **không file build nào** khai thư mục include, archctl dựa vào tên: header
+có đuôi đường dẫn trùng với **đúng một** file trong repo thì là file đó, cho cả
+`"…"` lẫn `<…>`. Header chuẩn của C, POSIX và Windows (`<stdio.h>`,
+`<sys/types.h>`…) thì không bao giờ: zstd có `wasm-shim/stdio.h` chỉ dùng khi
+build wasm, và khớp tên vào đó từng cho 363 cạnh sai. Hai
+file cùng khớp thì không đoán và báo là chưa phân giải được — nguyên tắc vẫn là
+cạnh sai tốn lòng tin hơn cạnh bị bỏ sót, chỉ có điều 0 cạnh trên cả repo là
+bỏ sót lớn nhất.
+
+Có file build thì không đoán: `<x.h>` ngoài các thư mục nó khai là của hệ
+thống, dù repo có một file trùng tên. Bảng tên dừng ở 200 000 file; quá giới
+hạn thì không đoán gì, vì dừng giữa chừng thì "duy nhất" tuỳ thứ tự đọc thư mục
+và hai máy sẽ ra hai kết quả.
+
 ## Báo cáo không được dài tới mức không ai đọc
 
 Cảnh báo lặp lại được gộp theo tên, và mỗi loại in tối đa mười hai mục:
@@ -287,6 +308,22 @@ trúc nào.
 Mẫu glob cũng bị chặn: bộ khớp chỉ giữ một điểm quay lui nên không có mẫu nào
 làm nó chạy theo hàm mũ. Điều này quan trọng vì mẫu có thể do agent đề xuất
 rồi được `archctl accept` ghi vào file luật.
+
+## Gốc import của Python
+
+`from dcim.models import Device` tính từ đâu là tuỳ chương trình chạy từ đâu,
+và mã nguồn không nói ra. archctl coi những thư mục sau là gốc: gốc repo, và
+mọi thư mục có `pyproject.toml`, `setup.py`, `setup.cfg` (một package) hay
+`manage.py` (một dự án Django), tới độ sâu 4, trừ `vendor/`, `dist/`,
+`node_modules/` và thư mục ẩn. Mỗi gốc thử chính nó, `src/` và `lib/`.
+
+Thứ tự: các gốc **chứa file gọi** trước, sâu nhất trước — `tests` của
+`libs/core` là `tests` của nó, không phải của package bên cạnh. Rồi tới các gốc
+còn lại, và ở đó tên phải duy nhất: hai package cùng có `shared` thì không đoán.
+
+Trước đây chỉ gốc repo, `src/` và `lib/` được thử. netbox (mã trong `netbox/`,
+chạy từ đó) và langchain (mỗi package một thư mục trong `libs/`) ra 0 cạnh, 0
+cảnh báo: mọi import tuyệt đối thành gói bên thứ ba.
 
 ## Giới hạn khác đã biết
 
@@ -356,8 +393,30 @@ cáo in cảnh báo `MẪU CHỒNG NHAU`. Nên sửa mẫu thay vì dựa vào t
 ## Bỏ qua thư mục
 
 Luôn bỏ qua, không cấu hình được: `.git`, `.arch`, `node_modules`, `target`,
-`dist`, `build`, `out`, `.next`, `.nuxt`, `.svelte-kit`, `coverage`, `vendor`,
-`__pycache__`, `.venv`. Symlink không được đi theo, để tránh vòng lặp và tránh
-ra ngoài gốc dự án.
+`.next`, `.nuxt`, `.svelte-kit`, `vendor`, `__pycache__`, `.venv`. Symlink
+không được đi theo, để tránh vòng lặp và tránh ra ngoài gốc dự án.
+
+`dist`, `build`, `out`, `coverage` thì **hỏi `.gitignore`**. Đó thường là
+output, nhưng cũng là tên của mã thật: etcd có package Go
+`tests/robustness/coverage/`, zstd có mã C trong `build/`. Trước đây chúng bị
+bỏ theo tên, và mọi vi phạm trong đó biến mất khỏi báo cáo mà không có gì nói
+ra. Giờ:
+
+- `.gitignore` bỏ qua thư mục đó, hay mọi thứ trong nó (`dist/*`) → bỏ qua.
+  Output thì nằm ở đây. `.gitignore` được đọc từ gốc repo git, kể cả khi
+  `.arch/` nằm ở một thư mục con của monorepo — trừ khi chính thư mục đó bị
+  repo bên ngoài ignore (bộ đo chép repo vào `target/`), khi ấy `.gitignore`
+  bên ngoài không phải luật của nó. `.git/info/exclude` cũng được đọc.
+- có `.gitignore` mà nó không bỏ → quét. Được commit tức là mã của repo,
+  kể cả bundle mà netbox commit trong `project-static/dist/`; không muốn thì
+  thêm vào `.arch/.archignore`.
+- không có `.gitignore` nào để hỏi → bỏ theo tên như cũ. Một bundle sinh ra mà
+  bị quét như mã kiến trúc còn tệ hơn. `.git/info/exclude` chỉ có trên một
+  máy, nên nó bỏ thêm được nhưng không biến trường hợp này thành "quét".
+
+Bộ đọc `.gitignore` chỉ đủ cho câu hỏi này: mẫu sau thắng mẫu trước, `!` đưa
+trở lại, mẫu có `/` thì neo vào thư mục chứa file, thư mục cha bị bỏ thì con
+cũng bị. Chưa hiểu `[abc]`. Bộ đo đối
+chiếu nó với chính `git check-ignore` trên mười tám repo.
 
 Thêm mẫu glob vào `.arch/.archignore` để bỏ qua thêm.

@@ -4,11 +4,36 @@
 python3 bench/bench.py
 ```
 
-Một lệnh: dựng archctl bản release, tải mười repo ở đúng commit đã ghim trong
-[repos.tsv](repos.tsv), rồi chạy hai phép thử trên từng repo. Chỉ cần Python 3
-và git, không gói Python nào ngoài thư viện chuẩn.
+Một lệnh: dựng archctl bản release, tải mười tám repo ở đúng commit đã ghim
+trong [repos.tsv](repos.tsv), rồi chạy hai phép thử trên từng repo. Chỉ cần
+Python 3 và git, không gói Python nào ngoài thư viện chuẩn.
 
-Repo tải về `target/bench/repos/` (khoảng 170 MB), bản làm việc ở
+## Có những repo nào, và vì sao
+
+Mỗi repo có mặt vì một cách bố trí mà fixture viết tay không nghĩ ra. Chọn sao
+cho mỗi ngôn ngữ có ít nhất hai repo, và có cả thư viện lẫn ứng dụng chia tầng —
+chỗ mà luật `allow`/`deny` giữa component có nghĩa nhất.
+
+| Ngôn ngữ | Repo |
+| --- | --- |
+| TypeScript | vue core (monorepo, alias tsconfig), excalidraw (ứng dụng React, TSX) |
+| Python | flask (`src/`), netbox (Django, gốc là thư mục có `manage.py`), scikit-learn (ML), vllm (LLM serving, kernel C++), langchain (LLM, hai mươi hai `pyproject.toml` trong `libs/`) |
+| C | curl (CMake), redis (Makefile, `deps/`), nginx (`-I` trong script `auto/`, không file build nào đọc được) |
+| C++ | leveldb (storage engine, CMake) |
+| Rust | tokio, ripgrep, rusqlite, pydantic-core (với Python), zstd-rs (với C qua submodule) |
+| Go | hugo (đồ thị dày), etcd (mười bốn `go.mod` trong một repo) |
+
+Lần thêm tám repo cuối (etcd, excalidraw, langchain, leveldb, netbox, nginx,
+scikit-learn, vllm) bắt được bốn chỗ archctl không thấy cạnh nào mà cũng
+không báo gì: etcd, langchain, netbox, nginx đều ra 0 component vào diện kiểm.
+Cả bốn đã sửa, lý do ở [docs/check.md](../docs/check.md).
+
+Cột submodule trong `repos.tsv` liệt kê submodule cần kéo về. `--depth 1`
+không kéo submodule, nên zstd-rs từng vào bộ đo không có dòng C nào dù được
+chọn chính vì phần C vendor. Submodule được tải ở đúng commit repo cha ghi lại,
+URL đọc từ `.gitmodules` và cũng phải là `https://`.
+
+Repo tải về `target/bench/repos/` (khoảng 690 MB), bản làm việc ở
 `target/bench/work/`, kết quả chi tiết ở `target/bench/results.json`. Tất cả
 nằm trong `target/`: ngoài git, bộ quét của archctl bỏ qua, `cargo clean` dọn.
 
@@ -23,6 +48,12 @@ archctl, không phải của repo.
 Và phải ra **0 cảnh báo trong file luật**: `init` khuyên chạy `check --strict`
 trong CI, mà `--strict` coi cảnh báo của file luật là vi phạm. Luật vừa sinh ra
 đã có cảnh báo thì lời khuyên đó đổ ngay lần chạy đầu tiên của người dùng mới.
+
+Và archctl phải quét **đúng số file nguồn mà git có**. Số này đếm độc lập từ
+`git ls-files`, trừ symlink và thư mục archctl luôn bỏ qua; thư mục tên output
+(`build`, `dist`, `out`, `coverage`) chỉ bị trừ khi `git check-ignore` nói nó
+(hay mọi thứ trong nó) bị ignore, hoặc khi không có `.gitignore` nào để hỏi. Lệch là archctl bỏ sót mã được commit: etcd từng mất cả package Go
+`tests/robustness/coverage/` vì tên thư mục trùng tên output, không một lời nào.
 
 **Luồng lệnh** ([flows.py](flows.py)). Mọi lệnh — `init`, `check` theo bốn
 đường, `parse`, `export`, `baseline`, `propose`/`accept`/`block`/`reject`,
@@ -69,7 +100,8 @@ python3 bench/sabotage.py
 ```
 
 Dựng một archctl giả, gọi archctl thật rồi làm hỏng đúng một chỗ: thêm một vi
-phạm, thêm một cảnh báo vào luật sinh ra, báo quét 0 file, bỏ khoá
+phạm, thêm một cảnh báo vào luật sinh ra, báo quét 0 file, báo quét thiếu một
+file, bỏ khoá
 `lawWarnings`, giữ nguyên hash khi luật đổi, nói `diff` có thay đổi khi chỉ
 thêm chú thích. Mỗi kiểu phải làm `bench.py` thoát 1, **và phải bị đúng phép
 kiểm dành cho nó bắt** — không chỉ đỏ vì một lý do khác. CI chạy bước này sau

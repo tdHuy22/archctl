@@ -21,17 +21,22 @@ pub const ALWAYS_IGNORE: &[&str] = &[
     ".arch",
     "node_modules",
     "target",
-    "dist",
-    "build",
-    "out",
     ".next",
     ".nuxt",
     ".svelte-kit",
-    "coverage",
     "vendor",
     "__pycache__",
     ".venv",
 ];
+
+/// Tên thường dành cho output, nhưng cũng là tên của mã thật: etcd có package
+/// Go `tests/robustness/coverage/`, zstd có mã C trong `build/`. Bỏ theo tên
+/// thì mã đó biến mất khỏi báo cáo, không một lời nào.
+///
+/// Nên hỏi `.gitignore`: output thì bị bỏ qua ở đó, mã thật thì được commit.
+/// Không có `.gitignore` nào để hỏi thì vẫn bỏ theo tên — một bundle trong
+/// `dist/` bị quét như mã kiến trúc còn tệ hơn.
+pub const OUTPUT_DIRS: &[&str] = &["dist", "build", "out", "coverage"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
@@ -843,9 +848,128 @@ fn walk(root: &Path, prefix: &str, extra_ignores: &[String], out: &mut Vec<Strin
             if ALWAYS_IGNORE.contains(&name.as_str()) {
                 continue;
             }
+            if OUTPUT_DIRS.contains(&name.as_str()) && gitignored_dir(root, &rel) != Some(false) {
+                continue;
+            }
             walk(root, &rel, extra_ignores, out);
         } else if meta.is_file() {
             out.push(rel);
         }
     }
+}
+
+/// `.gitignore` có bỏ qua thư mục `rel` không. `None`: không có `.gitignore`
+/// nào áp lên nó, tức là không biết.
+///
+/// Đủ cho một câu hỏi về một thư mục, không phải bộ đọc `.gitignore` đầy đủ:
+/// đọc file ở mọi thư mục từ gốc repo git (có thể nằm trên gốc archctl, trong
+/// monorepo) xuống tới cha của `rel`, và `.git/info/exclude`; mẫu sau thắng
+/// mẫu trước, `!` đưa trở lại, có `/` ở giữa hay đầu thì neo vào thư mục chứa
+/// file, không có thì khớp tên ở mọi độ sâu. Thư mục cha bị bỏ thì con cũng
+/// bị. `dist/*` bỏ mọi thứ trong `dist`, nên tính như bỏ chính `dist`.
+fn gitignored_dir(root: &Path, rel: &str) -> Option<bool> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let (top, prefix) = git_top(&root);
+    let parts: Vec<&str> = prefix.iter().map(String::as_str).chain(rel.split('/')).collect();
+    let (sources, known) = ignore_sources(&top, &parts);
+    if ignored_within(&sources, &parts, prefix.len() + 1) {
+        return Some(true);
+    }
+    known.then_some(false)
+}
+
+/// Thư mục gốc của repo git chứa `root`, và đường đi từ đó xuống `root`.
+///
+/// Gốc archctl là thư mục gần nhất có `.arch/`, có thể là `web/` trong một
+/// repo git lớn hơn, và `.gitignore` ở trên vẫn áp lên `web/dist`. Nhưng nếu
+/// `root` nằm trong thư mục mà repo đó bỏ qua — bộ đo chép netbox vào
+/// `archctl/target/` — thì git không bao giờ nhìn vào đây, và `.gitignore` của
+/// repo ngoài không phải luật của nó. Không thấy `.git` thì cũng không đọc gì
+/// phía trên: `~/.gitignore` của ai đó không phải luật của repo này.
+fn git_top(root: &Path) -> (std::path::PathBuf, Vec<String>) {
+    let mut top = root.to_path_buf();
+    let mut prefix: Vec<String> = Vec::new();
+    while !top.join(".git").exists() {
+        let name = top.file_name().and_then(|n| n.to_str()).map(str::to_string);
+        match (name, top.parent()) {
+            (Some(name), Some(parent)) => {
+                prefix.insert(0, name);
+                top = parent.to_path_buf();
+            }
+            _ => return (root.to_path_buf(), Vec::new()),
+        }
+    }
+    if !prefix.is_empty() {
+        let parts: Vec<&str> = prefix.iter().map(String::as_str).collect();
+        let (sources, _) = ignore_sources(&top, &parts);
+        if ignored_within(&sources, &parts, 1) {
+            return (root.to_path_buf(), Vec::new());
+        }
+    }
+    (top, prefix)
+}
+
+/// Mọi `.gitignore` từ `top` xuống tới cha của `parts`, kèm độ sâu của thư
+/// mục chứa nó, và `.git/info/exclude` ở độ sâu 0. Phần tử thứ hai: có
+/// `.gitignore` nào không.
+fn ignore_sources(top: &Path, parts: &[&str]) -> (Vec<(usize, String)>, bool) {
+    let mut sources: Vec<(usize, String)> = Vec::new();
+    for depth in 0..parts.len() {
+        let dir = parts[..depth].join("/");
+        if let Ok(text) = std::fs::read_to_string(top.join(&dir).join(".gitignore")) {
+            sources.push((depth, crate::strip_bom(&text).to_string()));
+        }
+    }
+    // Chỉ `.gitignore` mới nói gì đó về repo: được commit, máy nào cũng như
+    // nhau. `.git/info/exclude` là của riêng một máy, nên nó được bỏ thêm thư
+    // mục nhưng không được biến "không biết" thành "quét".
+    let known = !sources.is_empty();
+    if let Ok(text) = std::fs::read_to_string(top.join(".git/info/exclude")) {
+        sources.insert(0, (0, crate::strip_bom(&text).to_string()));
+    }
+    (sources, known)
+}
+
+/// Có thư mục nào trong `parts[..first]`, `parts[..first + 1]`, … tới hết bị
+/// bỏ qua không. Từ ngoài vào: cha đã bị bỏ thì git không bao giờ nhìn vào
+/// trong, nên `!` ở sâu hơn không cứu được.
+fn ignored_within(sources: &[(usize, String)], parts: &[&str], first: usize) -> bool {
+    for end in first..=parts.len() {
+        let mut ignored = false;
+        for (depth, text) in sources {
+            if *depth >= end {
+                continue;
+            }
+            let sub = parts[*depth..end].join("/");
+            for line in text.lines() {
+                let line = line.trim_end();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let (negate, pattern) = match line.strip_prefix('!') {
+                    Some(rest) => (true, rest),
+                    None => (false, line.strip_prefix('\\').unwrap_or(line)),
+                };
+                let pattern = pattern.trim_end_matches('/');
+                if pattern.is_empty() {
+                    continue;
+                }
+                let whole = pattern.strip_suffix("/**").or_else(|| pattern.strip_suffix("/*"));
+                let hit = |pattern: &str| {
+                    if pattern.contains('/') || whole.is_some() {
+                        glob::matches(pattern.trim_start_matches('/'), &sub)
+                    } else {
+                        glob::matches(pattern, parts[end - 1])
+                    }
+                };
+                if hit(pattern) || whole.is_some_and(|w| !w.is_empty() && hit(w)) {
+                    ignored = !negate;
+                }
+            }
+        }
+        if ignored {
+            return true;
+        }
+    }
+    false
 }
