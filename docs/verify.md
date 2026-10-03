@@ -90,13 +90,20 @@ Biên nhận nằm ở `.arch/.verified` và không vào git.
 | --- | --- |
 | `archctl verify` | chạy lệnh — và chỉ khi người gõ lệnh đó |
 | `archctl check` | **không bao giờ** chạy gì, kể cả trong hook của agent. Nó chỉ đọc biên nhận |
-| `archctl propose` | **từ chối** đề xuất bắt đầu bằng `verify` |
+| `archctl propose` | **từ chối** đề xuất khai báo một cách kiểm |
+| `archctl accept` | **từ chối** luôn, ngay trước khi ghi vào file luật |
 
-Chỗ cuối quan trọng. `archctl accept` ghi thẳng đề xuất của agent vào file
-luật, nên nếu agent đề xuất được một cách kiểm thì một lần duyệt vội là đủ để
-nó tự chọn thứ chạy trên máy người dùng. Người muốn thêm cách kiểm thì tự sửa
-`.arch/system.arch` — đó cũng là nguyên tắc một-người-ghi-một-file đã có ở
-[protocol.md](protocol.md).
+Hai dòng cuối quan trọng, và **chặn ở `propose` thôi thì không đủ**:
+`proposals.arch` là file agent ghi, mà agent chạy được shell nên nó ghi thẳng
+vào đó chẳng cần đi qua `archctl propose`. Nội dung file ấy không đáng tin,
+nên chỗ duy nhất kiểm được là ngay trước khi ghi vào file luật.
+
+Việc chặn dùng chính bộ đọc DSL chứ không so chuỗi: so chuỗi thì mỗi cách
+viết lách — khoảng trắng đầu dòng, xuống dòng giữa chừng, gộp với một luật
+khác — là một lần phải đoán lại.
+
+Người muốn thêm cách kiểm thì tự sửa `.arch/system.arch`, đúng nguyên tắc
+một-người-ghi-một-file ở [protocol.md](protocol.md).
 
 Cả hai ranh giới đều có test, và test cho `check` dựng một cách kiểm
 `touch <file>` rồi khẳng định file đó không bao giờ xuất hiện.

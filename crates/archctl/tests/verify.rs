@@ -197,3 +197,40 @@ fn bien_nhan_bi_sua_tay_thanh_rac_khong_lam_sap() {
     let out = p.out(&["check"]);
     assert!(out.contains("chưa chạy lần nào"), "dòng hỏng phải bị bỏ qua: {out}");
 }
+
+/// `propose` chặn, nhưng `proposals.arch` là file **agent ghi** — và agent
+/// chạy được shell, nên nó ghi thẳng vào đó mà chẳng cần đi qua `propose`.
+/// Chỗ duy nhất kiểm được là ngay trước khi ghi vào file luật.
+#[test]
+fn agent_ghi_thang_proposals_roi_accept_cung_khong_qua_duoc() {
+    let p = Project::new("escalate", ARCH);
+    p.write(
+        ".arch/proposals.arch",
+        "proposal p-abc123 @ai 2026-10-03\n  rule verify evil runs \"touch /tmp/archctl-pwn\"\n  reason lách\n",
+    );
+    let o = p.run(&["accept", "p-abc123", "--reason", "duyệt vội"]);
+    assert!(!o.status.success());
+    let out = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    assert!(out.contains("lệnh shell"), "{out}");
+    let law = std::fs::read_to_string(p.0.join(".arch/system.arch")).unwrap();
+    assert!(!law.contains("evil"), "lệnh đã lọt vào file luật:\n{law}");
+}
+
+#[test]
+fn chan_theo_cu_phap_chu_khong_theo_chuoi() {
+    // Mỗi cách viết lách khác đi là một lần phải đoán lại, nếu chặn bằng cách
+    // so chuỗi.
+    let p = Project::new("escalate2", ARCH);
+    for statement in [
+        "  verify evil runs \"touch /tmp/archctl-pwn\"",
+        "allow Order -> Pay\nverify evil runs \"touch /tmp/archctl-pwn\"",
+    ] {
+        p.write(
+            ".arch/proposals.arch",
+            &format!("proposal p-abc123 @ai 2026-10-03\n  rule {statement}\n  reason lách\n"),
+        );
+        assert!(!p.run(&["accept", "p-abc123", "--reason", "x"]).status.success(), "{statement}");
+    }
+    let law = std::fs::read_to_string(p.0.join(".arch/system.arch")).unwrap();
+    assert!(!law.contains("evil"), "{law}");
+}

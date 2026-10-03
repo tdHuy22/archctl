@@ -159,9 +159,12 @@ pub fn cmd_propose(args: &[String], intent: Intent) -> ExitCode {
     // file luật, và `archctl verify` chạy lệnh trong đó — nên nếu cho phép thì
     // một lần duyệt vội là đủ để agent tự chọn thứ chạy trên máy người dùng.
     // Người muốn thêm cách kiểm thì tự sửa `.arch/system.arch`.
-    if statement.split_whitespace().next() == Some("verify") {
+    if carries_command(&statement) {
         return fail(
-            "không đề xuất được cách kiểm: nó mang theo một lệnh shell.\n             → người tự thêm dòng `verify ... runs \"...\"` vào .arch/system.arch",
+            concat!(
+                "không đề xuất được cách kiểm: nó mang theo một lệnh shell.\n",
+                "→ người tự thêm dòng `verify ... runs \"...\"` vào .arch/system.arch",
+            ),
             exit::USAGE,
         );
     }
@@ -214,6 +217,14 @@ pub fn cmd_propose(args: &[String], intent: Intent) -> ExitCode {
     ExitCode::from(exit::PENDING)
 }
 
+/// Câu lệnh có khai báo một cách kiểm không — tức là có mang theo lệnh shell.
+///
+/// Dùng chính bộ đọc DSL thay vì so chuỗi: so chuỗi thì mỗi cách viết lách
+/// (khoảng trắng đầu dòng, xuống dòng giữa chừng) là một lần phải đoán lại.
+fn carries_command(statement: &str) -> bool {
+    !arch_core::parser::parse(statement).0.verifies.is_empty()
+}
+
 pub fn cmd_decide(args: &[String], verdict: Verdict) -> ExitCode {
     let parsed = match parse_args(args, &["reason", "root"], &[]) {
         Ok(a) => a,
@@ -242,6 +253,20 @@ pub fn cmd_decide(args: &[String], verdict: Verdict) -> ExitCode {
     let proposal = proposals.remove(pos);
 
     if verdict == Verdict::Accepted && proposal.intent == Intent::Rule {
+        // Chặn ở đây chứ không chỉ ở `propose`: `proposals.arch` là file agent
+        // ghi, và agent chạy được shell nên nó ghi thẳng vào đó mà không cần
+        // đi qua `archctl propose`. Nội dung file ấy không đáng tin, nên chỗ
+        // duy nhất kiểm được là ngay trước khi ghi vào file luật.
+        if carries_command(&proposal.statement) {
+            return fail(
+                concat!(
+                    "đề xuất này mang theo một lệnh shell, và `archctl verify` sẽ chạy nó.\n",
+                    "Không duyệt được bằng lệnh.\n",
+                    "→ người tự thêm dòng `verify ... runs \"...\"` vào .arch/system.arch",
+                ),
+                exit::USAGE,
+            );
+        }
         let mut law = read(&root, arch_core::ARCH_FILE);
         if !law.ends_with('\n') {
             law.push('\n');
