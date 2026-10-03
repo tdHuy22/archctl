@@ -641,11 +641,11 @@ fn parse_fields(body: &[Line<'_>]) -> Vec<Field> {
     let base = body.first().map_or(0, |l| l.indent);
     let mut fields: Vec<Field> = Vec::new();
     for line in body {
-        if line.indent > base {
-            if let Some(last) = fields.last_mut() {
-                last.values.push(line.text.to_string());
-                continue;
-            }
+        if line.indent > base
+            && let Some(last) = fields.last_mut()
+        {
+            last.values.push(line.text.to_string());
+            continue;
         }
         let (key, value) = match line.text.split_once(char::is_whitespace) {
             Some((k, v)) => (k, v.trim()),

@@ -6,6 +6,9 @@ Cài ngày 2026-09-20 bằng trình cài chính thức, có cờ `--no-modify-pa
 rustup **không** tự sửa file shell nào.
 
 - Phiên bản: rustc 1.98.1, cargo 1.98.1 (stable, aarch64-apple-darwin)
+- Toolchain thứ hai: `1.88` (minimal), để kiểm `rust-version` trong
+  `Cargo.toml` tại máy mà không phải chờ CI. Đó là bản tối thiểu thật: mã dùng
+  let-chain, ổn định ở 1.88 cho edition 2024, và 1.85 đổ với 28 lỗi.
 - Vị trí: `~/.rustup` (toolchain) và `~/.cargo` (binary, cache)
 - PATH: một khối đánh dấu `# RUST:START` ... `# RUST:END` trong `~/.zshrc`
 - Bản lưu trước khi sửa: `~/.zshrc.bak-archctl`

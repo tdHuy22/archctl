@@ -123,13 +123,13 @@ fn check_references(doc: &Document, diags: &mut Vec<Diag>) {
     for rule in &doc.rules {
         let line = rule.meta.line;
         for target in std::iter::once(&rule.from).chain(&rule.to) {
-            if let Target::Named(name) = target {
-                if !doc.knows(name) {
-                    diags.push(Diag::error(
-                        line,
-                        format!("quan hệ trỏ tới `{name}` nhưng chưa có component hay store nào tên đó"),
-                    ));
-                }
+            if let Target::Named(name) = target
+                && !doc.knows(name)
+            {
+                diags.push(Diag::error(
+                    line,
+                    format!("quan hệ trỏ tới `{name}` nhưng chưa có component hay store nào tên đó"),
+                ));
             }
         }
         for name in &rule.except {

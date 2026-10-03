@@ -5,7 +5,11 @@ resolver = "3"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# Mã dùng let-chain (`if let ... && ...`), ổn định ở 1.88 cho edition
+# 2024. Job `msrv` trong CI biên dịch lại bằng đúng con số này, vì khai
+# một số không ai kiểm thì nó sai im lặng: chỗ này từng ghi 1.85, và
+# 1.85 đổ với 28 lỗi.
+rust-version = "1.88"
 license = "Apache-2.0"
 
 [profile.release]
