@@ -42,6 +42,7 @@ kiến trúc c8bd3bd9 · 15 file quét (5 Rust, 4 C/C++, 4 Python, 2 Go) · 7/8 
 | `store owned_by` — truy cập dữ liệu | dò tên bảng trong chuỗi |
 | `boundary ... contain` — lỗi không được lọt ra ngoài vùng | dò định danh ngoài vùng |
 | `flow`, `contract`, `invariant state` | mọi tên khai báo phải tồn tại trong mã |
+| `verify ... runs "..."` | lệnh phải chạy xong và đạt, trên đúng bản mã này |
 | trạng thái `#draft`…`#locked` | quyết định luật nào đang có hiệu lực |
 
 Bốn khai báo cuối bắt đúng chế độ hỏng hay gặp nhất khi làm việc với agent:
@@ -118,8 +119,8 @@ Và trong CI, nơi agent không với tới:
 | | |
 | --- | --- |
 | Dependency ngoài std | **0** |
-| Test | 314 |
-| Binary | 945 KB |
+| Test | 319 |
+| Binary | 1058 KB |
 | Khởi động | 3ms |
 
 Không gói ngoài nào cả — kể cả bộ quét import, bộ đọc JSON, máy chủ HTTP và
