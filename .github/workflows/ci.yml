@@ -34,10 +34,13 @@ env:
   # Đã kiểm với `CARGO_HOME` rỗng: build release và clippy đều chạy offline.
   CARGO_NET_OFFLINE: "true"
 
+# Mặc định của GitHub là sáu tiếng. Một lần mạng treo hay một test kẹt thì
+# không ai muốn chờ chừng đó mới biết.
 jobs:
   luat:
     name: luật
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: lấy mã
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -84,6 +87,7 @@ jobs:
   nen-tang:
     name: nền tảng khác
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - name: lấy mã
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -105,6 +109,7 @@ jobs:
   msrv:
     name: rust tối thiểu
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: lấy mã
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -133,3 +138,33 @@ jobs:
         env:
           V: ${{ steps.doc.outputs.v }}
         run: cargo "+$V" check --locked --all-targets
+
+  bench:
+    name: mười repo thật
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: lấy mã
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: dựng archctl
+        run: cargo build --release --locked
+
+      # Tải mười repo ở đúng commit ghim trong `bench/repos.tsv`, rồi chạy hai
+      # phép thử. Luật do `init --from-code` sinh ra, nâng lên `#accepted`,
+      # kiểm lại chính mã đó thì phải ra 0 vi phạm — mỗi vi phạm là một chỗ bộ
+      # khám phá và bộ kiểm chứng nhìn khác nhau. Và mọi lệnh phải chạy được
+      # trên mã người khác viết, không chỉ trên fixture viết riêng để test.
+      #
+      # Mã thoát 2 là không tải được repo: mạng, không phải archctl. Thời gian
+      # được in nhưng không chặn, nên một lần đo là đủ.
+      - name: tự nhất quán và luồng lệnh
+        run: python3 bench/bench.py --archctl target/release/archctl --rounds 1
+
+      # Bộ đo bắt được lỗi chỉ khi từng phép kiểm của nó đổ được. Bước này phá
+      # archctl sáu kiểu và đòi bộ đo bắt đúng từng kiểu — nếu một lần sửa sau
+      # này vô tình làm một phép kiểm luôn đạt, nó đỏ ở đây.
+      - name: bộ đo đổ được
+        run: python3 bench/sabotage.py --archctl target/release/archctl

@@ -11,9 +11,15 @@ Cập nhật 2026-10-03.
 
 - **337 test, clippy sạch với `-D warnings`, 0 dependency ngoài std.** Biên
   nhận ghi bằng `receipt.py` ngày 2026-10-03.
-- **Thử trên 10 repo thật** (hugo, tokio, ripgrep, vue core, flask, curl,
-  redis, pydantic-core, zstd-rs, rusqlite) — 5078 file, 5 ngôn ngữ. Mỗi repo
-  33 kiểm tra phủ hết các lệnh: 10/10 qua.
+- **Mười repo thật, chạy lại được bằng một lệnh**: `python3 bench/bench.py`
+  (hugo, tokio, ripgrep, vue core, flask, curl, redis, pydantic-core, zstd-rs,
+  rusqlite — ghim theo commit trong `bench/repos.tsv`). Lần chạy 2026-10-03:
+  4798 file (khớp đếm độc lập ở từng repo), **0 bất nhất**, **0 cảnh báo trong
+  luật sinh ra**, luồng lệnh **350/350** (35 mỗi repo), 36 giây khi repo đã tải.
+  Bộ đo đổ được, và điều đó cũng được kiểm bằng một lệnh:
+  `python3 bench/sabotage.py` phá archctl sáu kiểu, mỗi kiểu bị đúng phép kiểm
+  của nó bắt. Mất mạng, tên repo gõ sai, `repos.tsv` có tên `../..` hay SHA mở
+  đầu bằng `-` đều ra mã thoát 2.
 - **Bất biến tự nhất quán**: luật do `init --from-code` sinh ra, nâng lên
   `#accepted` rồi kiểm lại chính mã đó → 0 vi phạm trên cả 10 repo. Mỗi vi
   phạm còn lại sẽ là một chỗ bộ khám phá và bộ kiểm chứng nhìn khác nhau.
@@ -24,28 +30,25 @@ Cập nhật 2026-10-03.
 - **Tự áp luật lên chính nó.** `.arch/system.arch` ở repo này viết tay từ
   thiết kế; `check` ở gốc ra 0 vi phạm, 0 cảnh báo. Test `dogfood.rs` chạy
   `arch_core::check` trên repo nên vi phạm kiến trúc làm `cargo test` đổ.
-- **CI chạy ở `.github/workflows/ci.yml`**, ba job: `luật` (dựng → `diff` vào
-  log → `verify` → `check --strict`), `nền tảng khác` (macOS, gọi thẳng
+- **CI chạy ở `.github/workflows/ci.yml`**, bốn job: `luật` (dựng → `diff`
+  vào log → `verify` → `check --strict`), `nền tảng khác` (macOS, gọi thẳng
   `cargo test`), `rust tối thiểu` (đọc `rust-version` từ `Cargo.toml` rồi biên
-  dịch lại bằng đúng toolchain đó). Không action bên thứ ba; `actions/checkout`
-  ghim theo SHA. Đã chạy thử cả ba job trên bản sao sạch (không biên nhận,
-  `CARGO_HOME` rỗng, cargo offline): mọi bước đạt. Lý do từng dòng ở
+  dịch lại bằng đúng toolchain đó), `mười repo thật` (bộ đo ở trên, mỗi pull
+  request). Không action bên thứ ba; `actions/checkout` ghim theo SHA. Đã chạy
+  thử cả bốn trên máy này: mọi bước đạt. Lý do từng dòng ở
   [docs/ci.md](docs/ci.md).
 - Hiệu năng: 2000 file TypeScript 57ms; đường hook (`check <file>`) 11ms;
   cây 5078 file: `init` 1.57s, `check` 1.08s, 35 MB.
 
-Bộ đo nằm ở `scratchpad/bench2/` (`run.py` đo chất lượng + hiệu năng,
-`flows.py` chạy hết các lệnh). Repo thử clone ở `scratchpad/real/`. Cả hai
-ngoài git; clone lại bằng `git clone --depth 1`.
+Bộ đo ở [bench/](bench/README.md). Repo tải về `target/bench/repos/`, ngoài
+git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-**Bộ đo nằm ngoài git, nên con số 10 repo ở trên không ai kiểm lại được** — kể
-cả tôi: `scratchpad/` đã bị dọn, và muốn chạy lại thì phải clone lại mười repo.
-Đưa `run.py` và `flows.py` vào repo là cách duy nhất làm lời khẳng định đó
-kiểm chứng được. Lần chạy mười repo gần nhất là trước thay đổi hôm nay; nó đo
-số **vi phạm** (0), mà thay đổi hôm nay chỉ đụng tới cách đếm **cảnh báo**, nên
-kết luận không đổi — nhưng đó là suy luận, không phải một lần chạy.
+1. **Đẩy lên GitHub để CI chạy thật lần đầu.** Repo chưa có remote, nên bốn
+   job mới chỉ chạy trên máy này; phần riêng của GitHub (checkout,
+   `github.event_name`, `steps.*.outputs`) mới đúng về cú pháp YAML. Cần người
+   quyết: tên repo, public hay private, và CODEOWNERS cho `.arch/**`.
 
 Ngoài ra không có việc nào đang dở. Hai việc từng nằm trong danh sách đã cân
 nhắc rồi **loại**, ghi lại để khỏi nghĩ lại:

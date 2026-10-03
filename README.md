@@ -128,6 +128,7 @@ file luật khai báo. Repo này tự chạy CI của mình:
 | Test | 337 |
 | Binary | 1057 KB |
 | Khởi động | 3ms |
+| Mười repo thật, ghim theo commit | 4798 file · 0 bất nhất · 350/350 luồng lệnh |
 
 Không gói ngoài nào cả — kể cả bộ quét import, bộ đọc JSON, máy chủ HTTP và
 engine layout. Công cụ này chạy trong repo của người dùng và trong vòng lặp của
@@ -146,6 +147,7 @@ agent, nên mỗi dependency thêm vào là một bề mặt tấn công thêm.
 | [docs/serve.md](docs/serve.md) | Sơ đồ tương tác |
 | [docs/diff.md](docs/diff.md) | Tách thay đổi thật khỏi thay đổi hình thức |
 | [docs/ci.md](docs/ci.md) | Chạy ở nơi agent không với tới |
+| [bench/README.md](bench/README.md) | Mười repo thật, ghim theo commit, một lệnh chạy lại |
 | [docs/toolchain.md](docs/toolchain.md) | Cài và gỡ Rust |
 | [docs/khao-sat.md](docs/khao-sat.md) | Có thứ gì dùng được cho các giới hạn còn lại không |
 

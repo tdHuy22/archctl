@@ -1,0 +1,14 @@
+# Mười repo thật, ghim theo commit. Không ghim thì con số trôi theo upstream,
+# và một lần đo lại cho kết quả khác không biết là do archctl hay do repo.
+#
+# tên	url	commit	vì sao có mặt
+core	https://github.com/vuejs/core.git	4ab865a848a1da3d10fb674f857e5fff13094644	TypeScript monorepo, alias trong tsconfig
+curl	https://github.com/curl/curl.git	6b506de183dafdb1e57072297d9730cfc8b81513	C, include path đọc từ CMakeLists
+flask	https://github.com/pallets/flask.git	d73fa1cdcbd8b1465c151db8924ba58b1dd14e35	Python, layout src/
+hugo	https://github.com/gohugoio/hugo.git	6b3ba3a7e22ae2809605b8118aeed08b244f1955	Go, 943 file, đồ thị dày
+pydantic-core	https://github.com/pydantic/pydantic-core.git	383eb95a19433754c0cecf7025b50c26b6d97a36	Rust lẫn Python
+redis	https://github.com/redis/redis.git	b540ca49cba815f3fbe634363c3df68d4f4f127a	C, dependency vendor trong deps/
+ripgrep	https://github.com/BurntSushi/ripgrep.git	3fce3b5bb0236da2df6d99672afb8a719642eca7	Rust workspace nhiều crate
+rusqlite	https://github.com/rusqlite/rusqlite.git	91f876c80114122670f455190d03c81d1f78b0af	Rust, mã gọn trong một crate
+tokio	https://github.com/tokio-rs/tokio.git	2746c3ae26f8ac0af6023843a7f23d419c334efe	Rust, macro và cfg dày đặc
+zstd-rs	https://github.com/gyscos/zstd-rs.git	be539f10dfce7818092ca72010683aaaa5c84e3f	Rust bọc thư viện C vendor: 45 file Rust, 279 file C

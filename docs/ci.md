@@ -5,7 +5,8 @@ CI quan trọng vì nó chạy ở nơi agent không với tới. Mọi ranh gi�
 rồi, nhưng cấm bằng cấu hình thì chỉ chắc bằng chính cấu hình đó, và cấu hình
 nằm trong repo.
 
-Repo này tự chạy CI của mình: [.github/workflows/ci.yml](../.github/workflows/ci.yml).
+Repo này tự chạy CI của mình, bốn job:
+[.github/workflows/ci.yml](../.github/workflows/ci.yml).
 
 ## Hai lệnh, đúng thứ tự
 
@@ -85,6 +86,25 @@ Job `rust tối thiểu` đọc `rust-version` trong `Cargo.toml` rồi biên d�
 bằng đúng toolchain đó, thay vì ghi lại con số trong YAML. Hai bản sao của
 cùng một con số thì sớm muộn lệch nhau — và con số này từng ghi `1.85` trong
 khi mã dùng let-chain của 1.88, suốt nhiều tháng, vì không có gì kiểm nó.
+
+## Mười repo thật, ở mỗi pull request
+
+Job `mười repo thật` chạy [bench/bench.py](../bench/bench.py): tải mười repo ở
+đúng commit ghim trong `bench/repos.tsv`, rồi đòi hai điều. Luật do `init
+--from-code` sinh ra, nâng lên `#accepted`, kiểm lại chính mã đó thì phải ra 0
+vi phạm. Và mọi lệnh phải chạy được trên mã người khác viết, chứ không chỉ trên
+fixture viết riêng để test.
+
+Đó là phép thử mạnh nhất mà repo có, nên nó chạy ở mỗi pull request chứ không
+chỉ theo lịch: chạy hằng tuần thì một lỗi đã vào `main` rồi mới bị bắt. Tốn
+khoảng một phút, phần lớn là tải repo.
+
+Nó thoát 2 — không phải 1 — khi không tải được repo, để một lần mạng chập chờn
+không trông giống một lỗi của archctl.
+
+Ngay sau đó, `bench/sabotage.py` phá archctl sáu kiểu và đòi bộ đo bắt đúng
+từng kiểu. Bộ đo chỉ có giá trị khi mỗi phép kiểm của nó đổ được; bước này
+giữ điều đó đúng qua những lần sửa sau.
 
 ## Còn một chốt nữa không nằm trong YAML
 
