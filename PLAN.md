@@ -9,8 +9,19 @@ Cập nhật 2026-10-03.
 
 ### Đã xong, có bằng chứng
 
-- **337 test, clippy sạch với `-D warnings`, 0 dependency ngoài std.** Biên
+- **343 test, clippy sạch với `-D warnings`, 0 dependency ngoài std.** Biên
   nhận ghi bằng `receipt.py` ngày 2026-10-03.
+- **Repo ở GitHub: [tdHuy22/archctl](https://github.com/tdHuy22/archctl),
+  private.** Lần chạy CI đầu tiên trên runner thật (run 37108650598): 4/4 job
+  đạt, 70 giây, và số liệu bộ đo trên Linux khớp macOS — trừ một cột, xem dòng
+  dưới.
+- **Kết quả giờ giống nhau trên mọi máy.** CI Linux cho `rusqlite` 11 luật
+  `allow`, macOS cho 12: ổ mặc định của macOS không phân biệt hoa thường, nên
+  `use crate::Error` được "tìm thấy" là `src/Error.rs`. Lỗi có ở cả năm ngôn
+  ngữ (`./Util`, `Config.h`, `pkg.Helpers`, package Go `Internal`). Giờ mọi
+  lần dò đường dẫn đối chiếu tên thật trong thư mục; macOS ra đúng bảng của CI
+  Linux ở mọi cột không phải thời gian, cả mười repo. Giá: 1–6% thời gian
+  `check` cả repo, đường hook không đổi (11,1ms).
 - **Mười repo thật, chạy lại được bằng một lệnh**: `python3 bench/bench.py`
   (hugo, tokio, ripgrep, vue core, flask, curl, redis, pydantic-core, zstd-rs,
   rusqlite — ghim theo commit trong `bench/repos.tsv`). Lần chạy 2026-10-03:
@@ -34,9 +45,8 @@ Cập nhật 2026-10-03.
   vào log → `verify` → `check --strict`), `nền tảng khác` (macOS, gọi thẳng
   `cargo test`), `rust tối thiểu` (đọc `rust-version` từ `Cargo.toml` rồi biên
   dịch lại bằng đúng toolchain đó), `mười repo thật` (bộ đo ở trên, mỗi pull
-  request). Không action bên thứ ba; `actions/checkout` ghim theo SHA. Đã chạy
-  thử cả bốn trên máy này: mọi bước đạt. Lý do từng dòng ở
-  [docs/ci.md](docs/ci.md).
+  request). Không action bên thứ ba; `actions/checkout` ghim theo SHA. Lý do
+  từng dòng ở [docs/ci.md](docs/ci.md).
 - Hiệu năng: 2000 file TypeScript 57ms; đường hook (`check <file>`) 11ms;
   cây 5078 file: `init` 1.57s, `check` 1.08s, 35 MB.
 
@@ -45,10 +55,16 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-1. **Đẩy lên GitHub để CI chạy thật lần đầu.** Repo chưa có remote, nên bốn
-   job mới chỉ chạy trên máy này; phần riêng của GitHub (checkout,
-   `github.event_name`, `steps.*.outputs`) mới đúng về cú pháp YAML. Cần người
-   quyết: tên repo, public hay private, và CODEOWNERS cho `.arch/**`.
+1. **Rust: item ở gốc crate không sinh cạnh.** `use crate::{Connection,
+   Result}` không ra cạnh nào và không được báo, nên một `deny` sẽ bỏ sót nó
+   trong im lặng — đã kiểm trên `rusqlite`. Sửa đúng cần biết gốc crate của
+   từng file, và sẽ đổi luật của chính archctl cùng số liệu các repo Rust. Chi
+   tiết ở [docs/check.md](docs/check.md), mục "Giới hạn khác đã biết".
+2. **CI chỉ báo, không chặn.** Repo private trên GitHub Free không có branch
+   protection hay ruleset (API trả 403 "Upgrade to GitHub Pro or make this
+   repository public"), nên job đỏ không ngăn được commit vào `main`. Cần người
+   quyết: để public, lên Pro, hoặc chấp nhận CI là lời nhắc. Xem
+   [docs/ci.md](docs/ci.md).
 
 Ngoài ra không có việc nào đang dở. Hai việc từng nằm trong danh sách đã cân
 nhắc rồi **loại**, ghi lại để khỏi nghĩ lại:

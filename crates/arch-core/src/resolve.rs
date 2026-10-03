@@ -7,7 +7,9 @@
 
 use crate::jsonc;
 use crate::scan::{Import, Lang};
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
+use std::collections::{HashMap, HashSet};
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +59,49 @@ pub struct Resolver {
     /// Thư mục include mà build của C/C++ khai báo. Đọc muộn: repo không có
     /// file C nào thì không phải quét tìm `Makefile` làm gì.
     c_includes: OnceCell<Vec<String>>,
+    /// Tên thật trong những thư mục đã dò, để kiểm hoa thường. Xem [`exact_case`].
+    listing: RefCell<Listing>,
+}
+
+/// Tên thật của các mục trong từng thư mục đã đọc. `None`: không đọc được.
+pub(crate) type Listing = HashMap<PathBuf, Option<HashSet<OsString>>>;
+
+/// `rel` có tồn tại với **đúng** cách viết hoa thường đó không.
+///
+/// `Path::is_file()` hỏi hệ thống file, và ổ mặc định của macOS (cả Windows)
+/// không phân biệt hoa thường: `src/Error.rs` "có" khi trên đĩa chỉ có
+/// `src/error.rs`. Linux thì không. Cùng một commit `rusqlite`, `init
+/// --from-code` từng sinh 12 luật `allow` trên macOS và 11 trên CI Linux, vì
+/// `use crate::{Error, Result}` được "tìm thấy" là file `src/Error.rs`. Luật
+/// sinh ở máy này đem sang máy kia thành một luật không bao giờ áp được, hoặc
+/// một vi phạm mà máy kia không thấy.
+///
+/// Mọi ngôn ngữ đã hỗ trợ đều phân biệt hoa thường khi import — Python kể cả
+/// trên macOS — nên cách viết có thật trên đĩa là cách viết duy nhất được nhận.
+/// Chỉ gọi sau khi `is_file`/`is_dir` đã trả "có": phần lớn lần dò trượt ngay
+/// ở đó, không phải đọc thư mục nào.
+pub(crate) fn exact_case(root: &Path, rel: &str, listing: &mut Listing) -> bool {
+    let mut dir = root.to_path_buf();
+    for part in rel.split('/') {
+        match part {
+            "" | "." => continue,
+            ".." => {
+                dir.pop();
+                continue;
+            }
+            _ => {}
+        }
+        let names = listing.entry(dir.clone()).or_insert_with(|| {
+            std::fs::read_dir(&dir)
+                .ok()
+                .map(|entries| entries.flatten().map(|e| e.file_name()).collect())
+        });
+        if !names.as_ref().is_some_and(|n| n.contains(OsStr::new(part))) {
+            return false;
+        }
+        dir.push(part);
+    }
+    true
 }
 
 /// Phần `paths` của một `tsconfig.json`, đã mở sẵn `extends`.
@@ -78,6 +123,7 @@ impl Resolver {
             ts_configs: find_ts_configs(root),
             npm_packages: OnceCell::new(),
             c_includes: OnceCell::new(),
+            listing: RefCell::new(HashMap::new()),
         }
     }
 
@@ -93,7 +139,15 @@ impl Resolver {
     }
 
     fn exists(&self, rel: &str) -> bool {
-        self.root.join(rel).is_file()
+        self.root.join(rel).is_file() && self.exact(rel)
+    }
+
+    fn dir_exists(&self, rel: &str) -> bool {
+        self.root.join(rel).is_dir() && self.exact(rel)
+    }
+
+    fn exact(&self, rel: &str) -> bool {
+        exact_case(&self.root, rel, &mut self.listing.borrow_mut())
     }
 
     fn first_file(&self, candidates: impl IntoIterator<Item = String>) -> Option<String> {
@@ -198,7 +252,7 @@ impl Resolver {
         if let Some(found) = roots
             .iter()
             .map(|r| format!("{r}{path}"))
-            .find(|candidate| self.root.join(candidate).is_dir())
+            .find(|candidate| self.dir_exists(candidate))
         {
             return Resolved::Path(found);
         }
@@ -229,7 +283,7 @@ impl Resolver {
         }
         // Gói kiểu không gian tên, hoặc `from . import x` trỏ thẳng vào thư
         // mục của chính file này. Cả hai đều là thư mục chứ không phải file.
-        if self.root.join(&prefix).is_dir() {
+        if self.dir_exists(&prefix) {
             return Resolved::Path(prefix);
         }
         Resolved::Missing
@@ -372,7 +426,7 @@ impl Resolver {
         }
         match spec.strip_prefix(&format!("{module}/")) {
             // Import của Go trỏ tới cả package, nên đích là một thư mục.
-            Some(rest) if self.root.join(rest).is_dir() => Resolved::Path(rest.to_string()),
+            Some(rest) if self.dir_exists(rest) => Resolved::Path(rest.to_string()),
             Some(_) => Resolved::Missing,
             None => Resolved::Package(spec.to_string()),
         }

@@ -14,6 +14,7 @@
 
 use crate::jsonc;
 use crate::resolve::{dir_of, join, normalize};
+use crate::resolve::Listing;
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
@@ -53,6 +54,9 @@ pub fn include_dirs(root: &Path) -> Vec<String> {
 
     let mut out: Vec<String> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
+    // `compile_commands.json` lặp cùng một `-I` ở hàng nghìn dòng, nên tên
+    // thật của mỗi thư mục chỉ đọc một lần.
+    let mut listing = crate::resolve::Listing::new();
     for (kind, path) in &configs {
         let base = dir_of(path);
         let Ok(raw) = std::fs::read_to_string(root.join(path)) else { continue };
@@ -63,7 +67,7 @@ pub fn include_dirs(root: &Path) -> Vec<String> {
             Kind::Make => from_make(src, base),
         };
         for (at, raw) in raws {
-            let Some(dir) = to_repo_dir(root, &at, &raw) else { continue };
+            let Some(dir) = to_repo_dir(root, &at, &raw, &mut listing) else { continue };
             if seen.insert(dir.clone()) {
                 out.push(dir);
                 if out.len() >= MAX_DIRS {
@@ -397,8 +401,9 @@ fn expand_once(text: &str, vars: &HashMap<String, String>) -> String {
 // ---- đưa về đường dẫn trong repo ----
 
 /// `at` là thư mục mà `raw` tính từ đó, tương đối so với gốc dự án hoặc tuyệt
-/// đối. Kết quả chỉ được trả về khi nó thật sự là một thư mục trong repo.
-fn to_repo_dir(root: &Path, at: &str, raw: &str) -> Option<String> {
+/// đối. Kết quả chỉ được trả về khi nó thật sự là một thư mục trong repo, viết
+/// đúng hoa thường — xem [`crate::resolve::exact_case`].
+fn to_repo_dir(root: &Path, at: &str, raw: &str, listing: &mut Listing) -> Option<String> {
     let raw = raw.replace('\\', "/");
     let at = at.replace('\\', "/");
     let combined = if raw.starts_with('/') {
@@ -407,11 +412,15 @@ fn to_repo_dir(root: &Path, at: &str, raw: &str) -> Option<String> {
         format!("{}/{raw}", at.trim_end_matches('/'))
     } else {
         let rel = join(&at, &raw)?;
-        return root.join(&rel).is_dir().then_some(rel);
+        return is_repo_dir(root, &rel, listing).then_some(rel);
     };
 
-    let rel = relativize(root, &combined)?;
-    root.join(&rel).is_dir().then_some(rel)
+    let rel = relativize(root, &combined, listing)?;
+    is_repo_dir(root, &rel, listing).then_some(rel)
+}
+
+fn is_repo_dir(root: &Path, rel: &str, listing: &mut Listing) -> bool {
+    root.join(rel).is_dir() && crate::resolve::exact_case(root, rel, listing)
 }
 
 /// Đường dẫn tuyệt đối → tương đối so với gốc dự án.
@@ -420,7 +429,7 @@ fn to_repo_dir(root: &Path, at: &str, raw: &str) -> Option<String> {
 /// nên tiền tố tuyệt đối trong đó có thể không khớp gốc hiện tại. Khi không
 /// khớp, lấy hậu tố dài nhất mà thật sự là thư mục trong repo — và đòi ít nhất
 /// hai đoạn, vì một đoạn như `include` thì `/usr/include` cũng khớp.
-fn relativize(root: &Path, abs: &str) -> Option<String> {
+fn relativize(root: &Path, abs: &str, listing: &mut Listing) -> Option<String> {
     let clean = normalize(abs)?;
     for prefix in [Some(root.to_path_buf()), root.canonicalize().ok()] {
         let Some(prefix) = prefix else { continue };
@@ -436,7 +445,7 @@ fn relativize(root: &Path, abs: &str) -> Option<String> {
     let segments: Vec<&str> = clean.split('/').filter(|s| !s.is_empty()).collect();
     (0..segments.len().saturating_sub(1))
         .map(|start| segments[start..].join("/"))
-        .find(|candidate| root.join(candidate).is_dir())
+        .find(|candidate| is_repo_dir(root, candidate, listing))
 }
 
 #[cfg(test)]

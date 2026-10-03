@@ -143,6 +143,26 @@ tệ hơn hẳn việc nói thẳng là chưa biết.
 | `from .x import y` không có cả thư mục | **báo ra** |
 | `import numpy` không có trong dự án | coi là gói — với import tuyệt đối của Python, không phân biệt được |
 
+## Hoa thường phải khớp, trên mọi máy
+
+`import './Util'` khi trên đĩa chỉ có `util.ts` thì **không** phân giải được —
+cả trên macOS, nơi ổ mặc định không phân biệt hoa thường và `is_file()` sẽ trả
+lời "có". Mọi ngôn ngữ đã hỗ trợ đều phân biệt hoa thường khi import (Python
+kể cả trên macOS), nên cách viết có thật trên đĩa là cách viết duy nhất được
+nhận: sau khi hệ thống file nói "có", archctl đối chiếu từng đoạn đường dẫn với
+tên thật trong thư mục.
+
+Trước đây kết quả phụ thuộc máy. Cùng một commit `rusqlite`, `init
+--from-code` sinh 12 luật `allow` trên macOS và 11 trên CI Linux: `use
+crate::{Error, Result}` được "tìm thấy" là file `src/Error.rs`, trong khi file
+thật là `src/error.rs` và đoạn mã kia trỏ tới một kiểu chứ không phải một
+module. Luật sinh ở máy này đem sang máy kia thành một `allow` không bao giờ áp
+được — `--strict` chặn — hoặc một vi phạm mà máy kia không thấy.
+
+Giá: 1–6% thời gian trên cả repo (đo xen kẽ, trung vị 21 lần), không đáng kể
+ở đường hook. Lần dò trượt — phần lớn — vẫn dừng ngay ở `is_file()`; chỉ lần
+dò trúng mới phải đọc thư mục, và mỗi thư mục chỉ đọc một lần.
+
 ## Include path của C/C++
 
 `#include "aes.h"` không nói header nằm đâu — đường dẫn thật nằm trong cờ `-I`
@@ -248,6 +268,15 @@ rồi được `archctl accept` ghi vào file luật.
 - **Bộ quét không phải parser đầy đủ.** Nhận regex bằng suy đoán theo token
   đứng trước, như các bộ minify. Nếu độ chính xác không đủ, thay `scan/` bằng
   tree-sitter — ranh giới module đã được đặt sẵn cho việc đó.
+- **Rust: item ở gốc crate không sinh cạnh, và không được báo.** `use
+  crate::{Connection, Result}` trỏ vào `lib.rs`, nhưng bộ phân giải chỉ thử
+  `src.rs` và `src/mod.rs` cho gốc crate, rồi coi là `mod` viết lồng trong file.
+  Ở `rusqlite`, `src/blob/` dùng `Connection` của Core mà không có cạnh `Blob ->
+  Core` nào — một `deny Blob -> Core` sẽ không bắt được nó. Sửa đúng phải biết
+  gốc crate của từng file (`src/lib.rs`, `src/main.rs`, mỗi file trong
+  `src/bin/`, `tests/`, `examples/` là một crate riêng), và sẽ sinh thêm cạnh
+  tới component chứa `lib.rs` ở hầu hết repo Rust — kể cả luật của chính
+  archctl. Chưa làm.
 
 ## Phạm vi quét
 

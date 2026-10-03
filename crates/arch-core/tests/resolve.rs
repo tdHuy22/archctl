@@ -182,3 +182,118 @@ allow Web -> O
     assert_eq!(edges, ["Web -> Core (5)", "Web -> Core (6)"], "{edges:?}");
     assert!(unresolved.is_empty(), "{unresolved:?}");
 }
+
+/// Hoa thường phải khớp đúng, trên mọi hệ thống file.
+///
+/// Ổ mặc định của macOS không phân biệt hoa thường, nên `Path::is_file()` trả
+/// "có" cho `src/Error.rs` khi trên đĩa chỉ có `src/error.rs`. Linux thì
+/// không. Cùng một commit `rusqlite`, `init --from-code` từng sinh 12 luật
+/// `allow` trên macOS và 11 trên CI Linux, vì `use crate::{Error, Result}`
+/// được "tìm thấy" là file `src/Error.rs`. Luật sinh ở máy này đem sang máy
+/// kia thành một luật không bao giờ áp được, hoặc một vi phạm máy kia không
+/// thấy. Mọi ngôn ngữ đã hỗ trợ đều phân biệt hoa thường khi import.
+///
+/// Trên ổ phân biệt hoa thường (Linux) các test này đạt cả khi chưa sửa; chúng
+/// cắn trên macOS, nơi job `nền tảng khác` của CI chạy `cargo test`.
+mod hoa_thuong {
+    use arch_core::resolve::{Resolved, Resolver};
+    use arch_core::scan::{Import, Lang};
+
+    use super::Repo;
+
+    fn resolve(repo: &Repo, lang: Lang, importer: &str, spec: &str) -> Resolved {
+        let import = Import { spec: spec.to_string(), line: 1, system: false };
+        Resolver::new(&repo.0).resolve(lang, importer, &import)
+    }
+
+    /// Ghi chú cho người đọc log: trên ổ phân biệt hoa thường, phần âm của
+    /// test không chứng minh được gì về bản sửa.
+    fn ghi_chu_he_thong_file(repo: &Repo) {
+        repo.write("probe.txt", "");
+        if !repo.0.join("PROBE.txt").is_file() {
+            eprintln!("ổ này phân biệt hoa thường: test hoa_thuong chỉ chứng minh trên macOS");
+        }
+    }
+
+    #[test]
+    fn rust_ten_item_khong_phai_file_module_viet_khac_hoa() {
+        let repo = Repo::new("case-rust");
+        repo.write("Cargo.toml", "[package]\nname = \"x\"\n")
+            .write("src/lib.rs", "mod error;\nmod blob;\npub use error::Error;\n")
+            .write("src/error.rs", "pub struct Error;\n")
+            .write("src/blob/mod.rs", "use crate::Error;\n");
+        ghi_chu_he_thong_file(&repo);
+        let got = resolve(&repo, Lang::Rust, "src/blob/mod.rs", "crate::Error");
+        assert_ne!(got, Resolved::Path("src/Error.rs".into()));
+        // Đúng hoa thường thì vẫn ra file như cũ.
+        let got = resolve(&repo, Lang::Rust, "src/blob/mod.rs", "crate::error::Error");
+        assert_eq!(got, Resolved::Path("src/error.rs".into()));
+    }
+
+    #[test]
+    fn typescript_import_tuong_doi_sai_hoa() {
+        let repo = Repo::new("case-ts");
+        repo.write("src/util.ts", "export const x = 1\n")
+            .write("src/app.ts", "import { x } from './Util'\n");
+        ghi_chu_he_thong_file(&repo);
+        assert_eq!(resolve(&repo, Lang::TypeScript, "src/app.ts", "./Util"), Resolved::Missing);
+        assert_eq!(
+            resolve(&repo, Lang::TypeScript, "src/app.ts", "./util"),
+            Resolved::Path("src/util.ts".into())
+        );
+    }
+
+    #[test]
+    fn python_module_sai_hoa() {
+        let repo = Repo::new("case-py");
+        repo.write("pkg/__init__.py", "")
+            .write("pkg/helpers.py", "x = 1\n")
+            .write("pkg/app.py", "from pkg import Helpers\n");
+        ghi_chu_he_thong_file(&repo);
+        let got = resolve(&repo, Lang::Python, "pkg/app.py", "pkg.Helpers");
+        assert_ne!(got, Resolved::Path("pkg/Helpers.py".into()));
+        assert_eq!(
+            resolve(&repo, Lang::Python, "pkg/app.py", "pkg.helpers"),
+            Resolved::Path("pkg/helpers.py".into())
+        );
+    }
+
+    #[test]
+    fn python_thu_muc_khong_gian_ten_sai_hoa() {
+        let repo = Repo::new("case-py-ns");
+        repo.write("ns/mod.py", "x = 1\n").write("app.py", "import NS\n");
+        ghi_chu_he_thong_file(&repo);
+        assert_ne!(resolve(&repo, Lang::Python, "app.py", "NS"), Resolved::Path("NS".into()));
+        assert_eq!(resolve(&repo, Lang::Python, "app.py", "ns"), Resolved::Path("ns".into()));
+    }
+
+    #[test]
+    fn c_include_sai_hoa() {
+        let repo = Repo::new("case-c");
+        repo.write("src/config.h", "#define X 1\n")
+            .write("src/main.c", "#include \"Config.h\"\nint main(void) { return 0; }\n");
+        ghi_chu_he_thong_file(&repo);
+        assert_ne!(
+            resolve(&repo, Lang::C, "src/main.c", "Config.h"),
+            Resolved::Path("src/Config.h".into())
+        );
+        assert_eq!(
+            resolve(&repo, Lang::C, "src/main.c", "config.h"),
+            Resolved::Path("src/config.h".into())
+        );
+    }
+
+    #[test]
+    fn go_package_sai_hoa() {
+        let repo = Repo::new("case-go");
+        repo.write("go.mod", "module example.com/m\n\ngo 1.22\n")
+            .write("internal/x.go", "package internal\n")
+            .write("main.go", "package main\n\nimport _ \"example.com/m/Internal\"\n");
+        ghi_chu_he_thong_file(&repo);
+        assert_eq!(resolve(&repo, Lang::Go, "main.go", "example.com/m/Internal"), Resolved::Missing);
+        assert_eq!(
+            resolve(&repo, Lang::Go, "main.go", "example.com/m/internal"),
+            Resolved::Path("internal".into())
+        );
+    }
+}
