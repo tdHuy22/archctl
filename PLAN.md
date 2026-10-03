@@ -9,6 +9,12 @@ Cập nhật 2026-10-03.
 
 ### Đã xong, có bằng chứng
 
+- **Đã push lên `main`, CI xanh trên Linux.** Run 37134780674: 4/4 job, bộ
+  đo 18 repo ra đúng số của macOS (17918 file, 0 bất nhất, 630/630,
+  sabotage 7/7), job `repo thật` 2 phút 6 giây. Runner Linux ghim
+  `ubuntu-24.04` (`ubuntu-latest` chuyển sang 26 từ 19/10/2026); run
+  37135164321 đạt 4/4.
+
 - **Bộ đo lên mười tám repo, phủ đủ năm ngôn ngữ, mỗi ngôn ngữ ít nhất hai
   repo** (C++ một: leveldb). Thêm etcd, excalidraw, langchain, leveldb, netbox,
   nginx, scikit-learn, vllm; zstd-rs giờ kéo submodule C (cột submodule mới
