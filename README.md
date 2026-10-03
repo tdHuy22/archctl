@@ -111,16 +111,22 @@ hàng dưới gần như chỉ còn phần đó.
 Và trong CI, nơi agent không với tới:
 
 ```yaml
+- run: archctl verify
 - run: archctl check --strict
 ```
+
+Thứ tự đó quan trọng, và CI không chép lại các lệnh kiểm — nó chạy những gì
+file luật khai báo. Repo này tự chạy CI của mình:
+[.github/workflows/ci.yml](.github/workflows/ci.yml), lý do từng dòng ở
+[docs/ci.md](docs/ci.md).
 
 ## Tính chất
 
 | | |
 | --- | --- |
 | Dependency ngoài std | **0** |
-| Test | 332 |
-| Binary | 1058 KB |
+| Test | 337 |
+| Binary | 1057 KB |
 | Khởi động | 3ms |
 
 Không gói ngoài nào cả — kể cả bộ quét import, bộ đọc JSON, máy chủ HTTP và
@@ -139,6 +145,7 @@ agent, nên mỗi dependency thêm vào là một bề mặt tấn công thêm.
 | [docs/adopt.md](docs/adopt.md) | `init --from-code` và `baseline` |
 | [docs/serve.md](docs/serve.md) | Sơ đồ tương tác |
 | [docs/diff.md](docs/diff.md) | Tách thay đổi thật khỏi thay đổi hình thức |
+| [docs/ci.md](docs/ci.md) | Chạy ở nơi agent không với tới |
 | [docs/toolchain.md](docs/toolchain.md) | Cài và gỡ Rust |
 | [docs/khao-sat.md](docs/khao-sat.md) | Có thứ gì dùng được cho các giới hạn còn lại không |
 

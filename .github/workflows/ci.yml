@@ -1,0 +1,135 @@
+# CI không chép lại các lệnh kiểm — nó chạy những gì `.arch/system.arch` khai
+# báo. Thêm một dòng `verify <tên> runs "<lệnh>"` vào file luật là CI chạy
+# thêm cái đó, không phải sửa file này. Ngược lại cũng đúng: file này không
+# biết `cargo test` hay `cargo clippy` nằm ở đâu, nên không có bản sao nào để
+# lệch khỏi file luật.
+#
+# Không dùng action của bên thứ ba. `arch-core` không có dependency nào ngoài
+# std vì công cụ chạy trong repo người dùng; một action lạ ở đây cũng là mã
+# người khác chạy trên repo này, với cùng lý do để từ chối. `actions/checkout`
+# là của GitHub và được ghim theo SHA chứ không theo nhãn: nhãn `v7` có thể bị
+# dời sang commit khác, SHA thì không.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Tuỳ cấu hình repo, mặc định của GitHub có thể là ghi được. Không việc nào ở
+# đây cần ghi gì, nên nói rõ ra.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Repo không có dependency nào, nên cargo không cần mạng sau khi checkout.
+  # Cắt mạng ở đây làm `verify no_deps` có thêm một lớp nữa: thêm một crate
+  # vào Cargo.toml thì build đổ ngay, chứ không chỉ đếm dòng trong Cargo.lock.
+  # Đã kiểm với `CARGO_HOME` rỗng: build release và clippy đều chạy offline.
+  CARGO_NET_OFFLINE: "true"
+
+jobs:
+  luat:
+    name: luật
+    runs-on: ubuntu-latest
+    steps:
+      - name: lấy mã
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # `archctl diff` đọc file luật ở nhánh gốc bằng `git show`, nên cần
+          # lịch sử chứ không phải một commit lẻ.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: clippy
+        # Image của GitHub có sẵn, nhưng `verify lint` sẽ đổ một cách khó hiểu
+        # nếu một ngày nào đó không còn.
+        run: rustup component add clippy
+
+      - name: dựng archctl
+        run: cargo build --release --locked
+
+      # Chỉ để đọc, không chặn. Việc của nó là đưa thay đổi của file luật vào
+      # log, nơi người review nhìn thấy — kể cả `verify ... runs "<lệnh>"`,
+      # vì lệnh đó nằm trong `arch_hash`. Một PR đổi lệnh kiểm thành
+      # `curl ... | sh` hiện ra ở đây.
+      #
+      # `continue-on-error` vì một PR tách ra từ trước khi có file luật thì
+      # `git show <base>:.arch/system.arch` không có gì để đọc, và đó không
+      # phải lỗi của PR.
+      - name: luật đã đổi gì
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: ./target/release/archctl diff "$BASE"
+
+      # Lệnh duy nhất trong cả công cụ chạy shell, và nó chạy đúng những gì
+      # file luật khai báo.
+      - name: chạy các cách kiểm đã khai báo
+        run: ./target/release/archctl verify
+
+      # Phải sau `verify`: `--strict` coi "chưa có biên nhận" là vi phạm, mà
+      # bản checkout mới thì chưa có biên nhận nào (`.arch/.verified` không
+      # vào git — một biên nhận commit được là một biên nhận bịa được).
+      - name: đối chiếu mã với luật
+        run: ./target/release/archctl check --strict
+
+  nen-tang:
+    name: nền tảng khác
+    runs-on: macos-latest
+    steps:
+      - name: lấy mã
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: dựng archctl
+        run: cargo build --release --locked
+
+      # Cố ý gọi `cargo test` thẳng, không qua `archctl verify`. Job `luật`
+      # uỷ quyền việc chạy test cho chính công cụ đang được test: nếu
+      # `cmd_verify` hỏng thành không-làm-gì, nó vẫn ghi biên nhận, `check`
+      # vẫn thấy biên nhận mới, và cả CI thành mù mà không đỏ một ô nào. Một
+      # lần gọi thẳng ở đây cắt vòng tròn đó — và đồng thời trả lời câu hỏi
+      # khác: công cụ viết trên macOS có chạy ở nơi khác không.
+      - name: test, gọi thẳng cargo
+        run: cargo test --locked --quiet
+
+  msrv:
+    name: rust tối thiểu
+    runs-on: ubuntu-latest
+    steps:
+      - name: lấy mã
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Lấy số từ chính Cargo.toml thay vì ghi lại ở đây, để không có hai bản
+      # cùng khai một con số. `rust-version` từng ghi 1.85 trong khi mã dùng
+      # let-chain của 1.88: không có job nào kiểm thì nó sai im lặng.
+      - name: đọc rust-version từ Cargo.toml
+        id: doc
+        run: |
+          set -euo pipefail
+          v=$(sed -n 's/^rust-version *= *"\([0-9.]*\)".*/\1/p' Cargo.toml | head -1)
+          test -n "$v"
+          echo "v=$v" >> "$GITHUB_OUTPUT"
+
+      # Qua biến môi trường, không nội suy thẳng vào dòng shell: giá trị đọc
+      # từ file trong repo là dữ liệu, và repo là thứ một PR sửa được.
+      - name: cài toolchain đã khai
+        env:
+          V: ${{ steps.doc.outputs.v }}
+        run: rustup toolchain install "$V" --profile minimal --no-self-update
+
+      - name: biên dịch bằng toolchain đó
+        env:
+          V: ${{ steps.doc.outputs.v }}
+        run: cargo "+$V" check --locked --all-targets

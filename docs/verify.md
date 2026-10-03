@@ -64,7 +64,8 @@ archctl verify --quiet          # nuốt đầu ra của lệnh, chỉ giữ k�
 1/2 đạt · biên nhận ghi vào .arch/.verified
 ```
 
-Mã thoát khác 0 khi có cách kiểm nào hỏng, nên dùng được trong CI.
+Mã thoát khác 0 khi có cách kiểm nào hỏng, nên dùng được trong CI. Trong CI
+nó phải chạy **trước** `archctl check --strict`: xem [ci.md](ci.md).
 
 ## Biên nhận tự hết hạn
 

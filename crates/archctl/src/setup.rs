@@ -50,8 +50,12 @@ const CLAUDE_SETTINGS: &str = r#"{
 const CI_SNIPPET: &str = r#"
 Chạy trong CI để vi phạm mới chặn được pull request:
 
-  - run: archctl check --strict
   - run: archctl verify
+  - run: archctl check --strict
+
+Thứ tự đó quan trọng: `.arch/.verified` không vào git (một biên nhận commit
+được là một biên nhận bịa được), nên bản checkout nào cũng bắt đầu không có
+biên nhận nào — và `--strict` coi "chưa có biên nhận" là vi phạm.
 
 Và khoá file luật lại bằng CODEOWNERS, để agent không tự duyệt được:
 

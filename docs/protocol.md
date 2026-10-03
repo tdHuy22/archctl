@@ -111,8 +111,8 @@ một cách tuyệt đối.
 
 Chốt chặn thật sự nằm ở nơi agent không với tới:
 
-- **CI** — `archctl check --strict` chạy trên server, so với `system.arch` ở
-  nhánh `main`
+- **CI** — `archctl verify` rồi `archctl check --strict` chạy trên server, so
+  với `system.arch` ở nhánh `main` ([ci.md](ci.md))
 - **Pull request** — mọi thay đổi trong `.arch/` hiện trong diff; `archctl diff`
   tách riêng phần nới lỏng luật
 - **CODEOWNERS** — `.arch/**` bắt buộc người cụ thể phê duyệt
