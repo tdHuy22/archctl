@@ -155,6 +155,16 @@ pub fn cmd_propose(args: &[String], intent: Intent) -> ExitCode {
     let Some(reason) = parsed.flags.get("reason") else {
         return fail("thiếu `--reason`. Lý do là thứ người duyệt đọc để quyết định.", exit::USAGE);
     };
+    // Agent không được đề xuất một lệnh shell. `accept` ghi thẳng đề xuất vào
+    // file luật, và `archctl verify` chạy lệnh trong đó — nên nếu cho phép thì
+    // một lần duyệt vội là đủ để agent tự chọn thứ chạy trên máy người dùng.
+    // Người muốn thêm cách kiểm thì tự sửa `.arch/system.arch`.
+    if statement.split_whitespace().next() == Some("verify") {
+        return fail(
+            "không đề xuất được cách kiểm: nó mang theo một lệnh shell.\n             → người tự thêm dòng `verify ... runs \"...\"` vào .arch/system.arch",
+            exit::USAGE,
+        );
+    }
     let root = match root_from(&parsed) {
         Ok(r) => r,
         Err(e) => return fail(&e, exit::USAGE),

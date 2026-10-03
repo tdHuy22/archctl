@@ -9,6 +9,7 @@ Con người vẽ kiến trúc, luồng dữ liệu và ràng buộc. Agent lậ
 ```bash
 archctl init --from-code    # dựng bản nháp kiến trúc từ mã đã có
 archctl check               # đối chiếu mã với luật
+archctl verify              # chạy các cách kiểm đã khai báo
 archctl serve               # mở sơ đồ tương tác ở 127.0.0.1:4000
 ```
 
@@ -117,7 +118,7 @@ Và trong CI, nơi agent không với tới:
 | | |
 | --- | --- |
 | Dependency ngoài std | **0** |
-| Test | 301 |
+| Test | 314 |
 | Binary | 945 KB |
 | Khởi động | 3ms |
 
@@ -131,6 +132,7 @@ agent, nên mỗi dependency thêm vào là một bề mặt tấn công thêm.
 | --- | --- |
 | [docs/check.md](docs/check.md) | Ngữ nghĩa kiểm chứng, phân giải từng ngôn ngữ, giới hạn |
 | [docs/declarations.md](docs/declarations.md) | `flow`, `contract`, `boundary`, `invariant` |
+| [docs/verify.md](docs/verify.md) | Chạy thật các cách kiểm, và biên nhận tự hết hạn |
 | [docs/api.md](docs/api.md) | Hàm và từ khoá bị cấm |
 | [docs/protocol.md](docs/protocol.md) | Giao thức agent–người |
 | [docs/adopt.md](docs/adopt.md) | `init --from-code` và `baseline` |
@@ -153,7 +155,8 @@ https://claude.ai/code/artifact/2b26df5d-d6b0-40d0-a398-7e574c7d1387
 - **Thứ tự bước trong `flow` chưa kiểm.** Bộ quét không phân biệt được lời gọi
   với định nghĩa hàm, nên kiểm thứ tự sẽ báo nhầm. Cần trace runtime.
   `requires`/`ensures` của `contract` và `invariant data`/`money` cũng vậy — và
-  chúng vẫn bị cảnh báo là "chỉ là lời hứa" nếu thiếu `verify`.
+  chúng trỏ ra công cụ ngoài qua `verify`, và `archctl verify` chạy thật rồi
+  ghi biên nhận — xem [docs/verify.md](docs/verify.md).
 - **Đây là lan can, không phải hàng rào an ninh.** Agent chạy được shell nên vẫn
   ghi đè được file luật. Cưỡng chế thật nằm ở CI, CODEOWNERS trên `.arch/**`, và
   việc tên người duyệt bị ghi vào nhật ký.

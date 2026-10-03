@@ -33,7 +33,7 @@ contract Payment.charge:                            @human #locked
   idempotent_by orderId
   latency       p99 < 800ms
   consistency   strong
-  verify        contract_test, chaos(Stripe.timeout)
+  verify        contract_test, chaos_stripe_timeout
 
 boundary Checkout contains Order, Stock, Payment:   @human #accepted
   isolation   Payment.down => Order vẫn nhận đơn, trạng thái PENDING_PAYMENT
@@ -42,10 +42,20 @@ boundary Checkout contains Order, Stock, Payment:   @human #accepted
   retry       Payment.charge: 3 lần, backoff mũ, chỉ khi idempotent
   timeout     toàn luồng < 3s
   compensate  charge.fail => releaseStock
-  verify      chaos(Payment.down)
+  verify      chaos_payment_down
 
 # `updateAnalytics` cố ý không có trong mã: đó là một khai báo đã lạc hậu, và
 # `archctl check` phải chỉ ra.
+
+# Mỗi cách kiểm phải chỉ ra được một lệnh chạy được. Không có phần này thì
+# `verify property_test` chỉ là một cái tên không dẫn tới đâu — và khi đó
+# "đã có verify" vẫn chỉ là lời hứa, chỉ khác là không còn ai nhắc.
+verify contract_test         runs "npm run test:contract"           @human #accepted
+verify property_test         runs "npm run test:props"              @human #accepted
+verify daily_reconcile       runs "npm run reconcile -- --check"    @human #accepted
+verify dataflow              runs "npm run lint:pii"                @human #accepted
+verify chaos_stripe_timeout  runs "npm run chaos -- stripe-timeout" @human #accepted
+verify chaos_payment_down    runs "npm run chaos -- payment-down"   @human #accepted
 
 invariant data   [Order]    order.total == sum(items.price * items.qty) verify property_test
 invariant state  [Order]    CREATED -> RESERVED -> PAID -> SHIPPED verify property_test

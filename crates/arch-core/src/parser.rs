@@ -60,6 +60,10 @@ pub fn parse(src: &str) -> (Document, Vec<Diag>) {
                 parse_api(rest, meta, line.no, &mut doc, &mut diags);
                 i += 1;
             }
+            "verify" => {
+                parse_verify(rest, meta, line.no, &mut doc, &mut diags);
+                i += 1;
+            }
             "invariant" => {
                 parse_invariant(rest, meta, line.no, &mut doc, &mut diags);
                 i += 1;
@@ -198,6 +202,48 @@ fn whitespace_tokens(s: &str) -> Vec<(usize, &str)> {
         out.push((b, &s[b..]));
     }
     out
+}
+
+/// `verify property_test runs "cargo test --test props"`
+///
+/// Lệnh nằm trong dấu nháy kép, vì nó gần như luôn có khoảng trắng và vì dấu
+/// nháy làm rõ đâu là ranh giới của nó.
+fn parse_verify(
+    rest: &str,
+    meta: Meta,
+    line: usize,
+    doc: &mut Document,
+    diags: &mut Vec<Diag>,
+) {
+    let Some((name, command)) = rest.split_once(" runs ") else {
+        diags.push(
+            Diag::error(line, "thiếu `runs` trong khai báo verify").with_hint(
+                "dạng đúng: verify <tên> runs \"<lệnh>\"",
+            ),
+        );
+        return;
+    };
+    let name = name.trim();
+    if !check_ident(name, "tên cách kiểm", line, diags) {
+        return;
+    }
+    let command = command.trim();
+    let Some(command) = command.strip_prefix('"').and_then(|c| c.strip_suffix('"')) else {
+        diags.push(
+            Diag::error(line, "lệnh phải nằm trong dấu nháy kép")
+                .with_hint(format!("viết: verify {name} runs \"{command}\"")),
+        );
+        return;
+    };
+    if command.trim().is_empty() {
+        diags.push(Diag::error(line, format!("cách kiểm `{name}` có lệnh rỗng")));
+        return;
+    }
+    doc.verifies.push(Verify {
+        name: name.to_string(),
+        command: command.to_string(),
+        meta,
+    });
 }
 
 /// Tách danh sách phân cách bằng dấu phẩy, tôn trọng dấu ngoặc kép.

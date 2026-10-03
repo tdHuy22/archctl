@@ -3,4 +3,5 @@ dist/
 .DS_Store
 *.log
 **/.arch/.state
+**/.arch/.verified
 target/

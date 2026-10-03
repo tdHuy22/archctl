@@ -15,6 +15,7 @@ pub fn validate(doc: &Document) -> Vec<Diag> {
     check_unique_names(doc, &mut diags);
     check_references(doc, &mut diags);
     check_flows(doc, &mut diags);
+    check_verify_targets(doc, &mut diags);
     check_verifiability(doc, &mut diags);
     diags
 }
@@ -193,6 +194,27 @@ fn check_references(doc: &Document, diags: &mut Vec<Diag>) {
                 Diag::error(inv.meta.line, format!("loại invariant không nhận ra: `{}`", inv.kind))
                     .with_hint(format!("loại hợp lệ: {}", INVARIANT_KINDS.join(", "))),
             );
+        }
+    }
+}
+
+/// `verify x` phải trỏ tới một cách kiểm có thật, nếu không thì cái tên đó
+/// không dẫn tới đâu cả — đúng tình trạng trước khi có khai báo `verify`.
+fn check_verify_targets(doc: &Document, diags: &mut Vec<Diag>) {
+    for (name, used_by, line) in doc.verify_uses() {
+        if doc.verify(&name).is_none() {
+            diags.push(
+                Diag::warning(line, format!("`verify {name}` trong {used_by} chưa khai báo"))
+                    .with_hint(format!("thêm: verify {name} runs \"<lệnh>\"")),
+            );
+        }
+    }
+    for v in &doc.verifies {
+        if !doc.verify_uses().iter().any(|(name, _, _)| *name == v.name) {
+            diags.push(Diag::warning(
+                v.meta.line,
+                format!("cách kiểm `{}` không được chỗ nào dùng", v.name),
+            ));
         }
     }
 }

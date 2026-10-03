@@ -150,6 +150,24 @@ pub struct Invariant {
     pub meta: Meta,
 }
 
+/// Cách kiểm một lời hứa, kèm lệnh chạy được.
+///
+/// `contract`, `boundary` và `invariant` đều có trường `verify` trỏ tới một
+/// cái tên. Trước khi có khai báo này, cái tên đó không dẫn tới đâu cả: hệ
+/// thống cảnh báo "thiếu `verify` thì đây chỉ là lời hứa", ngụ ý rằng **có**
+/// `verify` thì không phải — trong khi nó chưa bao giờ chạy gì.
+///
+/// Tên tách khỏi lệnh vì hai thứ đó phục vụ hai người đọc khác nhau:
+/// `verify property_test` đọc được trên sơ đồ, còn `cargo test --test props`
+/// thì không.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verify {
+    pub name: String,
+    /// Lệnh shell. Chỉ `archctl verify` chạy nó, và chỉ khi người gõ lệnh.
+    pub command: String,
+    pub meta: Meta,
+}
+
 /// Nhóm hàm hoặc từ khoá bị theo dõi: `strcpy`, `eval`, `unsafe`.
 ///
 /// Khác với `component` và `store`, nhóm này không ánh xạ sang file nào. Nó
@@ -243,11 +261,47 @@ pub struct Document {
     pub invariants: Vec<Invariant>,
     pub views: Vec<View>,
     pub apis: Vec<Api>,
+    pub verifies: Vec<Verify>,
 }
 
 impl Document {
     pub fn component(&self, name: &str) -> Option<&Component> {
         self.components.iter().find(|c| c.name == name)
+    }
+
+    pub fn verify(&self, name: &str) -> Option<&Verify> {
+        self.verifies.iter().find(|v| v.name == name)
+    }
+
+    /// Mọi cách kiểm được nhắc tới trong `contract`, `boundary` và
+    /// `invariant`, kèm nơi nhắc.
+    pub fn verify_uses(&self) -> Vec<(String, String, usize)> {
+        let mut out = Vec::new();
+        for c in &self.contracts {
+            let label = format!("contract {}.{}", c.component, c.capability);
+            for f in c.fields.iter().filter(|f| f.key == "verify") {
+                out.extend(split_names(&f.values.join(" "), &[',']).into_iter().map(|n| {
+                    (n, label.clone(), f.line)
+                }));
+            }
+        }
+        for b in &self.boundaries {
+            let label = format!("boundary {}", b.name);
+            for f in b.fields.iter().filter(|f| f.key == "verify") {
+                out.extend(split_names(&f.values.join(" "), &[',']).into_iter().map(|n| {
+                    (n, label.clone(), f.line)
+                }));
+            }
+        }
+        for i in &self.invariants {
+            let label = format!("invariant {}", i.kind);
+            for name in i.verify.iter().flat_map(|v| split_names(v, &[','])) {
+                out.push((name, label.clone(), i.meta.line));
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
     }
 
     pub fn store(&self, name: &str) -> Option<&Store> {

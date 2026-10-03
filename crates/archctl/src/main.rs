@@ -7,7 +7,7 @@
 use arch_core::check::{Reason, Report, Via};
 use arch_core::diff::{Class, Kind};
 use arch_core::protocol::{self as protocol, Intent, Verdict};
-use arch_core::diag::{self, Severity};
+use arch_core::diag::{self, Diag, Severity};
 use arch_core::model::Status;
 use arch_core::{Document, json};
 use std::path::{Path, PathBuf};
@@ -73,6 +73,7 @@ fn main() -> ExitCode {
         "init" => setup::cmd_init(&args[1..]),
         "baseline" => setup::cmd_baseline(&args[1..]),
         "export" => setup::cmd_export(&args[1..]),
+        "verify" => setup::cmd_verify(&args[1..]),
         "serve" => serve::cmd_serve(&args[1..]),
         "help" | "-h" | "--help" => {
             print_usage();
@@ -105,6 +106,9 @@ Lệnh chung:
                                           --strict coi cảnh báo là vi phạm.
   archctl diff [<git-ref>] [--root <dir>] So luật hiện tại với một bản trước
   archctl parse <file.arch>               Chỉ đọc và kiểm tra file luật
+  archctl verify [<tên>...] [--quiet]     Chạy các cách kiểm đã khai báo và
+                                          ghi biên nhận. Lệnh duy nhất chạy
+                                          lệnh shell, và chỉ khi người gõ nó.
   archctl proposals                       Liệt kê đề xuất đang chờ
   archctl serve [--port <n>]              Mở sơ đồ tương tác ở 127.0.0.1:4000
   archctl export [--view <tên>] [--violations] [--out <file>]
@@ -153,6 +157,26 @@ fn load_arch(root: &Path, as_json: bool) -> Option<(Document, String)> {
             }
         }
         return None;
+    }
+    // Cảnh báo của bộ kiểm tra mô hình cũng phải hiện ở đây. Trước đây chỉ
+    // `archctl parse` in chúng, mà không ai chạy `parse` thường xuyên — nên
+    // "contract này không có verify, đây chỉ là lời hứa" chưa bao giờ tới
+    // được người cần đọc nó.
+    if !as_json {
+        let warnings: Vec<&Diag> =
+            diags.iter().filter(|d| d.severity == Severity::Warning).collect();
+        for d in warnings.iter().take(MAX_LISTED) {
+            crate::say!("⚠ {}:{d}", arch_core::ARCH_FILE);
+            if let Some(hint) = &d.hint {
+                crate::say!("  → {hint}");
+            }
+        }
+        if let Some(rest) = warnings.len().checked_sub(MAX_LISTED).filter(|n| *n > 0) {
+            crate::say!("⚠ … còn {rest} cảnh báo nữa trong file luật — archctl parse");
+        }
+        if !warnings.is_empty() {
+            crate::say!();
+        }
     }
     Some((doc, hash))
 }
@@ -231,7 +255,8 @@ fn cmd_check(args: &[String]) -> ExitCode {
         + report.ambiguous.len()
         + report.missing.len()
         + report.vacuous.len()
-        + report.oversized.len();
+        + report.oversized.len()
+        + report.unproven.len();
     let failed = fresh > 0 || (strict && unchecked > 0);
     if strict && fresh == 0 && unchecked > 0 {
         crate::say!(
@@ -413,6 +438,13 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
         crate::say!("⚠ … còn {rest} tên nữa chưa phân giải được — xem `--json`\n");
     }
 
+    // Một lời hứa có `verify` trỏ tới đâu đó vẫn chỉ là lời hứa, chừng nào
+    // chưa ai chạy nó trên đúng bản mã này.
+    for (name, why) in report.unproven.iter().take(MAX_LISTED) {
+        crate::say!("⚠ CHƯA CHỨNG MINH  cách kiểm `{name}` — {}", why.describe());
+        crate::say!("  → archctl verify {name}\n");
+    }
+
     // Bỏ qua thì bỏ qua, nhưng không được im lặng: đó là mã đang không kiểm.
     for (file, bytes) in report.oversized.iter().take(MAX_LISTED) {
         crate::say!("⚠ QUÁ LỚN  {file} ({} MB) — không dò", bytes / (1 << 20));
@@ -431,6 +463,7 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
         ("kiểm không kết luận", MAX_LISTED, report.vacuous.len()),
         ("file quá lớn", MAX_LISTED, report.oversized.len()),
         ("mẫu chồng nhau", MAX_LISTED, report.ambiguous.len()),
+        ("cách kiểm chưa chứng minh", MAX_LISTED, report.unproven.len()),
     ] {
         if let Some(rest) = total.checked_sub(shown).filter(|n| *n > 0) {
             crate::say!("⚠ … còn {rest} {label} nữa — xem `--json`\n");
@@ -476,6 +509,7 @@ fn print_human(hash: &str, report: &Report, memory: &Memory) {
 
     let warnings = report.missing.len()
         + report.vacuous.len()
+        + report.unproven.len()
         + report.oversized.len()
         + report.unresolved.len()
         + report.ambiguous.len()

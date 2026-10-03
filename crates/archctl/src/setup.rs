@@ -219,7 +219,7 @@ fn append_gitignore(root: &Path) -> Result<bool, String> {
     }
     // `**/` chứ không neo vào gốc: monorepo có thể có nhiều `.arch/` lồng
     // trong các dự án con, và mẫu neo gốc bỏ sót hết chúng.
-    body.push_str("**/.arch/.state\n");
+    body.push_str("**/.arch/.state\n**/.arch/.verified\n");
     arch_core::write_atomic(&path, &body).map_err(|e| e.to_string())?;
     Ok(true)
 }
@@ -325,4 +325,91 @@ pub fn cmd_baseline(args: &[String]) -> ExitCode {
 fn fail(message: &str, code: u8) -> ExitCode {
     eprintln!("archctl: {message}");
     ExitCode::from(code)
+}
+
+/// `archctl verify [<tên>...]` — chạy các cách kiểm và ghi biên nhận.
+///
+/// Chỉ lệnh này chạy lệnh shell, và chỉ khi người gõ nó. `check` không bao
+/// giờ chạy gì, kể cả trong hook của agent: nó chỉ đọc biên nhận.
+pub fn cmd_verify(args: &[String]) -> ExitCode {
+    let parsed = match crate::proto::parse_args(args, &["root"], &["quiet"]) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("archctl: {e}");
+            return ExitCode::from(exit::USAGE);
+        }
+    };
+    let start = parsed.flags.get("root").map_or_else(|| PathBuf::from("."), PathBuf::from);
+    let Some(root) = arch_core::find_root(&start) else {
+        eprintln!("archctl: không tìm thấy `{}`", arch_core::ARCH_FILE);
+        return ExitCode::from(exit::USAGE);
+    };
+    let Ok(src) = std::fs::read_to_string(root.join(arch_core::ARCH_FILE)) else {
+        eprintln!("archctl: không đọc được `{}`", arch_core::ARCH_FILE);
+        return ExitCode::from(exit::USAGE);
+    };
+    let (doc, diags) = arch_core::load(&src);
+    if arch_core::diag::has_errors(&diags) {
+        for d in diags.iter().filter(|d| d.severity == arch_core::Severity::Error) {
+            eprintln!("✗ {}:{d}", arch_core::ARCH_FILE);
+        }
+        return ExitCode::from(exit::DSL_INVALID);
+    }
+
+    let wanted: Vec<&arch_core::model::Verify> = if parsed.positional.is_empty() {
+        doc.verifies.iter().collect()
+    } else {
+        doc.verifies.iter().filter(|v| parsed.positional.contains(&v.name)).collect()
+    };
+    if wanted.is_empty() {
+        if doc.verifies.is_empty() {
+            crate::say!("Chưa khai báo cách kiểm nào.");
+            crate::say!("  → verify <tên> runs \"<lệnh>\"  trong {}", arch_core::ARCH_FILE);
+        } else {
+            crate::say!("Không có cách kiểm nào tên như vậy.");
+        }
+        return ExitCode::from(exit::OK);
+    }
+
+    let hash = arch_core::arch_hash(&doc);
+    let path = root.join(arch_core::verify::RECEIPTS_FILE);
+    let mut receipts = arch_core::verify::parse(&std::fs::read_to_string(&path).unwrap_or_default());
+    let quiet = parsed.has("quiet");
+    let mut failed = 0usize;
+
+    for v in &wanted {
+        crate::say!("▸ {}  {}", v.name, v.command);
+        let began = std::time::Instant::now();
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&v.command)
+            .current_dir(&root)
+            .stdout(if quiet { std::process::Stdio::null() } else { std::process::Stdio::inherit() })
+            .stderr(if quiet { std::process::Stdio::null() } else { std::process::Stdio::inherit() })
+            .status();
+        let passed = matches!(&status, Ok(s) if s.success());
+        if !passed {
+            failed += 1;
+        }
+        crate::say!(
+            "  {} · {:.1} giây",
+            if passed { "đạt" } else { "HỎNG" },
+            began.elapsed().as_secs_f64()
+        );
+        receipts.retain(|r| r.name != v.name);
+        receipts.push(arch_core::verify::Receipt {
+            name: v.name.clone(),
+            passed,
+            at: arch_core::verify::now(),
+            arch_hash: hash.clone(),
+        });
+    }
+
+    if let Err(e) = arch_core::write_atomic(&path, &arch_core::verify::render(&receipts)) {
+        eprintln!("archctl: không ghi được biên nhận: {e}");
+        return ExitCode::from(exit::USAGE);
+    }
+    crate::say!("\n{}/{} đạt · biên nhận ghi vào {}", wanted.len() - failed, wanted.len(),
+        arch_core::verify::RECEIPTS_FILE);
+    ExitCode::from(if failed > 0 { exit::VIOLATION } else { exit::OK })
 }

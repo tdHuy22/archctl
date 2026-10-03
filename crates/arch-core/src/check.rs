@@ -165,6 +165,9 @@ pub struct Report {
     /// File quá lớn để dò, kèm kích thước. Không im lặng bỏ qua: đó là mã
     /// đang không được kiểm.
     pub oversized: Vec<(String, u64)>,
+    /// Cách kiểm đã khai báo nhưng chưa có biên nhận còn hiệu lực. Nói cách
+    /// khác: lời hứa chưa được chứng minh.
+    pub unproven: Vec<(String, crate::verify::Stale)>,
 }
 
 impl Report {
@@ -319,7 +322,34 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
     report.violations.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
     report.unresolved.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
     report.oversized.sort();
+    report.unproven = unproven(root, doc, files);
     report
+}
+
+/// Cách kiểm nào chưa có biên nhận còn hiệu lực.
+///
+/// Chỉ **đọc** biên nhận. `check` chạy trong hook của agent sau mỗi lần sửa
+/// file, nên nó không được chạy lệnh shell nào — đó là việc của
+/// `archctl verify`, và chỉ khi người gõ lệnh đó.
+fn unproven(
+    root: &Path,
+    doc: &Document,
+    files: &[String],
+) -> Vec<(String, crate::verify::Stale)> {
+    if doc.verifies.is_empty() {
+        return Vec::new();
+    }
+    let names: Vec<String> = doc
+        .verifies
+        .iter()
+        .filter(|v| v.meta.status.is_enforced())
+        .map(|v| v.name.clone())
+        .collect();
+    let receipts = crate::verify::parse(
+        &std::fs::read_to_string(root.join(crate::verify::RECEIPTS_FILE)).unwrap_or_default(),
+    );
+    let changed = crate::verify::last_source_change(root, files);
+    crate::verify::stale(&names, &receipts, &crate::arch_hash(doc), changed)
 }
 
 /// Ghép hai đầu của một lời gọi qua ranh giới ngôn ngữ.

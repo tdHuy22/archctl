@@ -189,6 +189,7 @@ kiểm vào chỉ làm 2000 file chậm thêm từ ~110ms lên ~120ms.
 - **Ngưỡng "không kết luận được" là một con số chọn tay.** Một cái tên có mặt ở
   24% số file vẫn gần như không nói lên điều gì, mà không bị báo. Ngưỡng dịch
   chuyển đường im lặng chứ không xoá nó.
-- **`invariant data`, `money`, `access`, `algo` vẫn chỉ là lời hứa**, và vẫn bị
-  cảnh báo như vậy nếu thiếu `verify`. Muốn chặn dữ liệu nhạy cảm rò ra ngoài
+- **`invariant data`, `money`, `access`, `algo` không kiểm được bằng phân tích
+  tĩnh.** Chúng trỏ ra công cụ ngoài qua `verify`, và `archctl verify` chạy
+  thật rồi ghi biên nhận gắn với bản mã lúc chạy — xem [verify.md](verify.md). Muốn chặn dữ liệu nhạy cảm rò ra ngoài
   thì dùng `store owned_by` hoặc `api` cộng `deny` — hai thứ đó kiểm thật.
