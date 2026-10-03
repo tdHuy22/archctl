@@ -172,3 +172,28 @@ fn check_khong_bao_gio_chay_lenh() {
     assert!(!flag.exists(), "`check` đã chạy lệnh của verify");
     let _ = std::fs::remove_file(&flag);
 }
+
+#[test]
+fn hai_cach_kiem_trung_ten_bi_bao() {
+    // Cái thứ hai bị bỏ im lặng thì người viết tưởng lệnh của mình đang chạy.
+    let p = Project::new("dup", &format!("{ARCH}verify money_props runs \"exit 9\"  @human #accepted\n"));
+    let out = p.out(&["check"]);
+    assert!(out.contains("trùng tên"), "{out}");
+    assert!(!p.run(&["check"]).status.success(), "trùng tên là lỗi, không phải cảnh báo");
+}
+
+#[test]
+fn lenh_chua_chu_runs_van_doc_dung() {
+    let arch = ARCH.replace("runs \"exit 0\"", "runs \"sh -c 'echo runs ok'\"");
+    let p = Project::new("runsword", &arch);
+    assert!(p.run(&["verify", "--quiet"]).status.success(), "{}", p.out(&["verify"]));
+}
+
+#[test]
+fn bien_nhan_bi_sua_tay_thanh_rac_khong_lam_sap() {
+    let p = Project::new("garbage", ARCH);
+    p.run(&["verify", "--quiet"]);
+    p.write(".arch/.verified", "rác rưởi\nmoney_props\n\n###\n");
+    let out = p.out(&["check"]);
+    assert!(out.contains("chưa chạy lần nào"), "dòng hỏng phải bị bỏ qua: {out}");
+}

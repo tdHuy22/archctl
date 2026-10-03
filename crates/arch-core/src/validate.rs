@@ -79,7 +79,8 @@ fn check_unique_names(doc: &Document, diags: &mut Vec<Diag>) {
         .chain(doc.boundaries.iter().map(|b| (b.name.as_str(), b.meta.line, "boundary")))
         .chain(doc.flows.iter().map(|f| (f.name.as_str(), f.meta.line, "flow")))
         .chain(doc.views.iter().map(|v| (v.name.as_str(), v.meta.line, "view")))
-        .chain(doc.apis.iter().map(|a| (a.name.as_str(), a.meta.line, "api")));
+        .chain(doc.apis.iter().map(|a| (a.name.as_str(), a.meta.line, "api")))
+        .chain(doc.verifies.iter().map(|v| (v.name.as_str(), v.meta.line, "cách kiểm")));
 
     for (name, line, what) in entries {
         if let Some(first) = seen.insert(name, line) {
