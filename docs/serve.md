@@ -57,6 +57,18 @@ ngoài, không gọi mạng. Hệ quả:
 Layout tính ở Rust (phân tầng, xác định) rồi gửi kèm toạ độ, nên giao diện
 không phải tự tính và kết quả không đổi giữa các lần chạy.
 
+## Tab "Lạc hậu" gom ba thứ
+
+Ba chuyện khác nhau, cùng một câu hỏi: **khai báo này có còn đúng không?**
+
+| | |
+| --- | --- |
+| lạc hậu | tên trong khai báo không có trong mã |
+| không kết luận | tên có, nhưng phổ biến tới mức gặp nó chẳng nói lên gì |
+| chưa chứng minh | cách kiểm chưa chạy, hỏng, hoặc chạy trước khi mã đổi |
+
+Cái thứ ba đến từ `archctl verify` — xem [verify.md](verify.md).
+
 ## Sơ đồ ở quy mô thật
 
 Fixture chỉ có vài component nên mọi bố cục đều trông ổn. Chế độ hỏng chỉ lộ

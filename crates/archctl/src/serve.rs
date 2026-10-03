@@ -419,6 +419,18 @@ fn model_json(root: &Path) -> String {
         })
         .collect();
 
+    let unproven: Vec<String> = report
+        .unproven
+        .iter()
+        .map(|(name, why)| {
+            format!(
+                r#"{{"name":{},"why":{}}}"#,
+                json::string(name),
+                json::string(why.describe())
+            )
+        })
+        .collect();
+
     let (proposals, _) = protocol::parse_proposals(
         &std::fs::read_to_string(root.join(PROPOSALS_FILE)).unwrap_or_default(),
     );
@@ -438,7 +450,7 @@ fn model_json(root: &Path) -> String {
         .collect();
 
     format!(
-        r#"{{"archHash":{},"nodes":[{}],"edges":[{}],"boundaries":[{}],"violations":[{}],"missing":[{}],"vacuous":[{}],"proposals":[{}],"stats":{{"files":{},"checked":{},"unchecked":{}}}}}"#,
+        r#"{{"archHash":{},"nodes":[{}],"edges":[{}],"boundaries":[{}],"violations":[{}],"missing":[{}],"vacuous":[{}],"unproven":[{}],"proposals":[{}],"stats":{{"files":{},"checked":{},"unchecked":{}}}}}"#,
         json::string(&hash),
         nodes.join(","),
         edges.join(","),
@@ -446,6 +458,7 @@ fn model_json(root: &Path) -> String {
         violations.join(","),
         missing.join(","),
         vacuous.join(","),
+        unproven.join(","),
         pending.join(","),
         report.files_scanned,
         json::strings(report.checked.iter().map(String::as_str)),

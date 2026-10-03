@@ -143,7 +143,8 @@ fn mo_hinh_luon_co_moi_truong_ma_giao_dien_doc() {
     // Thiếu một trường thì `summarize()` ném lỗi và cả sơ đồ trắng xoá, chứ
     // không chỉ mất một tab. Nên sự có mặt của chúng là một ràng buộc.
     for field in
-        ["nodes", "edges", "boundaries", "violations", "missing", "vacuous", "proposals", "stats"]
+        ["nodes", "edges", "boundaries", "violations", "missing", "vacuous", "unproven", "proposals",
+         "stats"]
     {
         assert!(out.contains(&format!(r#""{field}":"#)), "thiếu `{field}`: {out}");
     }

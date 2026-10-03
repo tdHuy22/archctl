@@ -211,10 +211,12 @@ function summarize() {
   toggle("waiting", model.proposals.length, `${model.proposals.length} chờ duyệt`);
   // Hai vấn đề khác nhau của cùng một thứ: khai báo không còn khớp mã, và
   // khai báo mà kiểm xong vẫn không biết gì. Cái thứ hai dễ bị bỏ qua hơn.
-  toggle("stale", model.missing.length + model.vacuous.length,
-    model.vacuous.length
-      ? `${model.missing.length} lạc hậu · ${model.vacuous.length} không kết luận`
-      : `${model.missing.length} khai báo lạc hậu`);
+  const declareIssues = model.missing.length + model.vacuous.length + model.unproven.length;
+  const parts = [];
+  if (model.missing.length) parts.push(`${model.missing.length} lạc hậu`);
+  if (model.vacuous.length) parts.push(`${model.vacuous.length} không kết luận`);
+  if (model.unproven.length) parts.push(`${model.unproven.length} chưa chứng minh`);
+  toggle("stale", declareIssues, parts.join(" · "));
 }
 const toggle = (id, count, text) => {
   const node = document.getElementById(id);
@@ -507,8 +509,15 @@ function renderStale() {
       <p class="hint">được ${v.byDeclaration ? "khai báo" : "nhắc tới"} trong ${v.files}/${v.of} file nên tìm thấy nó không nói lên điều gì
         → đổi sang một tên chỉ thuộc về bước này</p>
     </div>`).join("");
-  box.innerHTML = stale + vague
-    || `<p class="empty">Mọi tên trong khai báo đều có trong mã, và đều đủ cụ thể để kiểm.</p>`;
+  // Một lời hứa có `verify` trỏ tới đâu đó vẫn chỉ là lời hứa, chừng nào chưa
+  // ai chạy nó trên đúng bản mã này.
+  const unproven = model.unproven.map((u) => `
+    <div class="card">
+      <h4>cách kiểm <span class="mono">${esc(u.name)}</span></h4>
+      <p class="hint">${esc(u.why)} → <span class="mono">archctl verify ${esc(u.name)}</span></p>
+    </div>`).join("");
+  box.innerHTML = stale + vague + unproven
+    || `<p class="empty">Mọi tên trong khai báo đều có trong mã, đều đủ cụ thể để kiểm, và mọi cách kiểm đều đã chạy.</p>`;
 }
 
 function renderDetail() {
