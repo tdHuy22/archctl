@@ -65,13 +65,12 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-1. **CI chỉ báo, không chặn.** Repo private trên GitHub Free không có branch
-   protection hay ruleset (API trả 403 "Upgrade to GitHub Pro or make this
-   repository public"), nên job đỏ không ngăn được commit vào `main`. Cần người
-   quyết: để public, lên Pro, hoặc chấp nhận CI là lời nhắc. Xem
-   [docs/ci.md](docs/ci.md).
+Không có việc nào đang dở. **Đã quyết (2026-10-03): giữ repo private, CI là
+lời nhắc chứ không chặn** — gói GitHub Free không có branch protection cho repo
+private, nên job đỏ không ngăn được commit vào `main`. Muốn đổi thì để repo
+public hoặc lên Pro; lý do ở [docs/ci.md](docs/ci.md).
 
-Ngoài ra không có việc nào đang dở. Hai việc từng nằm trong danh sách đã cân
+Hai việc từng nằm trong danh sách đã cân
 nhắc rồi **loại**, ghi lại để khỏi nghĩ lại:
 
 1. **Component theo `[workspace] members`.** Đã dùng manifest để *không chia
