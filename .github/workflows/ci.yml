@@ -36,10 +36,14 @@ env:
 
 # Mặc định của GitHub là sáu tiếng. Một lần mạng treo hay một test kẹt thì
 # không ai muốn chờ chừng đó mới biết.
+#
+# Ghim `ubuntu-24.04` thay vì `ubuntu-latest`: nhãn đó chuyển sang Ubuntu 26
+# từ 19/10/2026, và môi trường đổi ngầm thì một lần đỏ không biết là do mã
+# hay do runner. Nâng là sửa ba dòng này, có chủ ý.
 jobs:
   luat:
     name: luật
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: lấy mã
@@ -108,7 +112,7 @@ jobs:
 
   msrv:
     name: rust tối thiểu
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: lấy mã
@@ -141,7 +145,7 @@ jobs:
 
   bench:
     name: repo thật
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: lấy mã
