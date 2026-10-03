@@ -125,7 +125,7 @@ file luật khai báo. Repo này tự chạy CI của mình:
 | | |
 | --- | --- |
 | Dependency ngoài std | **0** |
-| Test | 343 |
+| Test | 360 |
 | Binary | 1057 KB |
 | Khởi động | 3ms |
 | Mười repo thật, ghim theo commit | 4798 file · 0 bất nhất · 350/350 luồng lệnh |

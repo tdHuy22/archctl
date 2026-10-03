@@ -165,8 +165,13 @@ fn mod_long_trong_file_khong_bi_bao_la_thieu() {
     let r = Resolver::new(&root());
     let at = |from: &str, spec: &str| r.resolve(Lang::Rust, from, &Import { spec: spec.into(), line: 1, system: false });
 
-    assert_eq!(at("src/report.rs", "crate::khong_he_co_module_nay"), Resolved::Internal);
-    assert_eq!(at("src/capture/mod.rs", "super::*"), Resolved::Internal, "`src` không phải module");
+    // Không có file module nào tên vậy: đó là item, hoặc `mod` viết lồng, trong
+    // chính file gốc crate — ở đây là `src/main.rs`. Đích là file gốc, không
+    // phải "không có cạnh": bản cũ trả `Internal`, và `deny` nào trỏ vào
+    // component chứa `main.rs` cũng bị bỏ qua trong im lặng.
+    assert_eq!(at("src/report.rs", "crate::khong_he_co_module_nay"), Resolved::Path("src/main.rs".into()));
+    // Cha của module cấp một chính là module gốc crate.
+    assert_eq!(at("src/capture/mod.rs", "super::*"), Resolved::Path("src/main.rs".into()));
     // `self::helper` ra chính file đang xét; cạnh tự trỏ vào mình bị bỏ sau đó.
     assert_eq!(at("src/report.rs", "self::helper"), Resolved::Path("src/report.rs".into()));
 }

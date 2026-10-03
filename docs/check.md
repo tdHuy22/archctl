@@ -9,7 +9,7 @@ Hiện kiểm **luật phụ thuộc giữa component** cho năm ngôn ngữ.
 | TypeScript, JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | `import`, `import type`, `export … from`, `require()`, `import()` | tương đối, `index.*`, `.js`→`.ts`, alias `paths` trong tsconfig, **gói anh em trong workspace npm** |
 | Python | `.py .pyi` | `import a.b`, `import a as b, c`, `from .x import y` | tương đối theo số dấu chấm; tuyệt đối thử gốc, `src/`, `lib/`; **gói không gian tên (PEP 420)** |
 | C, C++ | `.c .h .cc .cpp .cxx .hpp .hh .hxx .inl` | `#include "x"`, `#include <x>` | **thư mục `-I` đọc từ build**; `"…"` ưu tiên thư mục file gọi |
-| Rust | `.rs` | `use`, `pub use`, `use a::{b, c}`, `extern crate` | theo cây module; đọc `Cargo.toml` để biết gốc crate **và các crate anh em trong workspace** |
+| Rust | `.rs` | `use`, `pub use`, cây `use a::{b::{c, d as e}, self}`, `use {a, b}`, `extern crate` | theo cây module; **gốc crate của từng file** (thư viện, binary, test, đường dẫn khai trong `Cargo.toml`); nhìn xuyên re-export ở gốc; các crate anh em trong workspace |
 | Go | `.go` | `import "x"`, khối `import ( … )` | đọc `module` trong `go.mod` để tách nội bộ với bên ngoài |
 
 Mọi ngôn ngữ dùng chung một lexer cấu hình được. Nó biết bỏ qua chú thích,
@@ -143,6 +143,37 @@ tệ hơn hẳn việc nói thẳng là chưa biết.
 | `from .x import y` không có cả thư mục | **báo ra** |
 | `import numpy` không có trong dự án | coi là gói — với import tuyệt đối của Python, không phân biệt được |
 
+## Rust: `crate::` là crate nào, và `X` ở gốc là gì
+
+`use crate::{Connection, Result}` không trỏ vào file module nào: `Connection`
+là một item ở **gốc crate**. Đích của nó là nơi item đó được định nghĩa —
+viết thẳng trong `lib.rs` thì là `lib.rs`; do `lib.rs` nhập vào bằng `use`
+(`pub use error::Error`) thì là `error.rs`. Không nhìn xuyên thì `lib.rs`
+thành chỗ rửa phụ thuộc: `deny Scan -> Model` lách được bằng `use
+crate::Document`, vì `Document` đi qua `lib.rs`.
+
+Gốc crate thì tuỳ file. Mỗi binary trong `src/bin/`, mỗi test tích hợp, mỗi ví
+dụ là một crate riêng, và `crate::` trong đó trỏ về gốc của chính nó, không
+phải thư viện cùng gói. Đường dẫn khai trong `Cargo.toml` (`[lib]`, `[[bin]]`,
+`[[test]]`…) cũng là gốc: ripgrep đặt binary chính ở `crates/core/main.rs`,
+và gói đó không có `src/` nào. File dùng chung cho nhiều crate — `tests/common/`
+— thì không biết là crate nào, nên không đoán.
+
+Trước đây cả ba đều trượt im lặng: `crate::X` với `X` ở gốc ra "không có
+cạnh", không cảnh báo. Ở năm repo Rust của bộ đo có khoảng 470 câu `use` như
+vậy; ở `rusqlite`, `deny Blob -> Core` cho 0 vi phạm trong khi `src/blob/`
+dùng `Connection` của Core.
+
+Hai chỗ đọc mã đi kèm, vì thiếu chúng thì bản sửa trên sinh cạnh giả:
+
+- **`mod` viết lồng.** Trong `#[cfg(test)] mod tests { use super::*; }`,
+  `super` là module của chính file, không phải module cha của nó. Bộ quét
+  theo dõi khối `mod tên { … }` và đổi đường dẫn về module của file. Không có
+  bước này, chính archctl có tám cạnh giả tới `lib.rs`, mỗi `mod tests` một cái.
+- **Cây `use`.** Tên sau `as` là tên mới, không phải thành viên; ngoặc lồng
+  giữ tiền tố của mình; `use { a::B, c::D };` — kiểu viết chuẩn của ripgrep —
+  trước đây không ra import nào cả.
+
 ## Hoa thường phải khớp, trên mọi máy
 
 `import './Util'` khi trên đĩa chỉ có `util.ts` thì **không** phân giải được —
@@ -268,15 +299,16 @@ rồi được `archctl accept` ghi vào file luật.
 - **Bộ quét không phải parser đầy đủ.** Nhận regex bằng suy đoán theo token
   đứng trước, như các bộ minify. Nếu độ chính xác không đủ, thay `scan/` bằng
   tree-sitter — ranh giới module đã được đặt sẵn cho việc đó.
-- **Rust: item ở gốc crate không sinh cạnh, và không được báo.** `use
-  crate::{Connection, Result}` trỏ vào `lib.rs`, nhưng bộ phân giải chỉ thử
-  `src.rs` và `src/mod.rs` cho gốc crate, rồi coi là `mod` viết lồng trong file.
-  Ở `rusqlite`, `src/blob/` dùng `Connection` của Core mà không có cạnh `Blob ->
-  Core` nào — một `deny Blob -> Core` sẽ không bắt được nó. Sửa đúng phải biết
-  gốc crate của từng file (`src/lib.rs`, `src/main.rs`, mỗi file trong
-  `src/bin/`, `tests/`, `examples/` là một crate riêng), và sẽ sinh thêm cạnh
-  tới component chứa `lib.rs` ở hầu hết repo Rust — kể cả luật của chính
-  archctl. Chưa làm.
+- **Rust: vài đường đi qua gốc crate vẫn dừng ở file gốc.** Re-export kiểu
+  `pub use self::types::*` không cho biết tên nào đi qua, và macro
+  `#[macro_export]` luôn nằm ở gốc dù được định nghĩa ở đâu: cả hai trỏ về
+  `lib.rs` thay vì nơi định nghĩa. `#[path = "…"]` không được đọc.
+- **Rust: `use con::X` từ một module không phải gốc bị coi là crate ngoài.**
+  Edition 2018 cho phép gọi thẳng module con đang trong phạm vi — `mod pos_io;
+  use pos_io::X;` trong `src/blob/mod.rs` — nhưng bộ phân giải chỉ tìm tên đó
+  từ gốc crate, không thấy, nên xếp là gói ngoài. `self::pos_io::X` thì đúng.
+  Module con gần như luôn nằm cùng thư mục, tức cùng component, nên hiếm khi
+  mất một cạnh có nghĩa.
 
 ## Phạm vi quét
 

@@ -297,3 +297,178 @@ mod hoa_thuong {
         );
     }
 }
+
+/// `crate::X` khi `X` không phải module file: một item ở gốc crate.
+///
+/// Bản cũ chỉ thử `src.rs` và `src/mod.rs` cho gốc crate — gốc crate không bao
+/// giờ tên như vậy — rồi trả `Internal`: không cạnh, không cảnh báo. Ở năm repo
+/// Rust của bộ đo có khoảng 470 câu `use` như vậy. Với `deny Blob -> Core` trên
+/// `rusqlite`, `use crate::{Connection, Name, Result}` ở `src/blob/mod.rs` cho 0
+/// vi phạm và 0 chưa phân giải: luật có mặt mà không được áp.
+///
+/// Đích đúng là nơi item được định nghĩa. `X` viết thẳng trong `lib.rs` thì là
+/// `lib.rs`; `X` do `lib.rs` re-export (`pub use error::Error`) thì là
+/// `error.rs` — không thì `lib.rs` thành chỗ rửa phụ thuộc: một `deny Scan ->
+/// Model` lách được bằng `use crate::Document`.
+mod goc_crate {
+    use arch_core::resolve::{Resolved, Resolver};
+    use arch_core::scan::{Import, Lang};
+
+    use super::Repo;
+
+    fn at(repo: &Repo, importer: &str, spec: &str) -> Resolved {
+        let import = Import { spec: spec.to_string(), line: 1, system: false };
+        Resolver::new(&repo.0).resolve(Lang::Rust, importer, &import)
+    }
+
+    fn path(p: &str) -> Resolved {
+        Resolved::Path(p.to_string())
+    }
+
+    fn lib_crate(name: &str) -> Repo {
+        let repo = Repo::new(name);
+        repo.write("Cargo.toml", "[package]\nname = \"x\"\n")
+            .write(
+                "src/lib.rs",
+                "mod blob;\nmod error;\nmod model;\n\
+                 pub use error::Error;\n\
+                 pub use self::model::{Document, Owner as Holder};\n\
+                 pub use libsqlite3_sys as ffi;\n\
+                 pub use crate::Loop;\n\
+                 pub struct Connection;\n",
+            )
+            .write("src/error.rs", "pub struct Error;\n")
+            .write("src/model.rs", "pub struct Document;\npub struct Owner;\n")
+            .write("src/blob/mod.rs", "use crate::Connection;\n")
+            .write("src/blob/pos_io.rs", "use super::super::Connection;\n");
+        repo
+    }
+
+    #[test]
+    fn item_viet_thang_trong_lib_rs() {
+        let repo = lib_crate("root-item");
+        assert_eq!(at(&repo, "src/blob/mod.rs", "crate::Connection"), path("src/lib.rs"));
+    }
+
+    #[test]
+    fn re_export_tro_toi_noi_dinh_nghia() {
+        let repo = lib_crate("root-reexport");
+        assert_eq!(at(&repo, "src/blob/mod.rs", "crate::Error"), path("src/error.rs"));
+        assert_eq!(at(&repo, "src/blob/mod.rs", "crate::Document"), path("src/model.rs"));
+        // Tên mới sau `as`.
+        assert_eq!(at(&repo, "src/blob/mod.rs", "crate::Holder"), path("src/model.rs"));
+        // Biến thể của enum, hay item lồng trong item: đoạn đầu quyết định.
+        assert_eq!(at(&repo, "src/blob/mod.rs", "crate::Error::Kind"), path("src/error.rs"));
+    }
+
+    #[test]
+    fn re_export_crate_ngoai_van_la_goi_ngoai() {
+        let repo = lib_crate("root-extern");
+        assert_eq!(
+            at(&repo, "src/blob/mod.rs", "crate::ffi::sqlite3_open"),
+            Resolved::Package("libsqlite3_sys".into())
+        );
+    }
+
+    #[test]
+    fn re_export_vong_tron_khong_treo() {
+        let repo = lib_crate("root-loop");
+        assert_eq!(at(&repo, "src/blob/mod.rs", "crate::Loop"), path("src/lib.rs"));
+    }
+
+    #[test]
+    fn super_va_self_toi_goc_crate() {
+        let repo = lib_crate("root-super");
+        assert_eq!(at(&repo, "src/blob/pos_io.rs", "super::super::Connection"), path("src/lib.rs"));
+        assert_eq!(at(&repo, "src/error.rs", "super::Error"), path("src/error.rs"));
+        // Trong chính `lib.rs`, `self::` là gốc crate: module con nằm ở `src/`,
+        // không phải `src/lib/`. Bản cũ trả về chính `lib.rs`.
+        assert_eq!(at(&repo, "src/lib.rs", "self::model::Document"), path("src/model.rs"));
+    }
+
+    #[test]
+    fn crate_chi_co_main_rs() {
+        let repo = Repo::new("root-bin-only");
+        repo.write("Cargo.toml", "[package]\nname = \"tool\"\n")
+            .write("src/main.rs", "mod cli;\npub struct Args;\nfn main() {}\n")
+            .write("src/cli.rs", "use crate::Args;\n");
+        assert_eq!(at(&repo, "src/cli.rs", "crate::Args"), path("src/main.rs"));
+    }
+
+    /// Mỗi binary là một crate riêng. `crate::` trong `src/bin/tool/` là gốc của
+    /// binary đó, không phải thư viện cùng gói.
+    #[test]
+    fn binary_trong_src_bin_la_crate_rieng() {
+        let repo = Repo::new("root-src-bin");
+        repo.write("Cargo.toml", "[package]\nname = \"x\"\n")
+            .write("src/lib.rs", "pub struct Config;\n")
+            .write("src/bin/tool/main.rs", "mod helper;\npub struct Config;\nfn main() {}\n")
+            .write("src/bin/tool/helper.rs", "use crate::Config;\n");
+        assert_eq!(
+            at(&repo, "src/bin/tool/helper.rs", "crate::Config"),
+            path("src/bin/tool/main.rs")
+        );
+    }
+
+    /// Cách ripgrep đặt binary chính: không có `src/`, đường dẫn khai trong
+    /// `Cargo.toml`. Bản cũ tìm module trong `src/` không tồn tại, nên mọi
+    /// `crate::` của binary đó mất hết.
+    #[test]
+    fn binary_khai_duong_dan_trong_cargo_toml() {
+        let repo = Repo::new("root-bin-path");
+        repo.write(
+            "Cargo.toml",
+            "[package]\nname = \"ripgrep\"\n\n[[bin]]\nname = \"rg\"\npath = \"crates/core/main.rs\"\n",
+        )
+        .write("crates/core/main.rs", "mod flags;\npub struct Thing;\nfn main() {}\n")
+        .write("crates/core/flags/mod.rs", "use crate::Thing;\n");
+        assert_eq!(at(&repo, "crates/core/main.rs", "crate::flags"), path("crates/core/flags/mod.rs"));
+        assert_eq!(at(&repo, "crates/core/flags/mod.rs", "crate::Thing"), path("crates/core/main.rs"));
+    }
+
+    /// Test tích hợp là một crate: `crate::common` của nó là `tests/common/`,
+    /// không phải `src/common.rs` của thư viện cùng gói.
+    #[test]
+    fn test_tich_hop_la_crate_rieng() {
+        let repo = Repo::new("root-it");
+        repo.write("Cargo.toml", "[package]\nname = \"x\"\n")
+            .write("src/lib.rs", "pub mod common;\n")
+            .write("src/common.rs", "pub fn decoy() {}\n")
+            .write("tests/it.rs", "mod common;\nuse crate::common::helper;\n")
+            .write("tests/other.rs", "mod common;\n")
+            .write("tests/common/mod.rs", "pub fn helper() {}\nuse crate::Thing;\n");
+        assert_eq!(at(&repo, "tests/it.rs", "crate::common::helper"), path("tests/common/mod.rs"));
+        // `tests/common/` dùng chung cho nhiều crate test: không biết gốc nào,
+        // nên không đoán.
+        assert_eq!(at(&repo, "tests/common/mod.rs", "crate::Thing"), Resolved::Internal);
+    }
+
+    #[test]
+    fn crate_thanh_vien_cua_workspace() {
+        let repo = Repo::new("root-ws");
+        repo.write("Cargo.toml", "[workspace]\nmembers = [\"crates/a\"]\n")
+            .write("crates/a/Cargo.toml", "[package]\nname = \"a\"\n")
+            .write("crates/a/src/lib.rs", "mod inner;\npub use inner::Thing;\n")
+            .write("crates/a/src/inner.rs", "pub struct Thing;\n")
+            .write("crates/a/src/x.rs", "use crate::Thing;\n");
+        assert_eq!(at(&repo, "crates/a/src/x.rs", "crate::Thing"), path("crates/a/src/inner.rs"));
+    }
+
+    /// Kịch bản của `rusqlite`, chạy qua `check`: `deny Blob -> Core` phải bắt
+    /// được `use crate::{Connection, Result}`.
+    #[test]
+    fn deny_bat_duoc_import_item_goc_crate() {
+        let repo = lib_crate("root-deny");
+        repo.write("other/x.rs", "")
+            .write(
+                ".arch/system.arch",
+                "component Core  at src/*.rs   @human #accepted\n\
+                 component Blob  at src/blob/** @human #accepted\n\
+                 component Other at other/**    @human #accepted\n\
+                 allow Blob -> Other\n\
+                 deny  Blob -> Core\n",
+            );
+        let (edges, _) = repo.judge();
+        assert!(edges.iter().any(|e| e.starts_with("Blob -> Core")), "nhận: {edges:#?}");
+    }
+}

@@ -11,6 +11,7 @@ use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolved {
@@ -61,7 +62,38 @@ pub struct Resolver {
     c_includes: OnceCell<Vec<String>>,
     /// Tên thật trong những thư mục đã dò, để kiểm hoa thường. Xem [`exact_case`].
     listing: RefCell<Listing>,
+    /// File gốc crate của từng gói Rust, theo thư mục gói. Đọc một lần.
+    rust_roots: RefCell<HashMap<String, Rc<Vec<RootFile>>>>,
+    /// Gốc crate của từng file đã hỏi. Một file có nhiều câu `use`.
+    crate_of: RefCell<HashMap<String, Option<CrateRoot>>>,
+    /// Tên mà một file gốc crate đưa vào phạm vi bằng `use`. Đọc một lần.
+    root_bindings: RefCell<HashMap<String, Bindings>>,
 }
+
+/// `(tên, đường dẫn)` mà một file đưa vào phạm vi. Xem [`crate::scan::rust_bindings`].
+type Bindings = Rc<Vec<(String, String)>>;
+
+/// Một file gốc crate trong gói: `src/lib.rs`, `src/main.rs`, mỗi binary, mỗi
+/// test, ví dụ, bench, và những đường dẫn khai trong `Cargo.toml`.
+struct RootFile {
+    file: String,
+    /// Nơi các module con của nó nằm: thư mục chứa file gốc.
+    dir: String,
+    lib: bool,
+}
+
+/// Crate chứa một file Rust.
+#[derive(Clone)]
+struct CrateRoot {
+    /// `None` khi gói không có file gốc nào ở chỗ quen thuộc: module vẫn tìm
+    /// trong `dir` như trước, chỉ item ở gốc là không có đích.
+    file: Option<String>,
+    dir: String,
+}
+
+/// Re-export của re-export thì đi tiếp; `pub use crate::X` trỏ vào chính nó
+/// thì dừng ở đây.
+const MAX_REEXPORT_DEPTH: usize = 3;
 
 /// Tên thật của các mục trong từng thư mục đã đọc. `None`: không đọc được.
 pub(crate) type Listing = HashMap<PathBuf, Option<HashSet<OsString>>>;
@@ -124,6 +156,9 @@ impl Resolver {
             npm_packages: OnceCell::new(),
             c_includes: OnceCell::new(),
             listing: RefCell::new(HashMap::new()),
+            rust_roots: RefCell::new(HashMap::new()),
+            crate_of: RefCell::new(HashMap::new()),
+            root_bindings: RefCell::new(HashMap::new()),
         }
     }
 
@@ -324,26 +359,39 @@ impl Resolver {
     /// một crate bên ngoài, hoặc nằm trong `mod` viết lồng. Không có trường
     /// hợp thứ tư — trình biên dịch đã lo.
     fn rust(&self, importer: &str, spec: &str) -> Resolved {
+        self.rust_at(importer, spec, 0)
+    }
+
+    fn rust_at(&self, importer: &str, spec: &str, depth: usize) -> Resolved {
         // `split` luôn trả ít nhất một phần tử, kể cả với chuỗi rỗng.
         let mut parts: Vec<&str> = spec.split("::").collect();
-        let crate_src = self.crate_src(importer);
+        let root = self.crate_root(importer);
 
         let base = match parts[0] {
             "crate" => {
                 parts.remove(0);
-                crate_src
+                // File dùng chung cho nhiều crate — `tests/common/mod.rs` — thì
+                // không biết `crate::` là crate nào. Không đoán.
+                match &root {
+                    Some(r) => r.dir.clone(),
+                    None => return Resolved::Internal,
+                }
             }
             "self" => {
                 parts.remove(0);
-                module_dir(importer)
+                self.module_dir(importer)
             }
             "super" => {
-                parts.remove(0);
-                let d = module_dir(importer);
-                match d.rsplit_once('/') {
-                    Some((up, _)) => up.to_string(),
-                    None => return Resolved::Internal,
+                let mut d = self.module_dir(importer);
+                while parts.first() == Some(&"super") {
+                    parts.remove(0);
+                    d = match d.rsplit_once('/') {
+                        Some((up, _)) => up.to_string(),
+                        None if !d.is_empty() => String::new(),
+                        None => return Resolved::Internal,
+                    };
                 }
+                d
             }
             "std" | "core" | "alloc" => return Resolved::Package(parts[0].to_string()),
             // Crate anh em trong workspace, rồi tới edition 2015 cho phép
@@ -353,49 +401,198 @@ impl Resolver {
                 if let Some((_, src)) = self.rust_crates.iter().find(|(n, _)| n == other) {
                     let src = src.clone();
                     parts.remove(0);
-                    return match self.rust_module(&src, &parts) {
-                        Some(found) => Resolved::Path(found),
+                    return match self.rust_module(&src, &parts, None, depth) {
+                        Some(found) => found,
                         // Crate anh em có thật nhưng không lần ra module: đích
                         // vẫn là crate đó, lấy chính thư mục src của nó.
                         None => Resolved::Path(src),
                     };
                 }
-                return match self.rust_module(&crate_src, &parts) {
-                    Some(found) => Resolved::Path(found),
-                    None => Resolved::Package(other.to_string()),
-                };
+                // Không dùng file gốc ở đây: `serde::X` không có module file
+                // nào thì là crate ngoài, không phải một item ở gốc crate.
+                let base = root.map_or_else(|| self.crate_src(importer), |r| r.dir);
+                return self
+                    .rust_module(&base, &parts, None, depth)
+                    .unwrap_or_else(|| Resolved::Package(other.to_string()));
             }
         };
-        match self.rust_module(&base, &parts) {
-            Some(found) => Resolved::Path(found),
-            // `crate::`, `self::` và `super::` luôn nằm trong crate này, và
-            // trình biên dịch đã bảo đảm đường dẫn tồn tại. Không ra file nào
-            // nghĩa là `mod` viết lồng trong file — không có cạnh để vẽ.
-            None => Resolved::Internal,
-        }
+        // Không ra file nào nghĩa là `mod` viết lồng trong một file không phải
+        // gốc crate — không có cạnh để vẽ.
+        self.rust_module(&base, &parts, root.as_ref(), depth).unwrap_or(Resolved::Internal)
     }
 
     /// Đoạn cuối của `use` thường là tên item chứ không phải module, và không
     /// biết trước có bao nhiêu đoạn như vậy. Thử từ đường dẫn dài nhất xuống
     /// ngắn nhất, lấy cái đầu tiên ra file.
-    fn rust_module(&self, base: &str, parts: &[&str]) -> Option<String> {
+    ///
+    /// Tới chính thư mục gốc crate thì module là file gốc — `lib.rs`, không
+    /// phải `src.rs` hay `src/mod.rs` — và tên còn lại là một item ở gốc. Xem
+    /// [`Resolver::root_item`].
+    fn rust_module(
+        &self,
+        base: &str,
+        parts: &[&str],
+        root: Option<&CrateRoot>,
+        depth: usize,
+    ) -> Option<Resolved> {
         // `take == 0` là chính `base`: `use super::Import` không có đoạn module
         // nào sau `super`, nên đích là chính module cha.
         for take in (0..=parts.len()).rev() {
             let joined = parts[..take].join("/");
             let path = match (base.is_empty(), take) {
-                (true, 0) => continue,
+                (true, 0) => String::new(),
                 (true, _) => joined,
                 (false, 0) => base.to_string(),
                 (false, _) => format!("{base}/{joined}"),
             };
+            if take == 0
+                && let Some(r) = root
+                && r.dir == path
+            {
+                return r.file.as_deref().map(|f| self.root_item(f, parts.first().copied(), depth));
+            }
+            if path.is_empty() {
+                continue;
+            }
             if let Some(found) =
                 self.first_file([format!("{path}.rs"), format!("{path}/mod.rs")])
             {
-                return Some(found);
+                return Some(Resolved::Path(found));
             }
         }
         None
+    }
+
+    /// `name` là một item ở gốc crate. Đích là nơi nó được định nghĩa: viết
+    /// thẳng trong file gốc thì là file gốc; do file gốc nhập vào bằng `use` —
+    /// `pub use error::Error` — thì là nơi `use` đó trỏ tới.
+    ///
+    /// Không nhìn xuyên thì file gốc thành chỗ rửa phụ thuộc: `deny Scan ->
+    /// Model` lách được bằng `use crate::Document`, vì `Document` đi qua
+    /// `lib.rs`. Ở tokio, 56 trên 67 câu `use crate::<item gốc>` là re-export.
+    fn root_item(&self, root_file: &str, name: Option<&str>, depth: usize) -> Resolved {
+        if let Some(name) = name
+            && depth < MAX_REEXPORT_DEPTH
+        {
+            let bindings = self.bindings_of(root_file);
+            if let Some((_, spec)) = bindings.iter().find(|(bound, _)| bound == name) {
+                let found = self.rust_at(root_file, spec, depth + 1);
+                if matches!(found, Resolved::Path(_) | Resolved::Package(_)) {
+                    return found;
+                }
+            }
+        }
+        Resolved::Path(root_file.to_string())
+    }
+
+    fn bindings_of(&self, file: &str) -> Bindings {
+        if let Some(found) = self.root_bindings.borrow().get(file) {
+            return Rc::clone(found);
+        }
+        let text = std::fs::read_to_string(self.root.join(file)).unwrap_or_default();
+        let found = Rc::new(crate::scan::rust_bindings(crate::strip_bom(&text)));
+        self.root_bindings.borrow_mut().insert(file.to_string(), Rc::clone(&found));
+        found
+    }
+
+    /// Thư mục chứa module con của file này: `src/order.rs` và
+    /// `src/order/mod.rs` đều là `src/order`. File gốc crate thì khác — module
+    /// con của `src/lib.rs` nằm ở `src/`, không phải `src/lib/`.
+    fn module_dir(&self, importer: &str) -> String {
+        match self.crate_root(importer) {
+            Some(CrateRoot { file: Some(f), dir }) if f == importer => dir,
+            _ => module_dir(importer),
+        }
+    }
+
+    /// Crate chứa `importer`.
+    ///
+    /// Mỗi file gốc — thư viện, từng binary, từng test tích hợp, từng ví dụ —
+    /// là một crate riêng, và `crate::` trong đó trỏ về gốc của chính nó. Một
+    /// file không phải gốc thuộc về gốc có thư mục là tiền tố dài nhất của nó.
+    /// `lib.rs` và `main.rs` cùng nằm trong `src/` thì module thuộc thư viện.
+    /// Nhiều gốc chung một thư mục mà không cái nào là thư viện — `tests/` có
+    /// mười file test và một `tests/common/` dùng chung — thì không đoán.
+    fn crate_root(&self, importer: &str) -> Option<CrateRoot> {
+        if let Some(found) = self.crate_of.borrow().get(importer) {
+            return found.clone();
+        }
+        let found = self.find_crate_root(importer);
+        self.crate_of.borrow_mut().insert(importer.to_string(), found.clone());
+        found
+    }
+
+    fn find_crate_root(&self, importer: &str) -> Option<CrateRoot> {
+        let pkg = self.crate_src(importer);
+        let pkg = pkg.strip_suffix("src").unwrap_or(&pkg).trim_end_matches('/').to_string();
+        let at = |rel: &str| if pkg.is_empty() { rel.to_string() } else { format!("{pkg}/{rel}") };
+
+        // `build.rs` là một crate, nhưng không sở hữu thư mục nào.
+        if importer == at("build.rs") {
+            return Some(CrateRoot { file: Some(importer.to_string()), dir: pkg });
+        }
+        let roots = self.package_roots(&pkg);
+        if let Some(r) = roots.iter().find(|r| r.file == importer) {
+            return Some(CrateRoot { file: Some(r.file.clone()), dir: r.dir.clone() });
+        }
+        let inside = |dir: &str| dir.is_empty() || importer.starts_with(&format!("{dir}/"));
+        if let Some(longest) = roots.iter().filter(|r| inside(&r.dir)).map(|r| r.dir.len()).max() {
+            let same: Vec<&RootFile> =
+                roots.iter().filter(|r| inside(&r.dir) && r.dir.len() == longest).collect();
+            let pick = match same.as_slice() {
+                [one] => Some(*one),
+                many => many.iter().find(|r| r.lib).copied(),
+            };
+            return pick.map(|r| CrateRoot { file: Some(r.file.clone()), dir: r.dir.clone() });
+        }
+        // Không có gốc nào ở chỗ quen thuộc: vẫn tìm module trong `src/`.
+        let src = at("src");
+        inside(&src).then_some(CrateRoot { file: None, dir: src })
+    }
+
+    /// Mọi file gốc crate của gói ở `pkg`, đã lọc còn những file có thật.
+    fn package_roots(&self, pkg: &str) -> Rc<Vec<RootFile>> {
+        if let Some(found) = self.rust_roots.borrow().get(pkg) {
+            return Rc::clone(found);
+        }
+        let at = |rel: &str| if pkg.is_empty() { rel.to_string() } else { format!("{pkg}/{rel}") };
+        let mut candidates: Vec<(String, bool)> = Vec::new();
+        // Đường dẫn khai trong `Cargo.toml` trước — ripgrep đặt binary chính ở
+        // `crates/core/main.rs`, và gói đó không có `src/` nào.
+        for (kind, path) in cargo_targets(&self.root.join(at("Cargo.toml"))) {
+            if let Some(file) = normalize(&at(&path)) {
+                candidates.push((file, kind == "lib"));
+            }
+        }
+        candidates.push((at("src/lib.rs"), true));
+        candidates.push((at("src/main.rs"), false));
+        for dir in ["src/bin", "tests", "examples", "benches"] {
+            let Ok(entries) = std::fs::read_dir(self.root.join(at(dir))) else { continue };
+            let mut names: Vec<(String, bool)> = entries
+                .flatten()
+                .filter_map(|e| Some((e.file_name().into_string().ok()?, e.path().is_dir())))
+                .collect();
+            // Thứ tự của `read_dir` phụ thuộc hệ thống file.
+            names.sort();
+            for (name, is_dir) in names {
+                if is_dir {
+                    candidates.push((at(&format!("{dir}/{name}/main.rs")), false));
+                } else if name.ends_with(".rs") {
+                    candidates.push((at(&format!("{dir}/{name}")), false));
+                }
+            }
+        }
+
+        let mut roots: Vec<RootFile> = Vec::new();
+        for (file, lib) in candidates {
+            if roots.iter().any(|r| r.file == file) || !self.exists(&file) {
+                continue;
+            }
+            roots.push(RootFile { dir: dir_of(&file).to_string(), file, lib });
+        }
+        let roots = Rc::new(roots);
+        self.rust_roots.borrow_mut().insert(pkg.to_string(), Rc::clone(&roots));
+        roots
     }
 
     /// Thư mục `src` của crate chứa file này. Đi ngược lên tìm `Cargo.toml` để
@@ -467,6 +664,38 @@ fn collect_manifests(root: &Path, prefix: &str, depth: usize, out: &mut Vec<(Str
             collect_manifests(root, &next, depth + 1, out);
         }
     }
+}
+
+/// `(loại, đường dẫn)` của mỗi target khai đường dẫn riêng trong `Cargo.toml`:
+/// `[lib]`, `[[bin]]`, `[[test]]`, `[[example]]`, `[[bench]]`.
+fn cargo_targets(manifest: &Path) -> Vec<(&'static str, String)> {
+    let Ok(text) = std::fs::read_to_string(manifest) else { return Vec::new() };
+    let mut kind = None;
+    let mut out = Vec::new();
+    for line in crate::strip_bom(&text).lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') {
+            kind = match line {
+                "[lib]" => Some("lib"),
+                "[[bin]]" => Some("bin"),
+                "[[test]]" => Some("test"),
+                "[[example]]" => Some("example"),
+                "[[bench]]" => Some("bench"),
+                _ => None,
+            };
+            continue;
+        }
+        if let Some(kind) = kind
+            && let Some(value) = line.strip_prefix("path")
+            && let Some(value) = value.trim_start().strip_prefix('=')
+        {
+            let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
+            if !value.is_empty() {
+                out.push((kind, value.to_string()));
+            }
+        }
+    }
+    out
 }
 
 fn package_name(manifest: &Path) -> Option<String> {

@@ -286,6 +286,16 @@ fn last_segment(word: &str) -> Option<&str> {
 }
 
 /// Đọc import của một file, nếu phần mở rộng thuộc ngôn ngữ đã hỗ trợ.
+/// Tên mà các câu `use` của một file Rust đưa vào phạm vi, kèm đường dẫn mỗi
+/// tên trỏ tới: `pub use error::Error as Failure` cho `("Failure",
+/// "error::Error")`. `*` và `as _` không đưa tên nào vào.
+///
+/// Bộ phân giải đọc chúng ở file gốc crate, để biết `crate::Error` thật ra là
+/// `crate::error::Error`.
+pub fn rust_bindings(src: &str) -> Vec<(String, String)> {
+    rustlang::bindings(&lexer::lex(src, &Lang::Rust.config()))
+}
+
 pub fn imports_for(path: &str, src: &str) -> Option<(Lang, Vec<Import>)> {
     let lang = Lang::for_path(path)?;
     Some((lang, lang.imports(src)))

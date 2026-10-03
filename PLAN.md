@@ -9,8 +9,18 @@ Cập nhật 2026-10-03.
 
 ### Đã xong, có bằng chứng
 
-- **343 test, clippy sạch với `-D warnings`, 0 dependency ngoài std.** Biên
+- **360 test, clippy sạch với `-D warnings`, 0 dependency ngoài std.** Biên
   nhận ghi bằng `receipt.py` ngày 2026-10-03.
+- **Rust: `use crate::X` với `X` ở gốc crate giờ có đích.** Trước đó khoảng
+  470 câu `use` như vậy ở năm repo Rust của bộ đo không sinh cạnh nào, không
+  cảnh báo nào. Đích là nơi định nghĩa: viết thẳng trong file gốc thì là file
+  gốc, re-export thì nhìn xuyên tới module thật. Gốc crate tính theo từng file
+  (thư viện, binary, test tích hợp, ví dụ, đường dẫn trong `Cargo.toml`). Bộ
+  quét đọc cây `use` đúng nghĩa và theo dõi `mod` lồng. Bộ đo thêm 5 cạnh, cả 5
+  đã lần ra tới dòng mã: rusqlite `Blob -> Core`, `Blob -> Util`, `Util ->
+  Core`; ripgrep `Ignore -> Globset`, `Regex -> Matcher` — hai cái sau đến từ
+  kiểu `use { a::B, c::D };` mà bộ quét cũ trả về rỗng. Vẫn 0 bất nhất, 0 cảnh
+  báo luật, 350/350; thời gian `check` trong ngưỡng nhiễu.
 - **Repo ở GitHub: [tdHuy22/archctl](https://github.com/tdHuy22/archctl),
   private.** Lần chạy CI đầu tiên trên runner thật (run 37108650598): 4/4 job
   đạt, 70 giây, và số liệu bộ đo trên Linux khớp macOS — trừ một cột, xem dòng
@@ -55,12 +65,7 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-1. **Rust: item ở gốc crate không sinh cạnh.** `use crate::{Connection,
-   Result}` không ra cạnh nào và không được báo, nên một `deny` sẽ bỏ sót nó
-   trong im lặng — đã kiểm trên `rusqlite`. Sửa đúng cần biết gốc crate của
-   từng file, và sẽ đổi luật của chính archctl cùng số liệu các repo Rust. Chi
-   tiết ở [docs/check.md](docs/check.md), mục "Giới hạn khác đã biết".
-2. **CI chỉ báo, không chặn.** Repo private trên GitHub Free không có branch
+1. **CI chỉ báo, không chặn.** Repo private trên GitHub Free không có branch
    protection hay ruleset (API trả 403 "Upgrade to GitHub Pro or make this
    repository public"), nên job đỏ không ngăn được commit vào `main`. Cần người
    quyết: để public, lên Pro, hoặc chấp nhận CI là lời nhắc. Xem

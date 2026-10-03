@@ -176,6 +176,91 @@ fn rust_use_voi_ngoac_nhon_duoc_tach_ra() {
     assert_eq!(specs(Lang::Rust, src), ["crate::decode::Packet", "crate::decode::Header"]);
 }
 
+/// Tên sau `as` là tên mới, không phải một thành viên. Bản cũ coi nó là
+/// thành viên: `use crate::{error as err}` sinh thêm `crate::err` — một module
+/// không tồn tại, mà một khi `crate::X` biết trỏ về gốc crate thì nó thành một
+/// cạnh giả tới `lib.rs`.
+#[test]
+fn rust_ten_sau_as_khong_phai_thanh_vien() {
+    let src = "use crate::{error as err, Foo as _};\nuse crate::x::Y as Z;\n";
+    assert_eq!(specs(Lang::Rust, src), ["crate::error", "crate::Foo", "crate::x::Y"]);
+}
+
+/// Ngoặc lồng giữ tiền tố của mình. Bản cũ cho `crate::a::C` thay vì
+/// `crate::a::b::C`: một đường dẫn sai, phân giải ra một file sai.
+#[test]
+fn rust_ngoac_long_giu_tien_to() {
+    let src = "use crate::a::{b::{C, D as Dd}, self};\n";
+    assert_eq!(specs(Lang::Rust, src), ["crate::a::b::C", "crate::a::b::D", "crate::a"]);
+}
+
+#[test]
+fn rust_ngoac_o_dau_va_hai_cham_dan_dau() {
+    assert_eq!(specs(Lang::Rust, "use {crate::A, crate::b::C};\n"), ["crate::A", "crate::b::C"]);
+    assert_eq!(specs(Lang::Rust, "use ::std::io;\n"), ["std::io"]);
+}
+
+/// Tên mà mỗi câu `use` đưa vào phạm vi. Bộ phân giải đọc chúng ở file gốc
+/// crate để biết `crate::Error` thật ra là `crate::error::Error`.
+#[test]
+fn rust_ten_duoc_dua_vao_pham_vi() {
+    let src = "\
+use crate::Error;
+pub use self::error::{Error as Failure, Code};
+pub use libsqlite3_sys as ffi;
+use crate::a::{b::{C, D as Dd}, self};
+pub use crate::model::*;
+use crate::x as _;
+extern crate serde;
+";
+    let got = arch_core::scan::rust_bindings(src);
+    assert_eq!(
+        got,
+        [
+            ("Error".to_string(), "crate::Error".to_string()),
+            ("Failure".into(), "self::error::Error".into()),
+            ("Code".into(), "self::error::Code".into()),
+            ("ffi".into(), "libsqlite3_sys".into()),
+            ("C".into(), "crate::a::b::C".into()),
+            ("Dd".into(), "crate::a::b::D".into()),
+            ("a".into(), "crate::a".into()),
+            ("serde".into(), "serde".into()),
+        ]
+    );
+}
+
+/// Trong `mod tests { ... }` viết lồng, `super` là module của chính file, không
+/// phải module cha của nó. Không biết điều đó thì `#[cfg(test)] mod tests { use
+/// super::*; }` — có ở gần như mọi file Rust — thành một cạnh tới module cha,
+/// và ở module cấp một là một cạnh giả tới `lib.rs`.
+#[test]
+fn rust_mod_long_doi_super_va_self_ve_module_cua_file() {
+    let cases = [
+        ("mod tests { use super::*; }", vec!["self"]),
+        ("mod tests { use super::super::X; }", vec!["super::X"]),
+        ("mod a { mod b { use super::X; } }", vec!["self::a::X"]),
+        ("mod tests { use self::helper::Y; }", vec!["self::tests::helper::Y"]),
+        ("mod tests { use crate::x::Y; }", vec!["crate::x::Y"]),
+        // Thân hàm không phải module.
+        ("fn f() { use super::X; }", vec!["super::X"]),
+        // `mod x;` khai một module file, không mở khối nào.
+        ("mod decl;\nuse super::Q;", vec!["super::Q"]),
+        // Khối đã đóng thì trở lại module của file.
+        ("mod t { fn g() {} }\nuse super::Z;", vec!["super::Z"]),
+    ];
+    for (src, want) in cases {
+        assert_eq!(specs(Lang::Rust, src), want, "{src}");
+    }
+}
+
+/// Chỉ `use` ở tầng ngoài cùng của file mới đưa tên vào phạm vi của file — tức
+/// vào `crate::` khi đó là file gốc crate.
+#[test]
+fn rust_ten_trong_ham_hay_mod_long_khong_vao_pham_vi_file() {
+    let src = "mod inner { pub use crate::x::Y; }\nfn f() { use a::B; }\npub use c::D;\n";
+    assert_eq!(arch_core::scan::rust_bindings(src), [("D".to_string(), "c::D".to_string())]);
+}
+
 #[test]
 fn rust_lifetime_khong_bi_nham_la_chuoi() {
     // `'a` không đóng. Nếu lexer coi nó là chuỗi thì sẽ nuốt hết phần sau và
