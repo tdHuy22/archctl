@@ -114,3 +114,25 @@ giữ điều đó đúng qua những lần sửa sau.
 
 CODEOWNERS bắt buộc một người cụ thể phê duyệt mọi thay đổi trong `.arch/`.
 CI kiểm mã có theo luật không; CODEOWNERS kiểm ai được đổi luật.
+
+## CI chỉ chặn được khi nhánh được bảo vệ
+
+Một job đỏ tự nó không ngăn được gì. Nó chặn merge chỉ khi nhánh `main` bật
+*required status checks*, và CODEOWNERS chỉ bắt buộc khi bật *require review
+from code owners* — cả hai đều là branch protection hoặc ruleset.
+
+Trên GitHub Free, repo **private** không có hai thứ đó. Repo này là một ví dụ:
+
+```
+$ gh api repos/<chủ>/<repo>/branches/main/protection
+Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)
+```
+
+Khi đó CI vẫn chạy và vẫn báo, nhưng là **báo** chứ không phải **chặn**: một
+commit đẩy thẳng lên `main` vẫn vào, đỏ hay xanh. Với dự án mà agent tự đẩy
+được lên `main`, đó là khác biệt giữa một chốt chặn và một lời nhắc. Muốn chặn
+thật thì repo phải public, hoặc tài khoản phải lên gói có branch protection cho
+repo private.
+
+macOS cũng tốn hơn trên repo private: phút dùng runner macOS tính khoảng gấp
+mười lần Linux, còn repo public thì không tính phút.
