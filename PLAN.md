@@ -9,7 +9,7 @@ Cập nhật 2026-10-03.
 
 ### Đã xong, có bằng chứng
 
-- **319 test, clippy sạch với `-D warnings`, 0 dependency ngoài std.** Biên
+- **322 test, clippy sạch với `-D warnings`, 0 dependency ngoài std.** Biên
   nhận ghi bằng `receipt.py` ngày 2026-10-03.
 - **Thử trên 10 repo thật** (hugo, tokio, ripgrep, vue core, flask, curl,
   redis, pydantic-core, zstd-rs, rusqlite) — 5078 file, 5 ngôn ngữ. Mỗi repo
@@ -21,6 +21,9 @@ Cập nhật 2026-10-03.
   `archctl verify` chạy và ghi biên nhận, `archctl check` nhắc khi biên nhận
   đã cũ hơn mã hoặc luật. Chỉ `verify` thực thi lệnh; `check` không bao giờ,
   và `propose`/`accept` đều từ chối đề xuất mang theo lệnh shell.
+- **Tự áp luật lên chính nó.** `.arch/system.arch` ở repo này viết tay từ
+  thiết kế; `check` ở gốc ra 0 vi phạm, 0 cảnh báo. Test `dogfood.rs` chạy
+  `arch_core::check` trên repo nên vi phạm kiến trúc làm `cargo test` đổ.
 - Hiệu năng: 2000 file TypeScript 57ms; đường hook (`check <file>`) 11ms;
   cây 5078 file: `init` 1.57s, `check` 1.08s, 35 MB.
 
