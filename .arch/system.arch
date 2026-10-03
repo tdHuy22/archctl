@@ -1,0 +1,50 @@
+# Kiến trúc của chính archctl, và archctl tự áp luật này lên mình.
+#
+# Đây vừa là ví dụ thật nhất của công cụ, vừa là lan can cho chính nó: thêm
+# một `use` sai hướng là `cargo test` báo ngay, vì có một test chạy
+# `arch_core::check` trên repo này.
+
+component Model   at crates/arch-core/src/model.rs, crates/arch-core/src/parser.rs, crates/arch-core/src/validate.rs, crates/arch-core/src/diag.rs   @human #accepted
+component Scan    at crates/arch-core/src/scan/**                                                                                                    @human #accepted
+component Resolve at crates/arch-core/src/resolve.rs, crates/arch-core/src/cbuild.rs                                                                 @human #accepted
+component Check   at crates/arch-core/src/check.rs, crates/arch-core/src/baseline.rs, crates/arch-core/src/verify.rs                                 @human #accepted
+component View    at crates/arch-core/src/layout.rs, crates/arch-core/src/export.rs, crates/arch-core/src/diff.rs                                    @human #accepted
+component Setup   at crates/arch-core/src/discover.rs, crates/arch-core/src/protocol.rs                                                              @human #accepted
+component Util    at crates/arch-core/src/glob.rs, crates/arch-core/src/json.rs, crates/arch-core/src/jsonc.rs                                       @human #accepted
+component Lib     at crates/arch-core/src/lib.rs                                                                                                     @human #accepted
+component Cli     at crates/archctl/src/**                                                                                                           @human #accepted
+component Tests   at crates/*/tests/**                                                                                                               @human #accepted
+
+# Dòng chảy một chiều: đọc luật → quét mã → phân giải → đối chiếu → trình bày.
+# `lib.rs` là mặt tiền của crate: nó re-export nên được phép chạm mọi thứ.
+allow Lib     -> Model, Check, View, Setup, Scan, Resolve, Util
+allow Model   -> Util
+allow Scan    -> Util
+allow Resolve -> Scan, Util
+allow Check   -> Model, Scan, Resolve, Util
+allow View    -> Model, Check, Util
+allow Setup   -> Model, Check, Resolve, Scan, Util
+allow Cli     -> Model, Check, View, Setup, Scan, Resolve, Util
+allow Tests   -> Model, Check, View, Setup, Scan, Resolve, Util, Cli
+
+# Bộ quét không được biết gì về luật: nó chỉ nhận một danh sách tên cần tìm.
+# Nếu nó đọc được mô hình thì mỗi thay đổi trong DSL sẽ kéo theo thay đổi
+# trong lexer — chỗ dễ sai nhất của cả hệ thống, và cũng là chỗ khó test nhất.
+deny Scan -> Model, Check, View, Setup, Cli
+
+# `glob`, `json`, `jsonc` là tiện ích thuần — chúng không được biết gì về phần
+# còn lại. Một `allow` rỗng nghĩa là "đã xét, và không được gọi ai cả".
+allow Util -> Lib
+deny  Util -> Model, Check, View, Setup, Scan, Resolve, Cli
+
+# Lõi không gọi ngược lên CLI. Giữ `arch-core` dùng được như một thư viện.
+deny * -> Cli except Tests
+
+# Không gói ngoài nào cả, kể cả ở đây. Mỗi dependency thêm vào là một bề mặt
+# tấn công thêm, vì công cụ này chạy trong repo người dùng và trong vòng lặp
+# của agent.
+verify no_deps runs "test \"$(grep -c '^\[\[package\]\]' Cargo.lock)\" -eq 2"   @human #accepted
+verify tests   runs "cargo test --quiet"                                                                        @human #accepted
+verify lint    runs "cargo clippy --all-targets --quiet -- -D warnings"                                         @human #accepted
+
+invariant algo [system] không dependency ngoài std verify no_deps   @human #accepted

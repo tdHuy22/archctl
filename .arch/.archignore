@@ -1,0 +1,4 @@
+# Dự án mẫu có file luật riêng; chúng không phải mã của archctl.
+examples/**
+# Khung mà `archctl init` sao chép sang dự án người dùng.
+templates/**

@@ -204,6 +204,30 @@ fn whitespace_tokens(s: &str) -> Vec<(usize, &str)> {
     out
 }
 
+/// Gỡ `\"` thành `"` và `\\` thành `\`.
+///
+/// Chỉ hai cái đó. Mọi dấu gạch chéo khác giữ nguyên để shell nhận được —
+/// `grep '^\[dependencies\]'` phải tới được grep đúng như đã viết.
+fn unescape_quotes(command: &str) -> String {
+    let mut out = String::with_capacity(command.len());
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some(next @ ('"' | '\\')) => out.push(next),
+            Some(next) => {
+                out.push('\\');
+                out.push(next);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 /// `verify property_test runs "cargo test --test props"`
 ///
 /// Lệnh nằm trong dấu nháy kép, vì nó gần như luôn có khoảng trắng và vì dấu
@@ -241,7 +265,7 @@ fn parse_verify(
     }
     doc.verifies.push(Verify {
         name: name.to_string(),
-        command: command.to_string(),
+        command: unescape_quotes(command),
         meta,
     });
 }

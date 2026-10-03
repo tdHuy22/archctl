@@ -162,6 +162,25 @@ https://claude.ai/code/artifact/2b26df5d-d6b0-40d0-a398-7e574c7d1387
   ghi đè được file luật. Cưỡng chế thật nằm ở CI, CODEOWNERS trên `.arch/**`, và
   việc tên người duyệt bị ghi vào nhật ký.
 
+## Nó tự áp luật lên chính nó
+
+`.arch/system.arch` ở repo này mô tả kiến trúc của chính archctl, viết tay từ
+thiết kế chứ không phải do `init --from-code` đoán. Một test chạy
+`arch_core::check` trên repo, nên thêm một `use` sai hướng là `cargo test` báo
+ngay:
+
+```
+vi phạm kiến trúc:
+  Scan -> Model (crates/arch-core/src/scan/mod.rs:9 crate::model::Document)
+```
+
+Luật đáng chú ý nhất: **bộ quét không được biết gì về luật.** Nó chỉ nhận một
+danh sách tên cần tìm. Nếu nó đọc được mô hình thì mỗi thay đổi trong DSL sẽ
+kéo theo thay đổi trong lexer — chỗ dễ sai nhất của cả hệ thống.
+
+Và `verify no_deps` đếm `[[package]]` trong `Cargo.lock`: phải đúng bằng hai,
+là hai crate của chính workspace.
+
 ## Cấu trúc repo
 
 ```
