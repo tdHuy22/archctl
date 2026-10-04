@@ -9,6 +9,15 @@ Cập nhật 2026-10-04.
 
 ### Đã xong, có bằng chứng
 
+- **PEP 420 có repo thứ hai: matplotlib.** Hình dạng khác otel:
+  một distribution, gốc import là `lib/` chứ không `src/`, `mpl_toolkits/`
+  không có `__init__.py` nằm cạnh gói thường `matplotlib`. 76 cạnh từ
+  `galleries/`, `doc/` sang `Lib` đi qua `mpl_toolkits.*`. Bộ đo: 1219 file, 0
+  bất nhất, 35/35. Hai cảnh báo `.font_manager`/`.ft2font` ở
+  `lib/matplotlib/backends/_backend_pdf_ps.py:25-26` là lỗi của chính
+  matplotlib (phải là `..`), nằm trong `if TYPE_CHECKING:` nên không bao giờ
+  chạy; archctl phân giải đúng. jaraco.text đã xét rồi bỏ: 9 file.
+
 - **Cạnh cgo giữa hai component giờ được đo.** Thêm libbpfgo
   (Go ở gốc, submodule C `libbpf/`) vào bộ đo; nó lộ ba chỗ hỏng, cả ba đã
   sửa, có test:
@@ -125,7 +134,9 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-1. PEP 420 mới có một repo (opentelemetry-python); chưa có dự phòng.
+1. Chưa có repo PEP 420 lồng hai cấp nhiều distribution (`google/cloud/<pkg>`)
+   vừa cỡ: google-cloud-python, azure-sdk, airflow đều gần 1 GB. Hướng chưa
+   thử: các repo `googleapis/python-*` đơn lẻ.
 
 Không có việc nào đang dở. **Đã quyết (2026-10-03): giữ repo private, CI là
 lời nhắc chứ không chặn** — gói GitHub Free không có branch protection cho repo
