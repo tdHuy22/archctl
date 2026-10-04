@@ -4,7 +4,7 @@
 python3 bench/bench.py
 ```
 
-Một lệnh: dựng archctl bản release, tải hai mươi ba repo ở đúng commit đã ghim
+Một lệnh: dựng archctl bản release, tải hai mươi bốn repo ở đúng commit đã ghim
 trong [repos.tsv](repos.tsv), rồi chạy hai phép thử trên từng repo. Chỉ cần
 Python 3 và git, không gói Python nào ngoài thư viện chuẩn.
 
@@ -33,7 +33,14 @@ không kéo submodule, nên zstd-rs từng vào bộ đo không có dòng C nào
 chọn chính vì phần C vendor. Submodule được tải ở đúng commit repo cha ghi lại,
 URL đọc từ `.gitmodules` và cũng phải là `https://`.
 
-Repo tải về `target/bench/repos/` (khoảng 690 MB), bản làm việc ở
+Cột sparse cho monorepo quá lớn để tải hết: chỉ những thư mục liệt kê (cùng
+file nằm thẳng ở gốc) được tải. google-cloud-python đủ là 1,3 GB và 45 nghìn
+file Python; mười một package của nó là 83 MB. Phép đếm số file bỏ những file
+git đánh dấu nằm ngoài vùng sparse, và một thư mục sparse không có ở commit
+đã ghim là mã thoát 2 — không thì một tên gõ sai cho ra một repo rỗng mà vẫn
+đạt.
+
+Repo tải về `target/bench/repos/` (khoảng 920 MB), bản làm việc ở
 `target/bench/work/`, kết quả chi tiết ở `target/bench/results.json`. Tất cả
 nằm trong `target/`: ngoài git, bộ quét của archctl bỏ qua, `cargo clean` dọn.
 

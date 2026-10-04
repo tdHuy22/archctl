@@ -9,6 +9,15 @@ Cập nhật 2026-10-04.
 
 ### Đã xong, có bằng chứng
 
+- **Bộ đo tải được một phần monorepo (sparse), và có ca PEP 420 lồng hai
+  cấp.** `repos.tsv` thêm cột `sparse`; `bench.py` tải bằng
+  `--filter=blob:none` + `sparse-checkout --cone`, phép đếm bỏ file git đánh
+  dấu `S`, thư mục sparse gõ sai là mã thoát 2 (kể cả khi dùng lại cache),
+  sparse cùng submodule bị từ chối. google-cloud-python, 11 package (83 MB
+  thay vì 1,3 GB): `google/` và `google/cloud/` đều không có `__init__.py`,
+  1554 file, 11 component, 18 cạnh giữa distribution. 24 repo, 22638 file, 0
+  bất nhất, 840/840, `sabotage.py` 7/7; 22 repo cũ ra đúng số cũ.
+
 - **PEP 420 có repo thứ hai: matplotlib.** Hình dạng khác otel:
   một distribution, gốc import là `lib/` chứ không `src/`, `mpl_toolkits/`
   không có `__init__.py` nằm cạnh gói thường `matplotlib`. 76 cạnh từ
@@ -134,9 +143,8 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-1. Chưa có repo PEP 420 lồng hai cấp nhiều distribution (`google/cloud/<pkg>`)
-   vừa cỡ: google-cloud-python, azure-sdk, airflow đều gần 1 GB. Hướng chưa
-   thử: các repo `googleapis/python-*` đơn lẻ.
+1. Chưa có việc nào trong hàng đợi. Các repo `googleapis/python-*` đơn lẻ đã
+   archive và rỗng, nên ca lồng hai cấp dùng monorepo dạng sparse.
 
 Không có việc nào đang dở. **Đã quyết (2026-10-03): giữ repo private, CI là
 lời nhắc chứ không chặn** — gói GitHub Free không có branch protection cho repo

@@ -73,9 +73,10 @@ def load_repos():
         if not line.strip() or line.startswith("#"):
             continue
         cols = line.split("\t")
-        if len(cols) < 4:
-            die(f"repos.tsv:{n}: cần ít nhất bốn cột (tên, url, commit, submodule), có {len(cols)}")
-        name, url, sha, subs, *_ = cols
+        if len(cols) < 5:
+            die(f"repos.tsv:{n}: cần ít nhất năm cột (tên, url, commit, submodule, sparse), "
+                f"có {len(cols)}")
+        name, url, sha, subs, sparse, *_ = cols
         if not NAME.fullmatch(name) or ".." in name:
             die(f"repos.tsv:{n}: tên không hợp lệ: {name!r}")
         if not url.startswith("https://"):
@@ -83,23 +84,53 @@ def load_repos():
         if not SHA.fullmatch(sha):
             die(f"repos.tsv:{n}: commit phải là SHA đủ 40 ký tự, nhận {sha!r}")
         paths = [] if subs == "-" else subs.split(",")
-        for path in paths:
+        dirs = [] if sparse == "-" else sparse.split(",")
+        for kind, path in [("submodule", p) for p in paths] + [("sparse", d) for d in dirs]:
             if not SUBPATH.fullmatch(path) or ".." in path.split("/"):
-                die(f"repos.tsv:{n}: đường dẫn submodule không hợp lệ: {path!r}")
-        repos.append((name, url, sha, paths))
+                die(f"repos.tsv:{n}: đường dẫn {kind} không hợp lệ: {path!r}")
+        # Git chuẩn hoá `a/b/`, `a//b`, `a/./b`, tên trùng và thư mục lồng
+        # nhau, nên `sparse-checkout list` sẽ khác danh sách này và bản đã tải
+        # bị xoá rồi tải lại ở mỗi lần chạy.
+        for d in dirs:
+            if any(part in ("", ".") for part in d.split("/")):
+                die(f"repos.tsv:{n}: thư mục sparse phải viết chuẩn: {d!r}")
+            if dirs.count(d) > 1 or any(o.startswith(d + "/") for o in dirs):
+                die(f"repos.tsv:{n}: thư mục sparse trùng hoặc lồng nhau: {d!r}")
+        if paths and dirs:
+            die(f"repos.tsv:{n}: chưa hỗ trợ submodule cùng sparse")
+        repos.append((name, url, sha, paths, dirs))
     return repos
 
 
-def fetch(name, url, sha, dest: Path):
-    """Đúng commit đã ghim, không hơn. Trả về lỗi, hoặc None."""
-    if dest.exists() and git("rev-parse", "HEAD", cwd=dest).stdout.strip() == sha:
-        return None
+def sparse_dirs(dest: Path):
+    """Thư mục sparse đang có hiệu lực ở bản tải, `[]` nếu tải đủ."""
+    p = git("sparse-checkout", "list", cwd=dest)
+    return sorted(p.stdout.split()) if p.returncode == 0 else []
+
+
+def fetch(name, url, sha, dest: Path, sparse=()):
+    """Đúng commit đã ghim, không hơn. Trả về lỗi, hoặc None.
+
+    `sparse` là danh sách thư mục: chỉ chúng (và file nằm thẳng ở gốc) được
+    tải. google-cloud-python đủ là 1,3 GB; mười một package của nó tải khoảng 20 MB,
+    83 MB trên đĩa.
+    `--filter=blob:none` để git chỉ tải nội dung file nằm trong vùng sparse.
+    """
+    if (dest.exists() and git("rev-parse", "HEAD", cwd=dest).stdout.strip() == sha
+            and sparse_dirs(dest) == sorted(sparse)):
+        return missing_sparse(dest, sparse)
     shutil.rmtree(dest, ignore_errors=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
+    fetch_args = ["fetch", "-q", "--depth", "1", "--no-tags"]
     steps = [
         (["init", "-q", str(dest)], None),
         (["remote", "add", "origin", url], dest),
-        (["fetch", "-q", "--depth", "1", "--no-tags", "origin", sha], dest),
+    ]
+    if sparse:
+        steps.append((["sparse-checkout", "set", "--cone", "--", *sparse], dest))
+        fetch_args.append("--filter=blob:none")
+    steps += [
+        ([*fetch_args, "origin", sha], dest),
         (["checkout", "-q", "--detach", "FETCH_HEAD"], dest),
     ]
     for args, cwd in steps:
@@ -107,7 +138,16 @@ def fetch(name, url, sha, dest: Path):
         if p.returncode != 0:
             return f"git {args[0]}: {p.stderr.strip()[:200]}"
     head = git("rev-parse", "HEAD", cwd=dest).stdout.strip()
-    return None if head == sha else f"HEAD là {head}, không phải {sha}"
+    if head != sha:
+        return f"HEAD là {head}, không phải {sha}"
+    return missing_sparse(dest, sparse)
+
+
+def missing_sparse(dest: Path, sparse):
+    """Gõ sai một tên thì git vẫn checkout thành công, chỉ là không có gì: bộ
+    đo sẽ "đạt" trên một repo rỗng. Kiểm cả khi dùng lại bản đã tải."""
+    missing = [d for d in sparse if not (dest / d).is_dir()]
+    return f"thư mục sparse không có ở commit đã ghim: {', '.join(missing)}" if missing else None
 
 
 def fetch_submodule(dest: Path, path: str):
@@ -146,14 +186,17 @@ def tracked_sources(dest: Path, subs) -> int:
     files = []
     for prefix in ["", *subs]:
         here = dest / prefix if prefix else dest
-        p = git("ls-files", "-s", "-z", cwd=here)
+        # `-t` đánh dấu `S` cho file nằm ngoài vùng sparse: git vẫn liệt kê
+        # chúng, nhưng chúng không có trên đĩa nên archctl không thể quét.
+        p = git("ls-files", "-s", "-t", "-z", cwd=here)
         if p.returncode != 0:
             die(f"git ls-files ở {here}: {p.stderr.strip()[:200]}")
         for entry in p.stdout.split("\0"):
             if not entry:
                 continue
             meta, _, path = entry.partition("\t")
-            if meta.split()[0] in ("120000", "160000"):  # symlink, submodule
+            tag, mode = meta.split()[:2]
+            if tag == "S" or mode in ("120000", "160000"):  # sparse, symlink, submodule
                 continue
             files.append(f"{prefix}/{path}" if prefix else path)
 
@@ -232,9 +275,9 @@ def main():
     work = cache / "work"
 
     broken = []
-    for name, url, sha, subs in repos:
+    for name, url, sha, subs, sparse in repos:
         dest = cache / "repos" / name
-        err = fetch(name, url, sha, dest)
+        err = fetch(name, url, sha, dest, sparse)
         for path in [] if err else subs:
             err = err or fetch_submodule(dest, path)
         if err:
@@ -243,7 +286,7 @@ def main():
         die("không tải được:\n  " + "\n  ".join(broken))
 
     results = []
-    for name, _, sha, subs in repos:
+    for name, _, sha, subs, _ in repos:
         print(f"· {name}", flush=True)
         src = cache / "repos" / name
         expected = tracked_sources(src, subs)
