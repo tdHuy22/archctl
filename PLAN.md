@@ -9,7 +9,8 @@ Cập nhật 2026-10-04.
 
 ### Đã xong, có bằng chứng
 
-- **Go có thước đo chuẩn** (2026-10-04, chưa push): `oracle.py` dựng một trình
+- **Go có thước đo chuẩn** (2026-10-04, `261799d`, CI xanh ở run 37213550539
+  với Go 1.24 có sẵn trên image `ubuntu-24.04`, khớp đúng các số trên máy dev): `oracle.py` dựng một trình
   đọc `go/parser` (`ImportsOnly`) thành binary tạm, đối chiếu cả tên lẫn dòng;
   CI đòi `--require clang,node,go`. Lần chạy đầu bắt được lỗi thật: `import
   bolt "go.etcd.io/bbolt"` (tên đặt lại, không ngoặc) bị bỏ qua, etcd mất 4
@@ -200,9 +201,7 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-1. **Push rồi xem job `repo thật`**: lần đầu CI chạy oracle với
-   `--require go`. Nếu image không có `go` trong PATH thì mã thoát là 2, sửa ở CI.
-2. Rust chưa có thước đo chuẩn (không có crate `syn` khi offline).
+1. Rust chưa có thước đo chuẩn (không có crate `syn` khi offline).
 
 Các repo `googleapis/python-*` đơn lẻ đã archive và rỗng, nên ca lồng hai cấp
 dùng monorepo dạng sparse.
