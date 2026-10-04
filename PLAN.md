@@ -9,6 +9,12 @@ Cập nhật 2026-10-04.
 
 ### Đã xong, có bằng chứng
 
+- **CI xanh với bước đối chiếu parser chuẩn** (run 37211617194, commit
+  `4fa0ff4`, 2026-10-04): job `repo thật` 7m52s trên Ubuntu 24.04, Python 3.12;
+  24 repo 22 893 file, 0 bất nhất, 840/840; `sabotage.py` bắt được cả 12/12 kiểu phá;
+  `oracle.py --require clang,node` khớp hết ở cả Python, C/C++ và JS/TS (bước
+  này mất khoảng 4 phút).
+
 - **Bộ trích import sửa theo parser chuẩn, đã push lên `main`.** Rà 2026-10-04 bằng
   cách đối chiếu với `ast` của CPython, lexer thô của clang và parser module
   của Node trên 24 repo của bộ đo; mọi lỗi tìm thấy đã sửa theo test-trước,
@@ -185,11 +191,7 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-1. **Xem job `repo thật` trên CI của lần push loạt sửa bộ trích**: lần đầu có
-   bước đối chiếu với parser chuẩn (`--require clang,node`) trên runner Linux
-   hai lõi, với Python 3.12 thay vì 3.14 của máy dev. Đỏ vì thiếu công cụ là
-   mã 2 và sửa ở CI; đỏ vì lệch là lỗi thật của archctl.
-2. Go và Rust chưa có thước đo chuẩn trong bộ đo (máy dev không có `go`,
+1. Go và Rust chưa có thước đo chuẩn trong bộ đo (máy dev không có `go`,
    không có crate `syn` offline). Runner GitHub có sẵn Go, nên một phép đối
    chiếu `go/parser` chạy được trên CI.
 
