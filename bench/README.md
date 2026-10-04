@@ -96,12 +96,14 @@ bộ trích, nên một lỗi trong bộ trích làm cả hai sai giống nhau m
   nhánh `#if` nào cũng tính.
 - JS/TS: parser module của Node, TS gỡ kiểu trước bằng
   `module.stripTypeScriptTypes`. Chỉ import tĩnh, nên chỉ kiểm phía thiếu.
+- Go: `go/parser` ở chế độ `ImportsOnly`, dựng một lần thành binary tạm. Không
+  xét build tag, giống archctl.
 
-Python và C/C++ đòi khớp cả tên lẫn số dòng: thiếu, thừa hay lệch dòng đều là
-lệch. Thiếu clang hay Node thì phần đó in `BỎ QUA`; `--require clang,node` biến
-việc thiếu thành mã thoát 2, và với Node thì đòi cả khả năng gỡ kiểu TS. Thước
-đo tự hỏng cũng là mã 2 chứ không phải "đạt": clang hay Node thoát khác 0, Node
-không trả lời đủ số file, hoặc quá nửa số file của một repo không parse được.
+Python, C/C++ và Go đòi khớp cả tên lẫn số dòng: thiếu, thừa hay lệch dòng đều
+là lệch. Thiếu clang, Node hay Go thì phần đó in `BỎ QUA`; `--require
+clang,node,go` biến việc thiếu thành mã thoát 2, và với Node thì đòi cả khả năng
+gỡ kiểu TS. Thước đo tự hỏng cũng là mã 2 chứ không phải "đạt": clang, Node hay
+trình đọc Go thoát khác 0, không trả lời đủ số file, hoặc quá nửa số file của một repo không parse được.
 
 Lần đầu chạy (2026-10-04) nó bắt những lỗi mà cả hai phép thử kia đều cho qua:
 Vue core mất 363/1 728 import tĩnh vì `import { type A, b }`, Python có 1 045

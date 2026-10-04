@@ -66,6 +66,7 @@ request:
 | Python | `ast` của CPython 3.14 | 13 545 file, 103 539 import: khớp cả tên lẫn dòng. Thư viện chuẩn của chính 3.14 (1 865 file, 13 599 import) cũng khớp. |
 | C, C++ | lexer thô của clang 21 | 4 239 file, 23 044 `#include`: khớp cả tên lẫn dòng |
 | JS, TS | parser module của Node 24 | 1 007 file, 3 310 import tĩnh: không thiếu cái nào |
+| Go | `go/parser` của Go 1.27, chế độ `ImportsOnly` | 2 168 file, 13 921 import: khớp cả tên lẫn dòng |
 
 Trước khi sửa, cũng phép đối chiếu đó cho:
 
@@ -79,9 +80,12 @@ Trước khi sửa, cũng phép đối chiếu đó cho:
   `z`.
 - **C/C++**: `#include` mất 2/21 830 — ít, vì include nằm đầu file, trước chỗ
   lệch nhịp. Thiệt hại thật nằm ở phần sau: ký hiệu, ghép FFI.
+- **Go**: `import bolt "go.etcd.io/bbolt"`, tức tên đặt lại mà không có ngoặc,
+  bị bỏ qua cả câu: etcd mất 4 import, hugo 1. Trong khối `import ( ... )` thì
+  vẫn đọc đúng.
 
-Go và Rust chưa có thước đo chạy được ở đây; hai ngôn ngữ đó được kiểm bằng
-test trong `crates/arch-core/tests/scan.rs`.
+Rust chưa có thước đo chạy được ở đây (`syn` cần tải crate); Rust được kiểm
+bằng test trong `crates/arch-core/tests/scan.rs`.
 
 ## Cạnh liên ngôn ngữ
 

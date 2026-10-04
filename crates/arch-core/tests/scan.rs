@@ -533,6 +533,23 @@ import (
     );
 }
 
+/// Tên đặt lại ngay sau `import`, không có ngoặc: `go/parser` tìm ra etcd 4
+/// file (`import bolt "go.etcd.io/bbolt"` ở
+/// `server/storage/backend/config_default.go:19`) và hugo 1 file mà archctl
+/// từng bỏ sót.
+#[test]
+fn go_import_don_co_ten_dat_lai() {
+    let src = "\
+package main
+
+import bolt \"go.etcd.io/bbolt\"
+import . \"strings\"
+import _ \"embed\"
+";
+    assert_eq!(specs(Lang::Go, src), ["go.etcd.io/bbolt", "strings", "embed"]);
+    assert_eq!(lines(Lang::Go, src), [3, 4, 5]);
+}
+
 /// Chuỗi thô của Go không có ký tự thoát và không có nội suy: `` `C:\` `` và
 /// `` `${HOME` `` đóng ở dấu backtick kế tiếp. Đọc như template JS thì `\` nuốt
 /// dấu đóng và `${` nuốt cả phần sau — hugo 15 file, etcd 5, có

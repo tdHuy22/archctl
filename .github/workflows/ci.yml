@@ -178,10 +178,10 @@ jobs:
       # kiểm dùng chung bộ trích, nên một lỗi trong bộ trích làm cả hai sai
       # giống nhau mà vẫn ra "0 bất nhất". Vue core từng mất 21% import tĩnh
       # như vậy. Bước này đối chiếu với parser chuẩn: `ast` của Python, lexer
-      # thô của clang, parser module của Node.
+      # thô của clang, parser module của Node, `go/parser` của Go.
       #
-      # Image ghim ở trên có sẵn cả ba (Python 3.12, Clang 18, Node 22 — đủ
-      # mới cho `module.stripTypeScriptTypes`). `--require` để ngày nào image
-      # thiếu một cái thì bước này đỏ, thay vì lặng lẽ bỏ qua phần đó.
+      # Image ghim ở trên có sẵn cả bốn (Python 3.12, Clang 18, Node 22 — đủ
+      # mới cho `module.stripTypeScriptTypes` —, Go). `--require` để ngày nào
+      # image thiếu một cái thì bước này đỏ, thay vì lặng lẽ bỏ qua phần đó.
       - name: đối chiếu với parser chuẩn
-        run: python3 bench/oracle.py --archctl target/release/archctl --require clang,node
+        run: python3 bench/oracle.py --archctl target/release/archctl --require clang,node,go

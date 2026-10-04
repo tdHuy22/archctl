@@ -9,6 +9,15 @@ Cập nhật 2026-10-04.
 
 ### Đã xong, có bằng chứng
 
+- **Go có thước đo chuẩn** (2026-10-04, chưa push): `oracle.py` dựng một trình
+  đọc `go/parser` (`ImportsOnly`) thành binary tạm, đối chiếu cả tên lẫn dòng;
+  CI đòi `--require clang,node,go`. Lần chạy đầu bắt được lỗi thật: `import
+  bolt "go.etcd.io/bbolt"` (tên đặt lại, không ngoặc) bị bỏ qua, etcd mất 4
+  import, hugo 1. Đã sửa ở `scan/golang.rs` theo test-trước. Biên nhận: 420
+  test, clippy `-D warnings`, `cargo +1.88 check`; bộ đo 24 repo 22 893 file,
+  0 bất nhất, 840/840; `sabotage.py` 12/12; `oracle.py` khớp hết, riêng Go
+  2 168 file, 13 921 import. Go cài trên máy dev bằng Homebrew (1.27.1).
+
 - **CI xanh với bước đối chiếu parser chuẩn** (run 37211617194, commit
   `4fa0ff4`, 2026-10-04): job `repo thật` 7m52s trên Ubuntu 24.04, Python 3.12;
   24 repo 22 893 file, 0 bất nhất, 840/840; `sabotage.py` bắt được cả 12/12 kiểu phá;
@@ -191,9 +200,9 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-1. Go và Rust chưa có thước đo chuẩn trong bộ đo (máy dev không có `go`,
-   không có crate `syn` offline). Runner GitHub có sẵn Go, nên một phép đối
-   chiếu `go/parser` chạy được trên CI.
+1. **Push rồi xem job `repo thật`**: lần đầu CI chạy oracle với
+   `--require go`. Nếu image không có `go` trong PATH thì mã thoát là 2, sửa ở CI.
+2. Rust chưa có thước đo chuẩn (không có crate `syn` khi offline).
 
 Các repo `googleapis/python-*` đơn lẻ đã archive và rỗng, nên ca lồng hai cấp
 dùng monorepo dạng sparse.

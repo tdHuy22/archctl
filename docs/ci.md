@@ -113,9 +113,9 @@ so archctl với chính nó, nên một lỗi trong bộ trích — chỗ cả b
 bộ kiểm cùng dùng — làm cả hai sai giống nhau mà vẫn ra "0 bất nhất". Vue core
 từng mất 21% import tĩnh như vậy suốt nhiều lần chạy xanh. Bước này đối chiếu
 với parser chuẩn: `ast` của Python, lexer thô của clang, parser module của
-Node. Cả ba có sẵn trên image `ubuntu-24.04` đã ghim (Python 3.12, Clang 18,
-Node 22), không cài gì thêm; `--require clang,node` để ngày image thiếu một
-cái thì bước này đỏ chứ không lặng lẽ bỏ qua. Ba trong mười kiểu phá của
+Node, `go/parser` của Go. Cả bốn có sẵn trên image `ubuntu-24.04` đã ghim,
+không cài gì thêm; `--require clang,node,go` để ngày image thiếu một cái thì
+bước này đỏ chứ không lặng lẽ bỏ qua. Ba trong mười kiểu phá của
 `sabotage.py` nhắm vào bước này.
 
 ## Còn một chốt nữa không nằm trong YAML

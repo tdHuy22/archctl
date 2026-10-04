@@ -14,6 +14,14 @@ pub fn extract(toks: &[Token]) -> Vec<Import> {
             i += 1;
             continue;
         }
+        // import bolt "go.etcd.io/bbolt", import . "strings", import _ "embed"
+        let renamed = matches!(
+            toks.get(i + 1).map(|t| &t.tok),
+            Some(Tok::Word(_) | Tok::Punct('.'))
+        ) && matches!(toks.get(i + 2).map(|t| &t.tok), Some(Tok::Str(_)));
+        if renamed {
+            i += 1;
+        }
         match toks.get(i + 1).map(|t| &t.tok) {
             // import "fmt"
             Some(Tok::Str(spec)) => {

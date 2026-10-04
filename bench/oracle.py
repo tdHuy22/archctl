@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Đối chiếu import archctl đọc được với parser chuẩn của từng ngôn ngữ.
 
-    python3 bench/oracle.py [--archctl <binary>] [--only flask,curl] [--require clang,node]
+    python3 bench/oracle.py [--archctl <binary>] [--only flask,curl] [--require clang,node,go]
 
 Phép nhất quán của `bench.py` so archctl với chính nó: bộ khám phá và bộ kiểm
 dùng chung một bộ trích, nên một lỗi trong bộ trích làm cả hai sai giống nhau
@@ -20,10 +20,12 @@ Thước đo, chạy trên repo mà `bench.py` đã tải về `target/bench/rep
   `module.stripTypeScriptTypes` trước. Chỉ import tĩnh, nên chỉ kiểm phía
   thiếu: `import()`, `require()` và `import type` archctl đọc thêm là đúng.
   `.tsx`, `.jsx`, `.vue` không có thước đo.
+- Go: `go/parser` ở chế độ `ImportsOnly`, dựng một lần thành binary tạm. Như
+  archctl, không xét build tag: file nào cũng tính, `import "C"` cũng là import.
 
-Go và Rust không có parser chuẩn chạy được ở đây.
+Rust không có parser chuẩn chạy được ở đây (`syn` cần tải crate).
 
-Python, C/C++: thiếu, thừa và lệch số dòng đều là lệch. Thiếu clang hay Node
+Python, C/C++, Go: thiếu, thừa và lệch số dòng đều là lệch. Thiếu clang, Node hay Go
 thì phần đó in BỎ QUA và không tính là đạt; `--require` biến việc thiếu thành
 lỗi, và với Node thì đòi cả khả năng gỡ kiểu TS. Một thước đo không parse được
 quá nửa số file của một repo là thước đo hỏng chứ không phải mã hỏng: dừng,
@@ -40,6 +42,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import warnings
 from pathlib import Path
 
@@ -77,6 +80,49 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
   } catch (e) {
     console.log(`${file}\tERR`);
   }
+}
+"""
+
+# Một tiến trình cho mỗi repo, cùng giao thức với NODE_SCRIPT: in
+# "<file>\t<json các [dòng, đường dẫn]>" hay "ERR".
+GO_SOURCE = r"""
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"go/parser"
+	"go/token"
+	"os"
+	"strconv"
+	"strings"
+)
+
+func main() {
+	in := bufio.NewScanner(os.Stdin)
+	in.Buffer(make([]byte, 1<<20), 1<<20)
+	out := bufio.NewWriter(os.Stdout)
+	defer out.Flush()
+	for in.Scan() {
+		root, file, _ := strings.Cut(in.Text(), "\t")
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, root+"/"+file, nil, parser.ImportsOnly)
+		if err != nil {
+			fmt.Fprintf(out, "%s\tERR\n", file)
+			continue
+		}
+		specs := [][2]any{}
+		for _, imp := range f.Imports {
+			path, err := strconv.Unquote(imp.Path.Value)
+			if err != nil {
+				path = imp.Path.Value
+			}
+			specs = append(specs, [2]any{fset.Position(imp.Path.Pos()).Line, path})
+		}
+		js, _ := json.Marshal(specs)
+		fmt.Fprintf(out, "%s\t%s\n", file, js)
+	}
 }
 """
 
@@ -163,6 +209,34 @@ def node_truth(root, files):
     return out
 
 
+def build_go_helper(workdir):
+    src = Path(workdir) / "imports.go"
+    src.write_text(GO_SOURCE)
+    exe = Path(workdir) / "imports"
+    p = subprocess.run(["go", "build", "-o", str(exe), str(src)], capture_output=True, text=True,
+                       timeout=600, env={**os.environ, "GO111MODULE": "off", "GOFLAGS": ""})
+    if p.returncode != 0:
+        bench.die(f"không dựng được trình đọc import Go: {p.stderr.strip()[-300:]}")
+    return str(exe)
+
+
+def go_truth(helper, root, files):
+    """file → Counter `(dòng, đường dẫn)`; None nếu go/parser không đọc được."""
+    feed = "".join(f"{root}\t{f}\n" for f in files)
+    p = subprocess.run([helper], input=feed, capture_output=True, text=True, timeout=900)
+    if p.returncode != 0:
+        bench.die(f"trình đọc Go thoát {p.returncode} ở {root}: {p.stderr.strip()[-300:]}")
+    out = {}
+    for row in p.stdout.splitlines():
+        file, _, value = row.partition("\t")
+        out[file] = None if value == "ERR" else \
+            collections.Counter((line, spec) for line, spec in json.loads(value))
+    unanswered = sorted(set(files) - set(out))
+    if unanswered:
+        bench.die(f"trình đọc Go không trả lời cho {len(unanswered)} file ở {root}, ví dụ {unanswered[0]}")
+    return out
+
+
 def tool_version(cmd):
     p = subprocess.run(cmd, capture_output=True, text=True)
     first = (p.stdout or p.stderr).strip().splitlines()
@@ -234,7 +308,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--archctl", default=str(ROOT / "target/release/archctl"))
     ap.add_argument("--only", help="tên repo, cách nhau bằng dấu phẩy")
-    ap.add_argument("--require", default="", help="công cụ bắt buộc phải có: clang, node")
+    ap.add_argument("--require", default="", help="công cụ bắt buộc phải có: clang, node, go")
     ap.add_argument("--cache", default=str(ROOT / "target/bench"))
     args = ap.parse_args()
 
@@ -249,9 +323,13 @@ def main():
 
     have_clang = shutil.which("clang") is not None
     have_node = shutil.which("node") is not None
+    have_go = shutil.which("go") is not None
     strip_ts = have_node and node_can_strip_types()
     required = args.require.split(",")
-    for tool, ok in [("clang", have_clang), ("node", have_node)]:
+    unknown = set(filter(None, required)) - {"clang", "node", "go"}
+    if unknown:
+        bench.die(f"`--require` không biết: {', '.join(sorted(unknown))}")
+    for tool, ok in [("clang", have_clang), ("node", have_node), ("go", have_go)]:
         if tool in required and not ok:
             bench.die(f"thiếu `{tool}`, mà `--require` đòi có")
     if "node" in required and not strip_ts:
@@ -259,12 +337,16 @@ def main():
                   "mà `--require node` đòi đối chiếu cả TS")
     clang_v = tool_version(["clang", "--version"]) if have_clang else "BỎ QUA: không có"
     node_v = tool_version(["node", "--version"]) if have_node else "BỎ QUA: không có"
-    print(f"python {sys.version.split()[0]} · clang: {clang_v} · node: {node_v}"
+    go_v = tool_version(["go", "version"]) if have_go else "BỎ QUA: không có"
+    print(f"python {sys.version.split()[0]} · clang: {clang_v} · node: {node_v} · go: {go_v}"
           + ("" if strip_ts or not have_node else " (không gỡ được kiểu TS: BỎ QUA .ts)"))
 
     missing_repos = [r for r in repos if not (Path(args.cache) / "repos" / r).is_dir()]
     if missing_repos:
         bench.die(f"chưa tải: {', '.join(missing_repos)} — chạy `python3 bench/bench.py` trước")
+
+    workdir = tempfile.TemporaryDirectory(prefix="archctl-oracle-")
+    go_helper = build_go_helper(workdir.name) if have_go else None
 
     bad = 0
     for repo in repos:
@@ -310,6 +392,15 @@ def main():
                 for spec in sorted((want - have).elements()):
                     js.note(f"{file} thiếu: {spec!r}")
             tallies.append(js)
+
+        if go_helper and by_lang["Go"]:
+            go = Tally("Go")
+            for file, want in go_truth(go_helper, root, by_lang["Go"]).items():
+                if want is None:
+                    go.unparsed += 1
+                    continue
+                check_lines(go, file, want, got[file])
+            tallies.append(go)
 
         for t in tallies:
             sane(t, repo)
