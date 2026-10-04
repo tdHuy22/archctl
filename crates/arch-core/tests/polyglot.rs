@@ -147,7 +147,7 @@ fn super_tro_thang_vao_module_cha() {
 
     let root = root();
     let r = Resolver::new(&root);
-    let at = |spec: &str| r.resolve(Lang::Rust, "src/capture/decoder.rs", &Import { spec: spec.into(), line: 1, system: false });
+    let at = |spec: &str| r.resolve(Lang::Rust, "src/capture/decoder.rs", &Import { spec: spec.into(), line: 1, system: false, names: Vec::new() });
 
     // `src/capture/mod.rs` tồn tại trong fixture; `super::Thing` phải ra nó.
     assert_eq!(at("super::Thing"), Resolved::Path("src/capture/mod.rs".into()));
@@ -163,7 +163,7 @@ fn mod_long_trong_file_khong_bi_bao_la_thieu() {
     use arch_core::scan::Import;
 
     let r = Resolver::new(&root());
-    let at = |from: &str, spec: &str| r.resolve(Lang::Rust, from, &Import { spec: spec.into(), line: 1, system: false });
+    let at = |from: &str, spec: &str| r.resolve(Lang::Rust, from, &Import { spec: spec.into(), line: 1, system: false, names: Vec::new() });
 
     // Không có file module nào tên vậy: đó là item, hoặc `mod` viết lồng, trong
     // chính file gốc crate — ở đây là `src/main.rs`. Đích là file gốc, không

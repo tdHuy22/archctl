@@ -22,6 +22,7 @@ pub fn extract(toks: &[Token]) -> Vec<Import> {
                 spec: spec.clone(),
                 line: pair[1].line,
                 system: true,
+                names: Vec::new(),
             }),
             _ => {}
         }

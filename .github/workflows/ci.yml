@@ -146,7 +146,8 @@ jobs:
   bench:
     name: repo thật
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Bước đối chiếu với clang chạy qua ~4 000 file C/C++ trên hai lõi.
+    timeout-minutes: 25
     steps:
       - name: lấy mã
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -168,7 +169,19 @@ jobs:
         run: python3 bench/bench.py --archctl target/release/archctl --rounds 1
 
       # Bộ đo bắt được lỗi chỉ khi từng phép kiểm của nó đổ được. Bước này phá
-      # archctl bảy kiểu và đòi bộ đo bắt đúng từng kiểu — nếu một lần sửa sau
+      # archctl mười kiểu và đòi bộ đo bắt đúng từng kiểu — nếu một lần sửa sau
       # này vô tình làm một phép kiểm luôn đạt, nó đỏ ở đây.
       - name: bộ đo đổ được
         run: python3 bench/sabotage.py --archctl target/release/archctl
+
+      # Phép tự nhất quán ở trên so archctl với chính nó: bộ khám phá và bộ
+      # kiểm dùng chung bộ trích, nên một lỗi trong bộ trích làm cả hai sai
+      # giống nhau mà vẫn ra "0 bất nhất". Vue core từng mất 21% import tĩnh
+      # như vậy. Bước này đối chiếu với parser chuẩn: `ast` của Python, lexer
+      # thô của clang, parser module của Node.
+      #
+      # Image ghim ở trên có sẵn cả ba (Python 3.12, Clang 18, Node 22 — đủ
+      # mới cho `module.stripTypeScriptTypes`). `--require` để ngày nào image
+      # thiếu một cái thì bước này đỏ, thay vì lặng lẽ bỏ qua phần đó.
+      - name: đối chiếu với parser chuẩn
+        run: python3 bench/oracle.py --archctl target/release/archctl --require clang,node

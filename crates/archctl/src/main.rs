@@ -64,6 +64,7 @@ fn main() -> ExitCode {
     match command {
         "parse" => cmd_parse(&args[1..]),
         "check" => cmd_check(&args[1..]),
+        "scan" => cmd_scan(&args[1..]),
         "diff" => cmd_diff(&args[1..]),
         "propose" => proto::cmd_propose(&args[1..], Intent::Rule),
         "block" => proto::cmd_propose(&args[1..], Intent::Block),
@@ -105,6 +106,10 @@ Lệnh chung:
                                           Cho thẳng đường dẫn thì nhanh nhất.
                                           --strict: mọi cảnh báo, kể cả
                                           của file luật, thành vi phạm.
+  archctl scan [--root <dir>] [--json] [<file>...]
+                                          In import archctl đọc được và
+                                          đích phân giải của từng cái.
+                                          Không cần .arch/.
   archctl diff [<git-ref>] [--root <dir>] So luật hiện tại với một bản trước
   archctl parse <file.arch>               Chỉ đọc và kiểm tra file luật
   archctl verify [<tên>...] [--quiet]     Chạy các cách kiểm đã khai báo và
@@ -777,6 +782,138 @@ fn cmd_diff(args: &[String]) -> ExitCode {
     let loosened: Vec<&str> = delta.loosenings().map(|c| c.key.as_str()).collect();
     if !loosened.is_empty() {
         crate::say!("\n! Luật bị nới lỏng: {}  — đọc kỹ chỗ này", loosened.join(", "));
+    }
+    ExitCode::from(exit::OK)
+}
+
+/// `archctl scan`: archctl đọc được gì từ mã, và mỗi import trỏ tới đâu.
+///
+/// Để người dùng hỏi thẳng "vì sao cạnh này không có", và để bộ đo đối chiếu
+/// với parser chuẩn của từng ngôn ngữ: phép nhất quán của bộ đo so archctl với
+/// chính nó, nên không bắt được lỗi nằm trong bộ trích. Đọc đúng như `check`
+/// đọc — cùng danh sách file, cùng phần mã của file, cùng bộ phân giải.
+///
+/// Không cần `.arch/`: `--root` là gốc, không thì thư mục gần nhất có
+/// `.arch/system.arch`, không nữa thì thư mục hiện tại.
+fn cmd_scan(args: &[String]) -> ExitCode {
+    use arch_core::resolve::{Resolved, Resolver};
+    use arch_core::scan::{self, Lang};
+
+    let mut as_json = false;
+    let mut only: Vec<String> = Vec::new();
+    let mut root_arg: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => as_json = true,
+            "--root" => match args.get(i + 1) {
+                Some(p) => {
+                    root_arg = Some(PathBuf::from(p));
+                    i += 1;
+                }
+                None => {
+                    eprintln!("archctl scan: `--root` thiếu đường dẫn");
+                    return ExitCode::from(exit::USAGE);
+                }
+            },
+            other if other.starts_with('-') => {
+                eprintln!("archctl scan: tham số không nhận ra: `{other}`");
+                return ExitCode::from(exit::USAGE);
+            }
+            other => only.push(other.to_string()),
+        }
+        i += 1;
+    }
+    let root = root_arg
+        .or_else(|| arch_core::find_root(Path::new(".")))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let files = if only.is_empty() {
+        arch_core::check::source_files(&root, &arch_core::read_ignores(&root))
+    } else {
+        relative_to(&root, &only)
+    };
+
+    let resolver = Resolver::new(&root);
+    let mut json_files: Vec<String> = Vec::new();
+    for file in &files {
+        let Some(lang) = Lang::for_path(file) else { continue };
+        let src = match std::fs::read_to_string(root.join(file)) {
+            Ok(src) if src.len() as u64 <= arch_core::check::MAX_FILE_BYTES => src,
+            Ok(_) => {
+                json_files.push(format!(
+                    r#"{{"file":{},"lang":{},"skipped":"oversized","imports":[]}}"#,
+                    json::string(file),
+                    json::string(lang.name())
+                ));
+                if !as_json {
+                    say!("{file} ({}): bỏ qua, quá lớn", lang.name());
+                }
+                continue;
+            }
+            Err(_) => {
+                json_files.push(format!(
+                    r#"{{"file":{},"lang":{},"skipped":"unreadable","imports":[]}}"#,
+                    json::string(file),
+                    json::string(lang.name())
+                ));
+                if !as_json {
+                    say!("{file} ({}): bỏ qua, không đọc được dạng UTF-8", lang.name());
+                }
+                continue;
+            }
+        };
+        let view = scan::source_view(file, arch_core::strip_bom(&src));
+        let imports = lang.imports(&view);
+        if !as_json {
+            say!("{file} ({})", lang.name());
+        }
+        let mut items: Vec<String> = Vec::new();
+        for import in &imports {
+            let base = resolver.resolve(lang, file, import);
+            let subs = resolver.submodules(lang, file, import, &base);
+            let (kind, target) = match &base {
+                Resolved::Path(p) => ("path", Some(p.as_str())),
+                Resolved::Package(p) => ("package", Some(p.as_str())),
+                Resolved::Alias => ("alias", None),
+                Resolved::Internal => ("internal", None),
+                Resolved::Missing => ("missing", None),
+            };
+            if as_json {
+                items.push(format!(
+                    r#"{{"line":{},"spec":{},"system":{},"names":{},"resolved":{},"target":{},"submodules":{}}}"#,
+                    import.line,
+                    json::string(&import.spec),
+                    import.system,
+                    json::strings(import.names.iter().map(String::as_str)),
+                    json::string(kind),
+                    target.map_or_else(|| "null".to_string(), json::string),
+                    json::strings(subs.iter().map(String::as_str)),
+                ));
+            } else {
+                let shown = match &base {
+                    Resolved::Path(p) => p.clone(),
+                    Resolved::Package(p) => format!("gói ngoài {p}"),
+                    Resolved::Alias => "alias chưa đọc được cấu hình".to_string(),
+                    Resolved::Internal => "bên trong chính crate".to_string(),
+                    Resolved::Missing => "không tìm thấy".to_string(),
+                };
+                say!("  {:>5}  {}  → {shown}", import.line, import.spec);
+                for sub in &subs {
+                    say!("  {:>5}  {}  → {sub} (module con)", "", import.spec);
+                }
+            }
+        }
+        if as_json {
+            json_files.push(format!(
+                r#"{{"file":{},"lang":{},"imports":[{}]}}"#,
+                json::string(file),
+                json::string(lang.name()),
+                items.join(",")
+            ));
+        }
+    }
+    if as_json {
+        say!(r#"{{"root":{},"files":[{}]}}"#, json::string(&root.to_string_lossy()), json_files.join(","));
     }
     ExitCode::from(exit::OK)
 }

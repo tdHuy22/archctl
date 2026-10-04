@@ -65,10 +65,14 @@ fn rust(toks: &[Token]) -> Foreign {
             continue;
         }
         // ABI nào cũng được, không riêng "C": "system", "cdecl", "stdcall".
-        let Some(Tok::Str(_)) = toks.get(i + 1).map(|t| &t.tok) else { continue };
-        match toks.get(i + 2).map(|t| &t.tok) {
+        // Không ghi ABI thì mặc định là "C": `extern { ... }`, `extern fn x()`.
+        let after = match toks.get(i + 1).map(|t| &t.tok) {
+            Some(Tok::Str(_)) => i + 2,
+            _ => i + 1,
+        };
+        match toks.get(after).map(|t| &t.tok) {
             Some(Tok::Punct('{')) => {
-                for j in i + 3..block_end(toks, i + 2) {
+                for j in after + 1..block_end(toks, after) {
                     if matches!(&toks[j].tok, Tok::Word(w) if w == "fn")
                         && let Some(Token { tok: Tok::Word(name), line }) = toks.get(j + 1)
                     {
@@ -77,7 +81,7 @@ fn rust(toks: &[Token]) -> Foreign {
                 }
             }
             Some(Tok::Word(w)) if w == "fn" => {
-                if let Some(Token { tok: Tok::Word(name), line }) = toks.get(i + 3) {
+                if let Some(Token { tok: Tok::Word(name), line }) = toks.get(after + 1) {
                     out.provides.push(hit(name, *line));
                 }
             }
@@ -141,14 +145,30 @@ const C_CONTROL: &[&str] =
 /// Chỉ xét khi độ sâu ngoặc nhọn bằng 0, nên lời gọi hàm trong thân hàm khác
 /// không bị nhận nhầm. Khai báo trước (`int f(void);`) cũng không, vì nó kết
 /// thúc bằng `;` chứ không phải `{`.
+///
+/// Khối `extern "C" { ... }` không tính là một tầng: mã C++ đưa hàm ra cho C
+/// gọi thường bọc chúng trong đó, và chính khối đó giữ tên không bị mangle.
+/// `namespace` thì có tính — hàm C++ trong đó mang tên đã mangle, Rust hay Go
+/// không liên kết tới được.
 fn c(toks: &[Token]) -> Foreign {
     let mut out = Foreign::default();
     let mut depth = 0usize;
+    // Mỗi `{` đang mở: có phải khối `extern "C"` không.
+    let mut open: Vec<bool> = Vec::new();
     let mut i = 0;
     while i < toks.len() {
         match toks[i].tok {
-            Tok::Punct('{') => depth += 1,
-            Tok::Punct('}') => depth = depth.saturating_sub(1),
+            Tok::Punct('{') => {
+                let extern_block = i >= 2
+                    && matches!(&toks[i - 2].tok, Tok::Word(w) if w == "extern")
+                    && matches!(toks[i - 1].tok, Tok::Str(_));
+                open.push(extern_block);
+                if !extern_block {
+                    depth += 1;
+                }
+            }
+            // Đóng khối `extern "C"` thì độ sâu không đổi.
+            Tok::Punct('}') => depth = depth.saturating_sub(usize::from(open.pop() == Some(false))),
             _ => {}
         }
         if depth > 0 {

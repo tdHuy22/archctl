@@ -283,6 +283,7 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
             continue;
         }
         symbol_scanned += 1;
+        let src = scan::source_view(path, &src);
         let scan = lang.scan_all(&src, &needle_set, &as_refs(&table_needles));
         for import in &scan.imports {
             inspect(&resolver, doc, lang, path, from, import, &mut report);
@@ -543,42 +544,49 @@ fn inspect(
         });
     };
 
-    let to = match resolver.resolve(lang, path, import) {
-        Resolved::Path(target) => match owners_of(doc, &target).first() {
-            Some(name) => name.clone(),
-            None => return,
-        },
+    let base = resolver.resolve(lang, path, import);
+    // Mỗi component đích báo một lần cho một câu import, kể cả khi module và
+    // module con của nó cùng nằm ở đó.
+    let mut targets: Vec<String> = Vec::new();
+    match &base {
+        Resolved::Path(target) => targets.extend(owners_of(doc, target).first().cloned()),
         // Thư viện không được khai báo `external` thì không tham gia luật. Bắt
         // khai báo mọi gói npm hay mọi header hệ thống sẽ khiến file luật dài
         // vô ích.
-        Resolved::Package(pkg) => match external_named(doc, &pkg) {
-            Some(name) => name,
-            None => return,
-        },
+        Resolved::Package(pkg) => targets.extend(external_named(doc, pkg)),
         Resolved::Alias => return unresolved(UnresolvedReason::Alias),
         Resolved::Missing => return unresolved(UnresolvedReason::Missing),
         // Trỏ vào `mod` viết lồng trong file: không có file đích, không có
         // cạnh, và không có gì để báo.
         Resolved::Internal => return,
-    };
-
-    if to == from {
-        return;
     }
-    if let Some((reason, rule, status)) = judge(doc, from, &to) {
-        report.violations.push(Violation {
-            from: from.to_string(),
-            to: to.clone(),
-            file: path.to_string(),
-            line: import.line,
-            spec: import.spec.clone(),
-            via: Via::Import,
-            count: 1,
-            reason,
-            rule,
-            status,
-            hint: hint_for(doc, from, &to, reason, Via::Import),
-        });
+    for sub in resolver.submodules(lang, path, import, &base) {
+        if let Some(name) = owners_of(doc, &sub).first()
+            && !targets.contains(name)
+        {
+            targets.push(name.clone());
+        }
+    }
+
+    for to in targets {
+        if to == from {
+            continue;
+        }
+        if let Some((reason, rule, status)) = judge(doc, from, &to) {
+            report.violations.push(Violation {
+                from: from.to_string(),
+                to: to.clone(),
+                file: path.to_string(),
+                line: import.line,
+                spec: import.spec.clone(),
+                via: Via::Import,
+                count: 1,
+                reason,
+                rule,
+                status,
+                hint: hint_for(doc, from, &to, reason, Via::Import),
+            });
+        }
     }
 }
 

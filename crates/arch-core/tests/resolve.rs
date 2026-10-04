@@ -103,6 +103,121 @@ fn python_from_cham_import_tro_vao_chinh_thu_muc_minh() {
     assert!(!unresolved.iter().any(|u| u == "."), "{unresolved:?}");
 }
 
+#[test]
+fn python_from_goi_import_module_con() {
+    // `from pkg import sub` khi `sub` là module con: Python nạp cả
+    // `pkg/__init__.py` lẫn `pkg/sub`. Bản cũ chỉ phân giải tới `pkg`: trên 9
+    // repo của bộ đo, 171 lần đích thật nằm ở component khác.
+    let repo = Repo::new("pysub");
+    repo.write(
+        ".arch/system.arch",
+        "\
+component App  at app/*.py    @human #accepted
+component Web  at app/web/**  @human #accepted
+component Core at app/core/** @human #accepted
+component O    at o/**        @human #accepted
+allow Web -> O
+",
+    )
+    .write("app/__init__.py", "")
+    .write("app/core/models.py", "class Order: pass\n")
+    .write(
+        "app/web/views.py",
+        "from app import core\nfrom .. import core as c2\nfrom app.core import models, Order\n",
+    );
+    let (edges, unresolved) = repo.judge();
+    // Dòng 3: `app.core` và `app.core.models` cùng ở Core — báo một lần.
+    assert_eq!(
+        edges,
+        ["Web -> App (1)", "Web -> App (2)", "Web -> Core (1)", "Web -> Core (2)", "Web -> Core (3)"],
+        "{edges:?}"
+    );
+    assert!(unresolved.is_empty(), "{unresolved:?}");
+}
+
+#[test]
+fn python_from_namespace_import_module_cua_distribution_khac() {
+    // google-cloud-python: `from google.cloud import exceptions` trong
+    // google-cloud-datastore lấy module của google-cloud-core, qua namespace
+    // PEP 420 chung. Bản cũ dừng ở thư mục namespace của chính nó.
+    let repo = Repo::new("pysubns");
+    repo.write(
+        ".arch/system.arch",
+        "\
+component Core  at pkgs/core/**  @human #accepted
+component Store at pkgs/store/** @human #accepted
+component O     at o/**          @human #accepted
+allow Store -> O
+",
+    )
+    .write("pkgs/core/pyproject.toml", "")
+    .write("pkgs/core/acme/cloud/exceptions.py", "class E: pass\n")
+    .write("pkgs/store/pyproject.toml", "")
+    .write("pkgs/store/acme/cloud/store/client.py", "from acme.cloud import exceptions\n");
+    let (edges, unresolved) = repo.judge();
+    assert_eq!(edges, ["Store -> Core (1)"], "{edges:?}");
+    assert!(unresolved.is_empty(), "{unresolved:?}");
+}
+
+#[test]
+fn python_module_con_khong_nhay_sang_project_khac() {
+    // Gói thường (có `__init__.py`) chỉ có một thư mục: `from app import
+    // settings` lấy `settings` trong `svc_a/app/__init__.py`, không phải
+    // `svc_b/app/settings.py` của project bên cạnh có gói cùng tên. Module file
+    // như `utils.py` thì không có module con nào. Chỉ gói không gian tên mới
+    // trải qua nhiều distribution.
+    let repo = Repo::new("pysubscope");
+    repo.write(
+        ".arch/system.arch",
+        "\
+component SvcA at svc_a/** @human #accepted
+component SvcB at svc_b/** @human #accepted
+component O    at o/**     @human #accepted
+allow SvcA -> O
+",
+    )
+    .write("svc_a/pyproject.toml", "")
+    .write("svc_a/app/__init__.py", "settings = {}\n")
+    .write("svc_a/app/main.py", "from app import settings\nfrom utils import helpers\n")
+    .write("svc_a/utils.py", "def helpers(): pass\n")
+    .write("svc_b/pyproject.toml", "")
+    .write("svc_b/app/__init__.py", "")
+    .write("svc_b/app/settings.py", "")
+    .write("svc_b/utils/helpers.py", "");
+    assert_eq!(repo.judge(), (vec![], vec![]));
+}
+
+#[test]
+fn cython_cimport_tro_toi_file_pxd_va_pyx() {
+    // scikit-learn: `from sklearn.utils._typedefs cimport float64_t` lấy khai
+    // báo ở `_typedefs.pxd`; module chỉ có bản `.pyx` cũng là module.
+    let repo = Repo::new("cython");
+    repo.write(
+        ".arch/system.arch",
+        "\
+component Utils   at pkg/utils/**   @human #accepted
+component Metrics at pkg/metrics/** @human #accepted
+component O       at o/**           @human #accepted
+allow Metrics -> O
+",
+    )
+    .write("pyproject.toml", "")
+    .write("pkg/utils/_typedefs.pxd", "ctypedef double float64_t\n")
+    .write("pkg/utils/_typedefs.pyx", "")
+    .write("pkg/utils/fast.pyx", "")
+    .write(
+        "pkg/metrics/_dist.pyx",
+        "from pkg.utils._typedefs cimport float64_t\ncimport pkg.utils.fast\nfrom ..utils import fast\n",
+    );
+    let (edges, unresolved) = repo.judge();
+    assert_eq!(
+        edges,
+        ["Metrics -> Utils (1)", "Metrics -> Utils (2)", "Metrics -> Utils (3)"],
+        "{edges:?}"
+    );
+    assert!(unresolved.is_empty(), "{unresolved:?}");
+}
+
 const TS_ARCH: &str = "\
 component Web  at packages/web/**  @human #accepted
 component Core at packages/core/** @human #accepted
@@ -202,7 +317,7 @@ mod hoa_thuong {
     use super::Repo;
 
     fn resolve(repo: &Repo, lang: Lang, importer: &str, spec: &str) -> Resolved {
-        let import = Import { spec: spec.to_string(), line: 1, system: false };
+        let import = Import { spec: spec.to_string(), line: 1, system: false, names: Vec::new() };
         Resolver::new(&repo.0).resolve(lang, importer, &import)
     }
 
@@ -317,7 +432,7 @@ mod goc_crate {
     use super::Repo;
 
     fn at(repo: &Repo, importer: &str, spec: &str) -> Resolved {
-        let import = Import { spec: spec.to_string(), line: 1, system: false };
+        let import = Import { spec: spec.to_string(), line: 1, system: false, names: Vec::new() };
         Resolver::new(&repo.0).resolve(Lang::Rust, importer, &import)
     }
 
@@ -579,6 +694,28 @@ allow App -> O
     .write("b/shared/x.py", "")
     .write("app/main.py", "from shared.x import y\n");
     assert_eq!(repo.judge(), (vec![], vec![]));
+}
+
+#[test]
+fn c_header_cuda_khop_ten_duy_nhat() {
+    // vllm: kernel `.cu` include header `.cuh` của chính repo, mà không có
+    // build nào khai thư mục include archctl đọc được. `util.h` ở cùng chỗ thì
+    // khớp tên duy nhất; `util.cuh` từng ra "không tìm thấy".
+    let repo = Repo::new("cuh");
+    repo.write(
+        ".arch/system.arch",
+        "\
+component Kernels at kernels/** @human #accepted
+component Common  at foo/**     @human #accepted
+component O       at o/**       @human #accepted
+allow Kernels -> O
+",
+    )
+    .write("foo/common/util.cuh", "")
+    .write("kernels/a.cu", "#include \"common/util.cuh\"\n");
+    let (edges, unresolved) = repo.judge();
+    assert_eq!(edges, ["Kernels -> Common (1)"], "{edges:?}");
+    assert!(unresolved.is_empty(), "{unresolved:?}");
 }
 
 const C_ARCH: &str = "\

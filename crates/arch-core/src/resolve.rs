@@ -31,6 +31,11 @@ pub enum Resolved {
     Missing,
 }
 
+/// Một module Python `a/b` có thể là những file này, theo thứ tự. `.pxd` và
+/// `.pyx` là của Cython: `cimport` lấy khai báo ở `.pxd`, và một module chỉ có
+/// bản `.pyx` vẫn là module sau khi biên dịch.
+const PY_MODULE_SUFFIXES: &[&str] = &[".py", "/__init__.py", ".pyi", ".pxd", ".pyx"];
+
 const TS_EXTENSIONS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "d.ts"];
 const JS_TO_TS: &[(&str, &[&str])] =
     &[(".js", &[".ts", ".tsx"]), (".jsx", &[".tsx"]), (".mjs", &[".mts"]), (".cjs", &[".cts"])];
@@ -342,12 +347,62 @@ impl Resolver {
         Resolved::Package(top.to_string())
     }
 
+    /// Những tên trong `from pkg import a, b` mà chính chúng là module con.
+    ///
+    /// Python nạp cả `pkg/a.py`, không riêng `pkg/__init__.py`, và module con
+    /// có thể nằm ở component khác: `from app import core` từ `app/web`, hay
+    /// `from google.cloud import exceptions` qua namespace PEP 420 chung của
+    /// nhiều distribution. Chỉ phân giải tới `pkg` thì đích thật biến mất —
+    /// trên 9 repo của bộ đo, 171 lần. Tên chỉ là hàm hay lớp thì không ra file
+    /// nào, và không có gì để báo.
+    ///
+    /// `base` là kết quả phân giải của chính `import`. Gói ngoài hay đường dẫn
+    /// không tồn tại thì không có module con nào trong dự án.
+    pub fn submodules(
+        &self,
+        lang: Lang,
+        importer: &str,
+        import: &Import,
+        base: &Resolved,
+    ) -> Vec<String> {
+        let Resolved::Path(base) = base else { return Vec::new() };
+        if lang != Lang::Python {
+            return Vec::new();
+        }
+        // Module con nằm đâu thì tuỳ `base` là gì. Gói thường (`__init__.py`)
+        // chỉ có một thư mục — `__path__` của nó — nên module con nằm ngay
+        // trong đó, không phải ở project bên cạnh có gói cùng tên. Module file
+        // (`utils.py`) không có module con nào. Chỉ gói không gian tên — một
+        // thư mục, không có `__init__` — mới trải qua nhiều distribution.
+        let file = base.rsplit('/').next().unwrap_or(base);
+        let within = if file.starts_with("__init__.") {
+            let dir = dir_of(base);
+            Some(if dir.is_empty() { String::new() } else { format!("{dir}/") })
+        } else if PY_MODULE_SUFFIXES.iter().any(|s| !s.contains('/') && file.ends_with(s)) {
+            return Vec::new();
+        } else {
+            None
+        };
+        let mut out: Vec<String> = Vec::new();
+        for name in &import.names {
+            let sep = if import.spec.ends_with('.') { "" } else { "." };
+            if let Resolved::Path(found) = self.python(importer, &format!("{}{sep}{name}", import.spec))
+                && &found != base
+                && within.as_ref().is_none_or(|w| found.starts_with(w.as_str()))
+                && !out.contains(&found)
+            {
+                out.push(found);
+            }
+        }
+        out
+    }
+
     /// Module `path` dưới các thư mục gốc `bases`, theo thứ tự.
     fn python_in<'a>(&self, bases: impl IntoIterator<Item = &'a str>, path: &str) -> Option<String> {
-        let bases: Vec<&str> = bases.into_iter().collect();
-        let candidates = bases.iter().flat_map(|b| {
-            [format!("{b}{path}.py"), format!("{b}{path}/__init__.py"), format!("{b}{path}.pyi")]
-        });
+        let bases: Vec<&str> =
+            bases.into_iter().filter(|b| self.may_hold_module(&format!("{b}{path}"))).collect();
+        let candidates =
+            bases.iter().flat_map(|b| PY_MODULE_SUFFIXES.iter().map(move |s| format!("{b}{path}{s}")));
         if let Some(found) = self.first_file(candidates) {
             return Some(found);
         }
@@ -371,8 +426,10 @@ impl Resolver {
             let tail = module.replace('.', "/");
             prefix = if prefix.is_empty() { tail } else { format!("{prefix}/{tail}") };
         }
-        let candidates =
-            [format!("{prefix}.py"), format!("{prefix}/__init__.py"), format!("{prefix}.pyi")];
+        if !self.may_hold_module(&prefix) {
+            return Resolved::Missing;
+        }
+        let candidates = PY_MODULE_SUFFIXES.iter().map(|s| format!("{prefix}{s}"));
         if let Some(found) = self.first_file(candidates) {
             return Resolved::Path(found);
         }
@@ -382,6 +439,36 @@ impl Resolver {
             return Resolved::Path(prefix);
         }
         Resolved::Missing
+    }
+
+    /// Module `stem` (đường dẫn không đuôi, tương đối với gốc) có thể tồn tại
+    /// không, hỏi bằng bảng liệt kê thư mục cha.
+    ///
+    /// Một ứng viên chỉ đúng khi tên cuối của nó có trong thư mục cha —
+    /// [`exact_case`] đòi đúng điều đó — nên hỏi bảng trước không đổi kết quả,
+    /// chỉ đổi giá: mỗi thư mục đọc một lần thay vì vài lần `stat` cho từng
+    /// ứng viên. Phần lớn lần dò là trượt — `from pkg import a, b, c` dò từng
+    /// tên xem có phải module con không — và trên namespace PEP 420 trải qua
+    /// hàng chục distribution, `check` của opentelemetry-python từng chậm gấp
+    /// bốn vì chúng.
+    fn may_hold_module(&self, stem: &str) -> bool {
+        let (parent, last) = stem.rsplit_once('/').unwrap_or(("", stem));
+        if last.is_empty() {
+            return true;
+        }
+        let dir = if parent.is_empty() { self.root.clone() } else { self.root.join(parent) };
+        let mut listing = self.listing.borrow_mut();
+        let names = listing.entry(dir.clone()).or_insert_with(|| {
+            std::fs::read_dir(&dir)
+                .ok()
+                .map(|entries| entries.flatten().map(|e| e.file_name()).collect())
+        });
+        let Some(names) = names else { return false };
+        names.contains(OsStr::new(last))
+            || PY_MODULE_SUFFIXES
+                .iter()
+                .filter(|s| !s.contains('/'))
+                .any(|s| names.contains(OsStr::new(&format!("{last}{s}"))))
     }
 
     // ---- C và C++ ----
@@ -992,9 +1079,10 @@ fn find_py_roots(root: &Path) -> PyRoots {
                 .flatten()
                 .filter_map(|e| {
                     let name = e.file_name().into_string().ok()?;
-                    let stem = name
-                        .strip_suffix(".py")
-                        .or_else(|| name.strip_suffix(".pyi"))
+                    let stem = PY_MODULE_SUFFIXES
+                        .iter()
+                        .filter(|s| !s.contains('/'))
+                        .find_map(|s| name.strip_suffix(s))
                         .map(str::to_string);
                     stem.or_else(|| e.file_type().ok()?.is_dir().then_some(name))
                 })
@@ -1037,7 +1125,7 @@ fn find_c_files(root: &Path) -> HashMap<String, Vec<String>> {
     const MAX_FILES: usize = 200_000;
     const SKIP: &[&str] = &["target", "node_modules", ".git", ".arch", "dist"];
     const EXTS: &[&str] =
-        &["h", "hh", "hpp", "hxx", "inl", "inc", "c", "cc", "cpp", "cxx", "def", "ipp", "tcc"];
+        &["h", "hh", "hpp", "hxx", "inl", "inc", "c", "cc", "cpp", "cxx", "def", "ipp", "tcc", "cu", "cuh"];
 
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
     let mut stack = vec![String::new()];

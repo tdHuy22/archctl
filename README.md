@@ -9,6 +9,7 @@ Con người vẽ kiến trúc, luồng dữ liệu và ràng buộc. Agent lậ
 ```bash
 archctl init --from-code    # dựng bản nháp kiến trúc từ mã đã có
 archctl check               # đối chiếu mã với luật
+archctl scan <file>         # archctl đọc được import nào, trỏ tới đâu
 archctl verify              # chạy các cách kiểm đã khai báo
 archctl serve               # mở sơ đồ tương tác ở 127.0.0.1:4000
 ```

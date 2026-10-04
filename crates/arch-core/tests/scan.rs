@@ -48,6 +48,53 @@ import { b } from 'yes'
 }
 
 #[test]
+fn ts_type_trong_ngoac_khong_lam_mat_import() {
+    // `type` trong ngoặc là bổ ngữ của một tên (TS 4.5), không mở câu lệnh
+    // mới. Vue core từng mất 363/1 728 import tĩnh vì coi nó là mốc dừng.
+    let src = "\
+import { type Foo, bar } from './a'
+import { baz, type Qux } from './b'
+export { type T } from './c'
+import {
+  type Ref,
+  ref,
+} from './d'
+import type { X } from './e'
+";
+    assert_eq!(specs(Lang::TypeScript, src), ["./a", "./b", "./c", "./d", "./e"]);
+}
+
+/// Ngược lại, các từ khoá khác trong ngoặc vẫn là mốc dừng: `import()` và
+/// `require()` trong `export default {...}` là lời gọi, không phải một phần của
+/// câu export. Router và async component của Vue 2 viết đúng như vậy, thường
+/// không có dấu chấm phẩy.
+#[test]
+fn ts_import_dong_trong_khoi_export_khong_bi_nuot() {
+    let cases: [(&str, &[&str]); 5] = [
+        (
+            "export default {\n  components: { Foo: () => import('./Foo.vue') },\n  data() { return { x: require('./bar') } }\n}\n",
+            &["./Foo.vue", "./bar"],
+        ),
+        (
+            "export default new Router({ routes: [{ component: () => import('./views/Home.vue') }] })\n",
+            &["./views/Home.vue"],
+        ),
+        ("export interface P { a: import('./types').A }\n", &["./types"]),
+        ("export type T = { b: import('./t2').B }\n", &["./t2"]),
+        ("export default { x: require('./bar'), type: 'y' }\n", &["./bar"]),
+    ];
+    for (src, want) in cases {
+        assert_eq!(specs(Lang::TypeScript, src), want, "{src}");
+    }
+}
+
+#[test]
+fn ts_import_bang_require() {
+    let src = "import fs = require('fs')\nexport import util = require('./util')\n";
+    assert_eq!(specs(Lang::TypeScript, src), ["fs", "./util"]);
+}
+
+#[test]
 fn ts_regex_va_phep_chia_khong_lam_lech_bo_quet() {
     let src = "const re = /from 'no'/g\nconst r = a / b / c\nimport { b } from 'yes'\n";
     assert_eq!(specs(Lang::TypeScript, src), ["yes"]);
@@ -91,6 +138,77 @@ s = \"import chuoi\"
 import that_su
 ";
     assert_eq!(specs(Lang::Python, src), ["that_su"]);
+}
+
+/// Trong chuỗi ba nháy, `\"` vẫn là một ký tự đã thoát: chuỗi không đóng ở
+/// `\"""`. Đóng sớm thì phần sau của chuỗi thành mã, sinh import giả, và ba
+/// nháy cuối mở một chuỗi mới nuốt mất import thật (idlelib `pyparse.py`).
+#[test]
+fn py_chuoi_ba_nhay_co_ky_tu_thoat() {
+    let src = "x = \"\"\"a\\\"\"\" vẫn ở trong\nimport khong_phai\n\"\"\"\nimport that\n";
+    assert_eq!(specs(Lang::Python, src), ["that"]);
+    assert_eq!(lines(Lang::Python, src), [4]);
+}
+
+/// f-string của Python 3.12 (PEP 701) và t-string của 3.14: biểu thức trong
+/// `{}` được chứa chính loại nháy bọc ngoài, được xuống dòng, được có chú
+/// thích. Đọc như chuỗi thường thì nháy bên trong đóng chuỗi sớm, và một
+/// chuỗi ba nháy lạc nuốt phần sau của file (thư viện chuẩn `test_fstring.py`).
+#[test]
+fn py_f_string_long_nhay() {
+    let cases = [
+        "a = f\"{\"\"\"y\"\"\"}\"\n",
+        "b = f'''{\n    \"\"\"lồng\n    ''' vẫn lồng\"\"\"\n}'''\n",
+        "c = f\"{x[\"k\"]:'>10} {{không phải trường}} {f\"{z!r}\"}\" + '\"\"\"'\n",
+        "d = rf\"\\d{n}\" + t\"{'''x'''}\" + T'{\"\"\"}\"\"\"}'\n",
+        "e = f\"{w  # chú thích có nháy '''\n}\"\n",
+    ];
+    for head in cases {
+        let src = format!("{head}import that\n");
+        assert_eq!(specs(Lang::Python, &src), ["that"], "{head}");
+        assert_eq!(lines(Lang::Python, &src), [head.lines().count() + 1], "{head}");
+    }
+    // Phần chữ của f-string vẫn là chuỗi: tên bảng trong SQL vẫn được thấy.
+    let sql = "q = f\"SELECT * FROM payments WHERE id = {pid}\"\n";
+    assert_eq!(Lang::Python.scan_all(sql, &Default::default(), &["payments"]).tables.len(), 1);
+}
+
+/// `yield from x` và `raise E from e` không phải import. Bản cũ coi chúng là
+/// import (1 045 cái giả trên 9 repo của bộ đo), rồi bỏ qua "danh sách tên"
+/// kéo sang dòng sau và nuốt import thật ngay sau đó: 15 cái, theo mẫu
+/// `except ImportError: raise ... from e` rồi import tiếp (google-api-core
+/// `rest_streaming_async.py:30`).
+#[test]
+fn py_yield_from_va_raise_from_khong_phai_import() {
+    let src = "\
+def g():
+    yield from helpers
+try:
+    import fast
+except ImportError as e:
+    raise ImportError(\"cần fast\") from e
+import after_raise
+x = (yield
+     from gen)
+";
+    assert_eq!(specs(Lang::Python, src), ["fast", "after_raise"]);
+}
+
+/// Nối dòng bằng `\` trong câu import. `from a \` xuống dòng `import b` từng
+/// sinh thêm import giả `b`; `import a, \` xuống dòng `b` từng mất `b`.
+#[test]
+fn py_import_noi_dong_bang_gach_cheo() {
+    let src = "from pkg.mod \\\n    import thing\nimport a, \\\n    b\nimport c\n";
+    assert_eq!(specs(Lang::Python, src), ["pkg.mod", "a", "b", "c"]);
+    assert_eq!(lines(Lang::Python, src), [1, 3, 3, 5]);
+}
+
+/// `from x import y; import z` là hai câu lệnh. Bỏ qua danh sách tên tới hết
+/// dòng thì mất `z` (thư viện chuẩn `test_future_stmt/nested_scope.py`).
+#[test]
+fn py_hai_cau_import_tren_mot_dong() {
+    let src = "from __future__ import nested_scopes; import site\nimport os; from x import (y,\n z); import w\n";
+    assert_eq!(specs(Lang::Python, src), ["__future__", "site", "os", "x", "w"]);
 }
 
 #[test]
@@ -139,6 +257,95 @@ const char *s = \"#include \\\"no3.h\\\"\";
 #include \"yes.h\"
 ";
     assert_eq!(specs(Lang::C, src), ["yes.h"]);
+}
+
+/// Chú thích khối mở trên dòng chỉ thị là chú thích tới tận `*/`. Bỏ qua cả
+/// dòng chỉ thị làm mất dấu `/*`, và phần sau của chú thích bị đọc như mã:
+/// `#include` đã bị chú thích hoá lại thành import, dấu nháy trong "it's" làm
+/// lệch nhịp (redis `server.h`, libbpf, zstd).
+#[test]
+fn c_chu_thich_mo_tren_dong_chi_thi() {
+    let src = "\
+#include \"a.h\"
+#define A 1 /* mã cũ:
+#include \"old.h\"
+   it's gone */
+#include \"b.h\" /* đuôi
+#include \"no.h\"
+*/
+#define S \"/*\"
+#include \"c.h\"
+";
+    assert_eq!(specs(Lang::C, src), ["a.h", "b.h", "c.h"]);
+    assert_eq!(lines(Lang::C, src), [1, 5, 9]);
+}
+
+/// Chỉ thị nối dòng bằng `\` kéo tới hết dòng nối cuối cùng. redis `tls.c`
+/// có `#error "... Build against a \` cộng hai dòng chữ; phần chữ bị đọc như
+/// mã thì sinh ký hiệu giả, và nháy kép lệch từng lộn ngược cả phần sau của
+/// file — archctl thấy 0/31 lời gọi `serverLog`.
+#[test]
+fn c_chi_thi_noi_dong_bang_gach_cheo() {
+    let src = "\
+#error \"needs OpenSSL 1.0.2. Build against a \\
+newer OpenSSL, never strcat\\
+ into it.\"
+#define MAX(a, b) \\
+    ((a) > (b) ? (a) : (b))
+#include \"b.h\"
+void f(void) { strcpy(d, s); }
+";
+    assert_eq!(lines(Lang::C, src), [6]);
+    let hits: Vec<String> =
+        Lang::C.scan(src, &["strcat", "strcpy"]).symbols.into_iter().map(|h| h.symbol).collect();
+    assert_eq!(hits, ["strcpy"]);
+}
+
+/// Dấu phân cách chữ số của C++14 và C23 không mở char literal. Với
+/// `0xFFFF'FFFF; }` lexer từng nuốt cả dấu `}` đóng hàm, và mọi hàm định nghĩa
+/// sau đó rơi vào "bên trong một khối", mất khỏi phần ghép FFI (abseil
+/// `hash.h`, `numbers.cc`, `utf8.cc`).
+#[test]
+fn c_dau_phan_cach_chu_so() {
+    let src = "\
+int a(int x) { return x * 1'000'000; }
+int b(int y) { return y & 0xFFFF'FFFF; }
+int c(int z) { return z | 0b0111'1111 | 'q'; }
+double d(void) { return 1.5e+3 + 0x1p-3; }
+";
+    let provides: Vec<String> =
+        Lang::C.scan(src, &[]).foreign.provides.into_iter().map(|h| h.symbol).collect();
+    assert_eq!(provides, ["a", "b", "c", "d"]);
+}
+
+/// Chuỗi thô của C++11 không có ký tự thoát, được chứa nháy kép lẫn xuống
+/// dòng, và chỉ đóng ở `)delim"`. abseil `usage_test.cc` dùng `R"(...)"`,
+/// matplotlib dùng `R"""(...)"""` cho docstring của pybind11.
+#[test]
+fn c_chuoi_tho_cpp() {
+    let src = "\
+const char* a = R\"(he said \"hi)\";
+const char* b = R\"delim(
+#include \"no.h\"
+)\" vẫn ở trong
+)delim\";
+const char* c = u8R\"(x)\" LR\"(y)\";
+const char* d = R\"\"\"(Docstring with \"quotes\" and don't
+)\"\"\";
+#include \"yes.h\"
+";
+    assert_eq!(specs(Lang::C, src), ["yes.h"]);
+    assert_eq!(lines(Lang::C, src), [9]);
+}
+
+/// File lưu bằng UTF-8 có BOM (mặc định của nhiều trình soạn trên Windows).
+/// BOM từng thành một token, nên `#` của dòng 1 không còn "ở đầu dòng":
+/// `#include <a.h>` ở đó biến mất, và một chỉ thị khác ở đó bị đọc như mã.
+#[test]
+fn c_bom_khong_an_chi_thi_dong_dau() {
+    let found = Lang::C.imports("\u{feff}#include <a.h>\n#include \"b.h\"\n");
+    let pairs: Vec<(&str, bool)> = found.iter().map(|i| (i.spec.as_str(), i.system)).collect();
+    assert_eq!(pairs, [("a.h", true), ("b.h", false)]);
 }
 
 #[test]
@@ -285,6 +492,25 @@ use crate::that_su::Thing;
     assert_eq!(specs(Lang::Rust, src), ["crate::that_su::Thing"]);
 }
 
+/// `br"..."` và `cr"..."` là chuỗi thô như `r"..."`, không có ký tự thoát.
+/// Đọc như chuỗi thường thì `br"\"` không đóng, và vì chuỗi Rust được bắc qua
+/// dòng, nó nuốt mọi `use` phía sau.
+#[test]
+fn rust_chuoi_tho_byte_va_c() {
+    let cases = [
+        "const A: &[u8] = br\"\\\";\n",
+        "const B: &[u8] = br#\"he said \"hi\"#;\n",
+        "const C: &CStr = cr\"\\\";\n",
+        "const D: &CStr = cr#\"\"\"#;\n",
+        "const E: &[u8] = br#\"use crate::no::X;\"#;\n",
+    ];
+    for head in cases {
+        let src = format!("{head}use crate::sau::Thing;\n");
+        assert_eq!(specs(Lang::Rust, &src), ["crate::sau::Thing"], "{head}");
+        assert_eq!(lines(Lang::Rust, &src), [2], "{head}");
+    }
+}
+
 // ---------- Go ----------
 
 #[test]
@@ -307,6 +533,20 @@ import (
     );
 }
 
+/// Chuỗi thô của Go không có ký tự thoát và không có nội suy: `` `C:\` `` và
+/// `` `${HOME` `` đóng ở dấu backtick kế tiếp. Đọc như template JS thì `\` nuốt
+/// dấu đóng và `${` nuốt cả phần sau — hugo 15 file, etcd 5, có
+/// `common/paths/url.go:129` — và lời gọi cgo phía sau biến mất.
+#[test]
+fn go_chuoi_tho_khong_co_ky_tu_thoat() {
+    let src = "package main\n\nimport \"C\"\n\nvar p = `C:\\`\nvar q = `${HOME`\nvar r = `a\\\nb`\n\nfunc main() { C.native_call() }\n";
+    let calls: Vec<(String, usize)> =
+        Lang::Go.scan(src, &[]).foreign.calls.into_iter().map(|h| (h.symbol, h.line)).collect();
+    assert_eq!(calls, [("native_call".to_string(), 10)]);
+    // Ở ngôn ngữ không có backtick, nó chỉ là một ký hiệu lạc.
+    assert_eq!(specs(Lang::Python, "x = 1 ` 2\nimport z\n"), ["z"]);
+}
+
 #[test]
 fn go_chu_thich_va_chuoi_khong_duoc_tinh() {
     let src = "// import \"no1\"\nconst s = \"import no2\"\nimport \"yes\"\n";
@@ -324,6 +564,96 @@ fn phan_mo_rong_quyet_dinh_ngon_ngu() {
     assert_eq!(Lang::for_path("a/b.go"), Some(Lang::Go));
     assert_eq!(Lang::for_path("a/b.md"), None);
     assert_eq!(Lang::for_path("Makefile"), None);
+}
+
+/// CUDA là C++ (vllm có 167 file `.cu`, `.cuh`), Cython là Python cộng thêm
+/// `cimport` (scikit-learn có 77 file), `.vue` là TypeScript trong `<script>`.
+/// Trước đây chúng không được quét, và bộ đo cũng không thấy vì nó chỉ đếm
+/// những đuôi đã hỗ trợ.
+#[test]
+fn duoi_cua_cuda_cython_vue() {
+    assert_eq!(Lang::for_path("csrc/attention.cu"), Some(Lang::C));
+    assert_eq!(Lang::for_path("csrc/attention.cuh"), Some(Lang::C));
+    assert_eq!(Lang::for_path("pkg/_fast.pyx"), Some(Lang::Python));
+    assert_eq!(Lang::for_path("pkg/_fast.pxd"), Some(Lang::Python));
+    assert_eq!(Lang::for_path("pkg/_fast.pxi"), Some(Lang::Python));
+    assert_eq!(Lang::for_path("src/App.vue"), Some(Lang::TypeScript));
+    // `.inc` thì không: abseil dùng cho C++, nhưng curl dùng cho Makefile và
+    // scikit-learn cho reStructuredText.
+    assert_eq!(Lang::for_path("docs/Makefile.inc"), None);
+}
+
+/// Component một file của Vue: mã nằm trong `<script>`. `<template>` và
+/// `<style>` là HTML và CSS — có chữ như "Don't import './no'", và không có
+/// import nào. Số dòng vẫn tính theo file gốc.
+#[test]
+fn vue_chi_doc_phan_script() {
+    let src = "\
+<template>
+  <p>Don't import './no'</p>
+</template>
+<script setup lang=\"ts\">
+import { type Ref, ref } from 'vue'
+import Child from './Child.vue'
+</script>
+<style>
+.a { content: \"import x from 'no2'\" }
+</style>
+";
+    let (lang, got) = arch_core::scan::imports_for("src/App.vue", src).unwrap();
+    assert_eq!(lang, Lang::TypeScript);
+    let got: Vec<(String, usize)> = got.into_iter().map(|i| (i.spec, i.line)).collect();
+    assert_eq!(got, [("vue".to_string(), 5), ("./Child.vue".to_string(), 6)]);
+}
+
+/// Cython: `cimport` và `from x cimport y` là import, và `cdef extern from
+/// "math.h"` thì không (đó là header C, không phải module Python).
+#[test]
+fn cython_cimport() {
+    let src = "\
+from cython cimport floating
+from sklearn.utils._typedefs cimport uint8_t, intp_t
+cimport numpy as cnp
+import numpy as np
+from ..utils cimport _typedefs
+cdef extern from \"math.h\":
+    double sqrt(double x)
+";
+    assert_eq!(
+        specs(Lang::Python, src),
+        ["cython", "sklearn.utils._typedefs", "numpy", "numpy", "..utils"]
+    );
+}
+
+fn lines(lang: Lang, src: &str) -> Vec<usize> {
+    lang.imports(src).iter().map(|i| i.line).collect()
+}
+
+/// `\` cuối dòng trong chuỗi nối chuỗi sang dòng sau. Bỏ qua `\n` đó mà không
+/// đếm thì mọi token phía sau lệch một dòng: vllm `deepseek_v2.py:488` lệch 1,
+/// matplotlib `tests/test_axes.py` lệch 3.
+#[test]
+fn chuoi_noi_dong_khong_lam_lech_so_dong() {
+    assert_eq!(lines(Lang::Python, "s = 'a\\\nb'\nimport x\n"), [3]);
+    assert_eq!(lines(Lang::C, "const char *s = \"a\\\nb\";\n#include \"x.h\"\n"), [3]);
+    assert_eq!(lines(Lang::TypeScript, "const s = `a\\\nb`\nimport x from './x'\n"), [3]);
+}
+
+/// Chuỗi thường và char literal không bắc qua dòng, trừ khi nối bằng `\`.
+/// Một dấu nháy lạc từng nuốt phần còn lại của file: `excalidraw-app/App.tsx`
+/// mất 386 dòng sau `<h1>I'm not a pretzel!</h1>`. Giờ thiệt hại dừng ở cuối
+/// dòng chứa nó.
+#[test]
+fn dau_nhay_lac_chi_hong_mot_dong() {
+    let tsx = "import a from 'a'\nconst v = <h1>I'm here</h1>\nconst b = require('./b')\n";
+    assert_eq!(specs(Lang::TypeScript, tsx), ["a", "./b"]);
+    let c = "#include \"a.h\"\n#if 0\nDon't compile this\n#endif\n#include \"b.h\"\n";
+    assert_eq!(specs(Lang::C, c), ["a.h", "b.h"]);
+    // Rust thì khác: chuỗi thường được phép trải nhiều dòng.
+    let rs = "const S: &str = \"dòng một\ndòng hai\";\nuse crate::sau::X;\n";
+    assert_eq!(specs(Lang::Rust, rs), ["crate::sau::X"]);
+    // Nối dòng bằng `\` vẫn nối, kể cả khi file xuống dòng kiểu Windows.
+    assert_eq!(lines(Lang::C, "const char *s = \"a\\\r\nb\";\r\n#include \"x.h\"\r\n"), [3]);
 }
 
 #[test]

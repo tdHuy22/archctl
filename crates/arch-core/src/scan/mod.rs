@@ -13,7 +13,7 @@ mod python;
 mod rustlang;
 mod ts;
 
-use lexer::{CharLit, LexConfig, Tok, Token};
+use lexer::{Backtick, CharLit, LexConfig, Tok, Token};
 use std::collections::HashSet;
 
 /// Tập tên cần tìm. Dựng một lần rồi dùng cho mọi file: số tên tăng theo số
@@ -38,11 +38,15 @@ pub struct Import {
     pub line: usize,
     /// `#include <...>` của C/C++. Luôn `false` ở các ngôn ngữ khác.
     pub system: bool,
+    /// Tên được nhập từ module: `from pkg import a, b as c` cho `["a", "b"]`.
+    /// Chỉ Python điền. Tên nào chính là module con thì cũng là một đích —
+    /// xem [`crate::resolve::Resolver::submodules`].
+    pub names: Vec<String>,
 }
 
 impl Import {
     fn local(spec: impl Into<String>, line: usize) -> Self {
-        Import { spec: spec.into(), line, system: false }
+        Import { spec: spec.into(), line, system: false, names: Vec::new() }
     }
 }
 
@@ -50,11 +54,15 @@ impl Lang {
     pub fn for_path(path: &str) -> Option<Lang> {
         let ext = path.rsplit_once('.')?.1;
         Some(match ext {
-            "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" => Lang::TypeScript,
-            "py" | "pyi" => Lang::Python,
-            "c" | "h" | "cc" | "cpp" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" | "inl" => {
-                Lang::C
-            }
+            // `.vue`: chỉ phần `<script>`, xem [`source_view`].
+            "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" | "vue" => Lang::TypeScript,
+            // `.pyx`, `.pxd`, `.pxi`: Cython, Python cộng thêm `cimport`.
+            "py" | "pyi" | "pyx" | "pxd" | "pxi" => Lang::Python,
+            // `.cu`, `.cuh`: CUDA, tức C++. `.inc` cố ý không có: abseil dùng
+            // nó cho C++, nhưng curl dùng cho Makefile và scikit-learn cho
+            // reStructuredText.
+            "c" | "h" | "cc" | "cpp" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" | "inl"
+            | "cu" | "cuh" => Lang::C,
             "rs" => Lang::Rust,
             "go" => Lang::Go,
             _ => return None,
@@ -76,6 +84,7 @@ impl Lang {
             Lang::TypeScript => LexConfig {
                 char_literals: CharLit::AsString,
                 regex_literals: true,
+                backtick: Backtick::Template,
                 ..LexConfig::base()
             },
             Lang::Python => LexConfig {
@@ -84,17 +93,24 @@ impl Lang {
                 triple_quoted: true,
                 char_literals: CharLit::AsString,
                 path_separator: Some("."),
+                fstrings: true,
                 ..LexConfig::base()
             },
-            Lang::C => LexConfig { preprocessor_includes: true, ..LexConfig::base() },
+            Lang::C => LexConfig {
+                preprocessor_includes: true,
+                digit_separators: true,
+                cpp_raw_strings: true,
+                ..LexConfig::base()
+            },
             Lang::Rust => LexConfig {
                 nested_block_comment: true,
                 raw_hash_strings: true,
                 char_literals: CharLit::QuotedOrLifetime,
                 path_separator: Some("::"),
+                multiline_strings: true,
                 ..LexConfig::base()
             },
-            Lang::Go => LexConfig { ..LexConfig::base() },
+            Lang::Go => LexConfig { backtick: Backtick::Raw, ..LexConfig::base() },
         }
     }
 
@@ -298,7 +314,33 @@ pub fn rust_bindings(src: &str) -> Vec<(String, String)> {
 
 pub fn imports_for(path: &str, src: &str) -> Option<(Lang, Vec<Import>)> {
     let lang = Lang::for_path(path)?;
-    Some((lang, lang.imports(src)))
+    Some((lang, lang.imports(&source_view(path, src))))
+}
+
+/// Phần mã của một file, để quét. Gần như luôn là cả file.
+///
+/// Component một file của Vue (`.vue`) là ngoại lệ: mã nằm trong các khối
+/// `<script>`, còn `<template>` và `<style>` là HTML và CSS — có chữ như
+/// "Don't import './x'", và không có import nào. Mọi thứ ngoài khối script
+/// thành khoảng trắng, giữ nguyên dấu xuống dòng để số dòng vẫn đúng với file
+/// gốc.
+pub fn source_view<'a>(path: &str, src: &'a str) -> std::borrow::Cow<'a, str> {
+    if !path.ends_with(".vue") {
+        return std::borrow::Cow::Borrowed(src);
+    }
+    let blank = |s: &str| s.chars().map(|c| if c == '\n' { '\n' } else { ' ' }).collect::<String>();
+    let mut out = String::with_capacity(src.len());
+    let mut rest = src;
+    while let Some(open) = rest.find("<script") {
+        // Thẻ mở kết thúc ở `>` đầu tiên sau nó.
+        let Some(tag_end) = rest[open..].find('>').map(|k| open + k + 1) else { break };
+        out.push_str(&blank(&rest[..tag_end]));
+        let body_end = rest[tag_end..].find("</script").map_or(rest.len(), |k| tag_end + k);
+        out.push_str(&rest[tag_end..body_end]);
+        rest = &rest[body_end..];
+    }
+    out.push_str(&blank(rest));
+    std::borrow::Cow::Owned(out)
 }
 
 pub fn is_supported(path: &str) -> bool {

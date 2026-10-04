@@ -18,8 +18,10 @@ import time
 from pathlib import Path
 
 LANG_EXTS = {
-    ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".py", ".pyi",
-    ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx", ".inl", ".rs", ".go",
+    ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".vue",
+    ".py", ".pyi", ".pyx", ".pxd", ".pxi",
+    ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx", ".inl", ".cu", ".cuh",
+    ".rs", ".go",
 }
 # Thư mục archctl luôn bỏ qua (`ALWAYS_IGNORE` trong `check.rs`) và những tên
 # chỉ bỏ khi `.gitignore` bỏ (`OUTPUT_DIRS`). Chép lại ở đây có chủ ý: đây là

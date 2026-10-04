@@ -97,15 +97,26 @@ fixture viết riêng để test.
 
 Đó là phép thử mạnh nhất mà repo có, nên nó chạy ở mỗi pull request chứ không
 chỉ theo lịch: chạy hằng tuần thì một lỗi đã vào `main` rồi mới bị bắt. Tải
-khoảng 690 MB rồi chạy chừng hai phút trên máy dev; trên runner chung thì lâu
-hơn, nên job có giới hạn 15 phút.
+khoảng 920 MB rồi chạy chừng hai phút trên máy dev; trên runner chung thì lâu
+hơn, và bước đối chiếu với clang ở dưới chạy qua ~4 000 file C/C++ trên hai
+lõi, nên job có giới hạn 25 phút.
 
 Nó thoát 2 — không phải 1 — khi không tải được repo, để một lần mạng chập chờn
 không trông giống một lỗi của archctl.
 
-Ngay sau đó, `bench/sabotage.py` phá archctl bảy kiểu và đòi bộ đo bắt đúng
+Ngay sau đó, `bench/sabotage.py` phá archctl mười kiểu và đòi bộ đo bắt đúng
 từng kiểu. Bộ đo chỉ có giá trị khi mỗi phép kiểm của nó đổ được; bước này
 giữ điều đó đúng qua những lần sửa sau.
+
+Bước cuối, `bench/oracle.py`, lấp chỗ mà phép tự nhất quán không với tới: nó
+so archctl với chính nó, nên một lỗi trong bộ trích — chỗ cả bộ khám phá lẫn
+bộ kiểm cùng dùng — làm cả hai sai giống nhau mà vẫn ra "0 bất nhất". Vue core
+từng mất 21% import tĩnh như vậy suốt nhiều lần chạy xanh. Bước này đối chiếu
+với parser chuẩn: `ast` của Python, lexer thô của clang, parser module của
+Node. Cả ba có sẵn trên image `ubuntu-24.04` đã ghim (Python 3.12, Clang 18,
+Node 22), không cài gì thêm; `--require clang,node` để ngày image thiếu một
+cái thì bước này đỏ chứ không lặng lẽ bỏ qua. Ba trong mười kiểu phá của
+`sabotage.py` nhắm vào bước này.
 
 ## Còn một chốt nữa không nằm trong YAML
 

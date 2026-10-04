@@ -122,6 +122,7 @@ fn observe_edges(
             continue;
         }
 
+        let src = crate::scan::source_view(file, &src);
         let scan = lang.scan_all(&src, &Default::default(), &[]);
         ffi_calls.extend(scan.foreign.calls.into_iter().map(|c| (from, c.symbol)));
         for provided in scan.foreign.provides {
@@ -137,13 +138,21 @@ fn observe_edges(
         }
 
         for import in scan.imports {
-            let Resolved::Path(target) = resolver.resolve(lang, file, &import) else { continue };
-            let Some(to) = group_of_target(root, &target, prefix).and_then(|g| owners.get(&g))
-            else {
-                continue;
-            };
-            if to != from {
-                edges.push((from.clone(), to.clone()));
+            // Cùng các đích như `check` thấy: module, và những tên trong
+            // `from pkg import a` mà chính chúng là module con.
+            let base = resolver.resolve(lang, file, &import);
+            let mut targets = resolver.submodules(lang, file, &import, &base);
+            if let Resolved::Path(target) = base {
+                targets.push(target);
+            }
+            for target in targets {
+                let Some(to) = group_of_target(root, &target, prefix).and_then(|g| owners.get(&g))
+                else {
+                    continue;
+                };
+                if to != from {
+                    edges.push((from.clone(), to.clone()));
+                }
             }
         }
     }

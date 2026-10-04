@@ -79,6 +79,36 @@ mà fixture không nghĩ ra.
 Tách 1 khỏi 2 để một lần mạng chập chờn trên CI không trông giống một lỗi của
 archctl.
 
+## Phép thử thứ ba: đối chiếu với parser chuẩn
+
+```bash
+python3 bench/oracle.py
+```
+
+Tự nhất quán so archctl với chính nó: bộ khám phá và bộ kiểm dùng chung một
+bộ trích, nên một lỗi trong bộ trích làm cả hai sai giống nhau mà vẫn ra
+"0 bất nhất". [oracle.py](oracle.py) so import mà `archctl scan --json` đọc
+được với parser chuẩn của từng ngôn ngữ, trên các repo `bench.py` đã tải:
+
+- Python: `ast` của chính trình thông dịch chạy script. File không parse được
+  (cú pháp mới hơn bản Python đang chạy, Python 2) được đếm riêng.
+- C/C++: lexer thô của clang, không tiền xử lý — giống archctl, include trong
+  nhánh `#if` nào cũng tính.
+- JS/TS: parser module của Node, TS gỡ kiểu trước bằng
+  `module.stripTypeScriptTypes`. Chỉ import tĩnh, nên chỉ kiểm phía thiếu.
+
+Python và C/C++ đòi khớp cả tên lẫn số dòng: thiếu, thừa hay lệch dòng đều là
+lệch. Thiếu clang hay Node thì phần đó in `BỎ QUA`; `--require clang,node` biến
+việc thiếu thành mã thoát 2, và với Node thì đòi cả khả năng gỡ kiểu TS. Thước
+đo tự hỏng cũng là mã 2 chứ không phải "đạt": clang hay Node thoát khác 0, Node
+không trả lời đủ số file, hoặc quá nửa số file của một repo không parse được.
+
+Lần đầu chạy (2026-10-04) nó bắt những lỗi mà cả hai phép thử kia đều cho qua:
+Vue core mất 363/1 728 import tĩnh vì `import { type A, b }`, Python có 1 045
+import giả từ `raise E from e` và `yield from x` cộng 15 import thật bị nuốt
+ngay sau chúng, 11 import Python báo sai dòng. Chi tiết ở
+[docs/check.md](../docs/check.md#đối-chiếu-với-parser-chuẩn).
+
 ## Vì sao ghim commit
 
 Không ghim thì con số trôi theo upstream: chạy lại hôm sau cho kết quả khác mà
@@ -111,8 +141,9 @@ phạm, thêm một cảnh báo vào luật sinh ra, báo quét 0 file, báo qu�
 file, bỏ khoá
 `lawWarnings`, giữ nguyên hash khi luật đổi, nói `diff` có thay đổi khi chỉ
 thêm chú thích. Mỗi kiểu phải làm `bench.py` thoát 1, **và phải bị đúng phép
-kiểm dành cho nó bắt** — không chỉ đỏ vì một lý do khác. CI chạy bước này sau
-bộ đo.
+kiểm dành cho nó bắt** — không chỉ đỏ vì một lý do khác. Ba kiểu nữa làm hỏng
+đầu ra `scan --json` — mất một import, lệch một dòng, thêm một import giả — và
+phải làm `oracle.py` thoát 1. CI chạy bước này sau bộ đo.
 
 Nó có mặt vì bộ đo này từng nằm ngoài git, và lúc đưa vào, đọc lại thì bốn
 phép kiểm không kiểm gì: một cái chỉ xét file có tồn tại vì vế sau của `or`

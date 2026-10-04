@@ -609,3 +609,31 @@ fn danh_sach_dai_thi_noi_ro_con_bao_nhieu() {
     let json = text(&p.run(&["check", "--json"]));
     assert_eq!(json.matches("\"spec\"").count(), 20, "{json}");
 }
+
+#[test]
+fn scan_in_import_doc_duoc_va_dich_phan_giai() {
+    // Bộ đo đối chiếu đầu ra này với parser chuẩn của từng ngôn ngữ, nên nó
+    // phải là đúng thứ `check` đọc: cùng import, cùng dòng, cùng đích.
+    let p = Project::new("scan");
+    std::fs::create_dir_all(p.0.join("src/order")).unwrap();
+    std::fs::write(
+        p.0.join("src/order/create.py"),
+        "import os\nfrom . import util\ntry:\n    import fast\nexcept ImportError as e:\n    raise E from e\n",
+    )
+    .unwrap();
+    std::fs::write(p.0.join("src/order/util.py"), "").unwrap();
+
+    let out = p.run(&["scan", "--json", "src/order/create.py"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""file":"src/order/create.py","lang":"Python""#), "{s}");
+    assert!(s.contains(r#""line":1,"spec":"os""#), "{s}");
+    assert!(s.contains(r#""resolved":"package","target":"os""#), "{s}");
+    assert!(s.contains(r#""line":2,"spec":".""#), "{s}");
+    assert!(s.contains(r#""submodules":["src/order/util.py"]"#), "{s}");
+    assert!(s.contains(r#""line":4,"spec":"fast""#), "{s}");
+    assert!(!s.contains(r#""spec":"e""#), "`raise ... from e` không phải import: {s}");
+
+    let human = text(&p.run(&["scan", "src/order/create.py"]));
+    assert!(human.contains("src/order/create.py") && human.contains("os"), "{human}");
+}

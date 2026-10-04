@@ -6,15 +6,82 @@ Hiện kiểm **luật phụ thuộc giữa component** cho năm ngôn ngữ.
 
 | Ngôn ngữ | Phần mở rộng | Nhận được | Phân giải |
 | --- | --- | --- | --- |
-| TypeScript, JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | `import`, `import type`, `export … from`, `require()`, `import()` | tương đối, `index.*`, `.js`→`.ts`, alias `paths` trong tsconfig, **gói anh em trong workspace npm** |
-| Python | `.py .pyi` | `import a.b`, `import a as b, c`, `from .x import y` | tương đối theo số dấu chấm; tuyệt đối thử gốc repo và **mọi thư mục có `pyproject.toml`, `setup.py`, `setup.cfg`, `manage.py`** (cùng `src/`, `lib/` của chúng), package chứa file gọi trước; **gói không gian tên (PEP 420)** |
-| C, C++ | `.c .h .cc .cpp .cxx .hpp .hh .hxx .inl` | `#include "x"`, `#include <x>` | **thư mục `-I` đọc từ build**; `"…"` ưu tiên thư mục file gọi; không có build thì khớp tên **duy nhất** trong repo |
+| TypeScript, JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs`, `.vue` (chỉ phần `<script>`) | `import`, `import type`, `import { type A, b }`, `export … from`, `import x = require()`, `require()`, `import()` | tương đối, `index.*`, `.js`→`.ts`, alias `paths` trong tsconfig, **gói anh em trong workspace npm** |
+| Python | `.py .pyi`, Cython `.pyx .pxd .pxi` | `import a.b`, `import a as b, c`, `from .x import y`, `cimport`, `from x cimport y` | tương đối theo số dấu chấm; tuyệt đối thử gốc repo và **mọi thư mục có `pyproject.toml`, `setup.py`, `setup.cfg`, `manage.py`** (cùng `src/`, `lib/` của chúng), package chứa file gọi trước; **gói không gian tên (PEP 420)**; `from pkg import sub` với `sub` là module con thì đích là **cả `pkg` lẫn `pkg/sub`** |
+| C, C++ | `.c .h .cc .cpp .cxx .hpp .hh .hxx .inl`, CUDA `.cu .cuh` | `#include "x"`, `#include <x>` | **thư mục `-I` đọc từ build**; `"…"` ưu tiên thư mục file gọi; không có build thì khớp tên **duy nhất** trong repo |
 | Rust | `.rs` | `use`, `pub use`, cây `use a::{b::{c, d as e}, self}`, `use {a, b}`, `extern crate` | theo cây module; **gốc crate của từng file** (thư viện, binary, test, đường dẫn khai trong `Cargo.toml`); nhìn xuyên re-export ở gốc; các crate anh em trong workspace |
 | Go | `.go` | `import "x"`, khối `import ( … )` | đọc `module` trong mọi `go.mod` tới độ sâu 4 (trừ `testdata/`, `vendor/`, thư mục ẩn) để tách nội bộ với bên ngoài; module dài nhất thắng |
 
 Mọi ngôn ngữ dùng chung một lexer cấu hình được. Nó biết bỏ qua chú thích,
 chuỗi, char literal, raw string, docstring và regex theo từng ngôn ngữ — đó là
 chỗ dễ sai nhất, nên chỉ viết một lần.
+
+`.inc` cố ý không được quét: abseil dùng nó cho C++, nhưng curl dùng cho
+Makefile và scikit-learn cho reStructuredText. `archctl scan <file>` in ra
+đúng những import archctl đọc được và đích của từng cái — xem
+[bên dưới](#archctl-scan-archctl-đọc-được-gì).
+
+### Một dấu nháy lạc chỉ hỏng một dòng
+
+Lexer không hiểu ngữ pháp, nên chỗ nó hiểu sai một dấu nháy là chỗ nó lệch
+nhịp: chuỗi thành mã, mã thành chuỗi. Trước đây một lần lệch kéo tới hết file.
+Một dòng `#error "... \` nối dòng làm cả `redis/src/tls.c` bị đọc ngược — clang
+thấy 31 lời gọi `serverLog`, archctl thấy 0, và một luật `api` cấm hàm nào đó
+không thấy gì trong cả file TLS.
+
+Giờ chuỗi thường và char literal **dừng ở cuối dòng**, trừ khi nối bằng `\`
+(kể cả `\` + CRLF), ở mọi ngôn ngữ mà chuỗi không được bắc qua dòng. Chỉ chuỗi
+của Rust được bắc qua dòng. Một dấu nháy lạc — chữ trong JSX như
+`<h1>I'm not a pretzel!</h1>` (từng nuốt 386 dòng của `excalidraw-app/App.tsx`),
+regex sau `)` bị đọc thành phép chia — chỉ còn hỏng phần còn lại của dòng đó.
+
+Rồi từng chỗ châm ngòi tìm được trên repo thật được sửa tận gốc:
+
+| Chỗ châm ngòi | Ở đâu | Giờ |
+| --- | --- | --- |
+| `#define X 1 /* ... it's ...` — chú thích mở trên dòng chỉ thị | redis `server.h`, libbpf, zstd | chỉ thị được bỏ qua tới hết chú thích và hết các dòng nối bằng `\`; `#define S "/*"` không mở chú thích nào |
+| `#error "... \` nối sang dòng chữ | redis `tls.c`, matplotlib | như trên |
+| `0xFFFF'FFFF`, `1'000'000` (C++14, C23) | abseil `hash.h`, `numbers.cc` | dấu phân cách chữ số, không phải char literal |
+| `R"(...)"`, `R"delim(...)delim"`, `R"""(...)"""` | abseil, matplotlib (pybind11) | chuỗi thô C++11, không ký tự thoát |
+| `` `C:\` ``, `` `${HOME` `` trong Go | hugo 15 file, etcd 5 | chuỗi thô Go: không thoát, không nội suy; backtick ở Python, C, Rust chỉ là một ký hiệu |
+| `br"\"`, `cr#"..."#` | Rust | chuỗi thô như `r"..."` |
+| `\"""` trong chuỗi ba nháy | idlelib `pyparse.py` | `\"` không đóng chuỗi |
+| `f"{x["k"]}"`, `f"{(` xuống dòng, `t"{...}"` | Python 3.12 (PEP 701), 3.14 (PEP 750) | `{...}` trong f-string và t-string là mã: chuỗi lồng, chú thích, xuống dòng |
+| BOM đầu file | file lưu từ trình soạn trên Windows | không còn là token, nên `#include <x>` ở dòng 1 vẫn là chỉ thị |
+
+`\` cuối dòng trong chuỗi cũng làm lệch **số dòng** của mọi token phía sau:
+vllm `deepseek_v2.py:488` lệch 1, matplotlib `test_axes.py` lệch 3. Giờ dòng đó
+được đếm.
+
+### Đối chiếu với parser chuẩn
+
+Phép tự nhất quán của bộ đo so archctl với chính nó — bộ khám phá và bộ kiểm
+dùng chung bộ trích — nên một lỗi trong bộ trích làm cả hai sai giống nhau mà
+vẫn ra "0 bất nhất". [bench/oracle.py](../bench/oracle.py) đối chiếu với parser
+chuẩn của từng ngôn ngữ trên 24 repo của bộ đo, và CI chạy nó ở mỗi pull
+request:
+
+| Ngôn ngữ | Thước đo | Kết quả 2026-10-04 |
+| --- | --- | --- |
+| Python | `ast` của CPython 3.14 | 13 545 file, 103 539 import: khớp cả tên lẫn dòng. Thư viện chuẩn của chính 3.14 (1 865 file, 13 599 import) cũng khớp. |
+| C, C++ | lexer thô của clang 21 | 4 239 file, 23 044 `#include`: khớp cả tên lẫn dòng |
+| JS, TS | parser module của Node 24 | 1 007 file, 3 310 import tĩnh: không thiếu cái nào |
+
+Trước khi sửa, cũng phép đối chiếu đó cho:
+
+- **TypeScript**: `import { type A, b } from './x'` mất cả câu, vì `type` bị coi
+  là mở câu lệnh mới — Vue core mất 363/1 728 import tĩnh (21%), excalidraw
+  59/1 433, sơ đồ tự dựng của Vue core thiếu `RuntimeCore -> CompilerDom`.
+- **Python**: `raise E from e` và `yield from x` thành 1 045 import giả, và
+  import thật ngay sau chúng bị nuốt 15 lần (mẫu `except ImportError: raise
+  ... from e` rồi import tiếp). `from a \` xuống dòng `import b` sinh import
+  giả `b`; `import a, \` xuống dòng `b` mất `b`; `from x import y; import z` mất
+  `z`.
+- **C/C++**: `#include` mất 2/21 830 — ít, vì include nằm đầu file, trước chỗ
+  lệch nhịp. Thiệt hại thật nằm ở phần sau: ký hiệu, ghép FFI.
+
+Go và Rust chưa có thước đo chạy được ở đây; hai ngôn ngữ đó được kiểm bằng
+test trong `crates/arch-core/tests/scan.rs`.
 
 ## Cạnh liên ngôn ngữ
 
@@ -45,18 +112,21 @@ bảng ký hiệu:
 
 | Bên gọi | Nhận bằng |
 | --- | --- |
-| Rust | `extern "C" { fn x; }` — ABI nào cũng được |
+| Rust | `extern "C" { fn x; }` — ABI nào cũng được; không ghi ABI (`extern { … }`) là "C" |
 | Go | `import "C"` rồi `C.x` |
 | Bên cung cấp | |
-| C, C++ | định nghĩa hàm ở mức ngoài cùng |
-| Rust | `pub extern "C" fn x` |
+| C, C++ | định nghĩa hàm ở mức ngoài cùng, kể cả bên trong `extern "C" { … }` |
+| Rust | `pub extern "C" fn x`, `extern fn x` |
 
 Ghép theo tên, nên nó thận trọng ở mấy chỗ:
 
 - **Khai báo trước không phải là cung cấp.** `int f(void);` kết thúc bằng `;`
   chứ không mở thân hàm.
 - **Lời gọi lồng trong thân hàm khác không phải là định nghĩa.** Chỉ xét khi
-  độ sâu ngoặc nhọn bằng 0.
+  độ sâu ngoặc nhọn bằng 0. Khối `extern "C" { … }` không tính là một tầng —
+  mã C++ đưa hàm ra cho C gọi thường bọc chúng trong đó — còn `namespace` thì
+  có: hàm C++ trong namespace mang tên đã mangle, Rust hay Go không liên kết
+  tới được.
 - **Hai component cùng cung cấp một tên thì bỏ cả hai.** Không biết chọn đâu,
   mà đoán sai sinh ra một cạnh không có thật.
 - **Không ghép được thì im lặng.** `memcpy` nằm trong libc, không có định
@@ -145,6 +215,8 @@ tệ hơn hẳn việc nói thẳng là chưa biết.
 | `use crate::x` không ra file nào | `mod` viết lồng trong file; không có cạnh, và **không báo** — trình biên dịch đã bảo đảm đường dẫn tồn tại |
 | `from .x import y` không có file nhưng có thư mục | gói không gian tên (PEP 420) — thư mục chính là gói |
 | `from .x import y` không có cả thư mục | **báo ra** |
+| `from pkg import name`, `name` là module con | đích là cả `pkg` lẫn `pkg/name` — Python nạp cả hai, và module con có thể ở component khác. Gói thường (có `__init__.py`) chỉ tìm trong chính thư mục của nó, không sang project bên cạnh có gói cùng tên; module file (`utils.py`) không có module con; chỉ gói không gian tên PEP 420 mới trải qua nhiều distribution |
+| `from pkg import name`, `name` là hàm hay lớp | chỉ `pkg`; **không báo** — không có file nào để tìm |
 | `import numpy` không có trong dự án | coi là gói — với import tuyệt đối của Python, không phân biệt được |
 
 ## Rust: `crate::` là crate nào, và `X` ở gốc là gì
@@ -424,3 +496,27 @@ cũng bị. Chưa hiểu `[abc]`. Bộ đo đối
 chiếu nó với chính `git check-ignore` trên hai mươi bốn repo.
 
 Thêm mẫu glob vào `.arch/.archignore` để bỏ qua thêm.
+
+## `archctl scan`: archctl đọc được gì
+
+```
+archctl scan [--root <dir>] [--json] [<file>...]
+```
+
+In từng import archctl đọc được trong file, ở dòng nào, và phân giải ra đâu —
+đúng những gì `check` và `init --from-code` thấy: cùng danh sách file, cùng
+phần mã của file (`.vue` chỉ phần `<script>`), cùng bộ phân giải. Dùng khi một
+cạnh đáng có mà không có: hỏi thẳng archctl thay vì đoán.
+
+```
+src/flask/wrappers.py (Python)
+      7  werkzeug.wrappers  → gói ngoài werkzeug
+     10  .  → src/flask/__init__.py
+         .  → src/flask/json/__init__.py (module con)
+     11  .globals  → src/flask/globals.py
+```
+
+Không cần `.arch/`: `--root` là gốc, không thì thư mục gần nhất có
+`.arch/system.arch`, không nữa thì thư mục hiện tại. `--json` là dạng
+[bench/oracle.py](../bench/oracle.py) đọc để đối chiếu với parser chuẩn.
+

@@ -9,6 +9,48 @@ Cập nhật 2026-10-04.
 
 ### Đã xong, có bằng chứng
 
+- **Bộ trích import sửa theo parser chuẩn, đã push lên `main`.** Rà 2026-10-04 bằng
+  cách đối chiếu với `ast` của CPython, lexer thô của clang và parser module
+  của Node trên 24 repo của bộ đo; mọi lỗi tìm thấy đã sửa theo test-trước,
+  26 test mới:
+  - TypeScript: `type` trong ngoặc import/export không còn làm mất cả câu
+    (Vue core từng mất 363/1 728 import tĩnh, excalidraw 59/1 433, sơ đồ tự
+    dựng của Vue core thiếu `RuntimeCore -> CompilerDom` và hai cạnh khác);
+    `import x = require()`.
+  - Lexer dùng chung: chuỗi một dòng và char literal dừng ở cuối dòng (trừ
+    chuỗi Rust), `\` nối dòng được đếm dòng; chỉ thị C bỏ qua tới hết chú thích
+    mở trên dòng đó và hết các dòng nối (`redis/src/tls.c` từng bị đọc ngược:
+    0/31 `serverLog`); dấu phân cách chữ số C++14; chuỗi thô C++11, Go,
+    Rust `br`/`cr`; `\"` trong chuỗi ba nháy; f-string PEP 701 và t-string;
+    BOM.
+  - Python: `raise E from e`/`yield from x` không còn là import (1 045 import
+    giả, 15 import thật bị nuốt); nối dòng `\`; `;`; `from pkg import sub` trỏ
+    cả tới module con (171 lần đích ở component khác, 6 cạnh mới trong sơ đồ
+    tự dựng); Cython `.pyx .pxd .pxi` với `cimport`.
+  - FFI: hàm trong `extern "C" { }` là bên cung cấp; `extern { }` của Rust
+    không ghi ABI là bên gọi. Hàm trong namespace C++ cố ý vẫn không (tên đã
+    mangle).
+  - File mới được quét: CUDA `.cu .cuh`, `.vue` (chỉ `<script>`). `.inc` cố ý
+    không (curl dùng cho Makefile, scikit-learn cho reStructuredText).
+  - Lệnh mới `archctl scan [--json]`: in import đọc được và đích phân giải.
+  - Bộ đo có phép thử thứ ba `bench/oracle.py` (đối chiếu với parser chuẩn),
+    `sabotage.py` thêm ba kiểu phá nhắm vào nó, CI chạy nó với `--require
+    clang,node` (image `ubuntu-24.04` có Python 3.12, Clang 18, Node 22).
+  - Review độc lập của diff bắt thêm hai lỗi do chính loạt sửa này gây ra,
+    đã sửa kèm test: `import()`/`require()` trong `export default {...}` bị
+    nuốt (đếm độ sâu ngoặc từng miễn mọi từ khoá, giờ chỉ miễn `type`); dò
+    module con từng nhảy sang project bên cạnh có gói cùng tên (giờ gói thường
+    chỉ tìm trong thư mục của nó, module file không có module con). Cùng đợt:
+    `.cuh` khớp tên duy nhất, `oracle.py` dừng khi chính thước đo hỏng.
+  - Biên nhận: 419 test, clippy `-D warnings`, `cargo +1.88 check`, `archctl
+    verify` 3/3 và `check --strict` 0 vi phạm trên chính repo; bộ đo 24 repo
+    22 893 file (thêm 255 file mới quét được), 0 bất nhất, 0 cảnh báo, 840/840;
+    `sabotage.py` 12/12; `oracle.py` khớp hết: Python 103 539 import, C/C++
+    23 044 `#include`, JS/TS 3 310 import tĩnh, cộng thư viện chuẩn của
+    Python 3.14 (13 599 import). Thời gian `check` sau khi thêm phần dò module
+    con: opentelemetry-python 233 → 193 ms, các repo khác +0–15%; hook netbox
+    29 → 28 ms.
+
 - **Bộ đo tải được một phần monorepo (sparse), và có ca PEP 420 lồng hai
   cấp.** `repos.tsv` thêm cột `sparse`; `bench.py` tải bằng
   `--filter=blob:none` + `sparse-checkout --cone`, phép đếm bỏ file git đánh
@@ -143,8 +185,22 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-1. Chưa có việc nào trong hàng đợi. Các repo `googleapis/python-*` đơn lẻ đã
-   archive và rỗng, nên ca lồng hai cấp dùng monorepo dạng sparse.
+1. **Xem job `repo thật` trên CI của lần push loạt sửa bộ trích**: lần đầu có
+   bước đối chiếu với parser chuẩn (`--require clang,node`) trên runner Linux
+   hai lõi, với Python 3.12 thay vì 3.14 của máy dev. Đỏ vì thiếu công cụ là
+   mã 2 và sửa ở CI; đỏ vì lệch là lỗi thật của archctl.
+2. Go và Rust chưa có thước đo chuẩn trong bộ đo (máy dev không có `go`,
+   không có crate `syn` offline). Runner GitHub có sẵn Go, nên một phép đối
+   chiếu `go/parser` chạy được trên CI.
+
+Các repo `googleapis/python-*` đơn lẻ đã archive và rỗng, nên ca lồng hai cấp
+dùng monorepo dạng sparse.
+
+**Đang cân nhắc (2026-10-04): viết lại archctl bằng Python.** Đã đánh giá,
+khuyên chưa nên; chờ bạn quyết. Số đo trên máy này: lex cả repo bằng Python
+(tokenizer `re` rút gọn) chậm hơn Rust 3,6–7 lần, `ast` cho file `.py` chậm
+hơn khoảng 11–14 lần; riêng khởi động `python3.14` kèm vài module chuẩn đã 82 ms, trong khi
+`check <file>` của Rust trên netbox hết 39 ms.
 
 Không có việc nào đang dở. **Đã quyết (2026-10-03): giữ repo private, CI là
 lời nhắc chứ không chặn** — gói GitHub Free không có branch protection cho repo

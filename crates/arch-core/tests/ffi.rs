@@ -207,3 +207,39 @@ fn ham_ben_trong_doi_so_macro_khong_phai_la_cung_cap() {
         .write("native/w.c", "WRAP(static int inner(int x) { return x; })\n");
     assert!(repo.edges().is_empty(), "{:?}", repo.edges());
 }
+
+#[test]
+fn c_ham_trong_khoi_extern_c_van_la_cung_cap() {
+    // Mã C++ đưa hàm ra cho C gọi thường bọc trong `extern "C" { ... }`. Khối
+    // đó không phải thân hàm: hàm định nghĩa bên trong vẫn ở tầng ngoài cùng,
+    // và tên của chúng không bị mangle nên Rust gọi được.
+    let repo = Repo::new("extern-c-block");
+    repo.write(
+        "app/decode.rs",
+        "unsafe extern \"C\" {\n    fn wrapped_parse(b: *const u8) -> i32;\n}\n",
+    )
+    .write(
+        "native/wrap.cc",
+        "#include \"wrap.h\"\nextern \"C\" {\nint wrapped_parse(const char *b) { return 0; }\n}\n",
+    );
+    assert_eq!(repo.edges(), ["App -> Native qua wrapped_parse"]);
+}
+
+#[test]
+fn c_ham_trong_namespace_khong_phai_cung_cap() {
+    // Ngược lại, hàm C++ trong namespace mang tên đã mangle: Rust khai
+    // `fn helper` thì không liên kết được tới `ns::helper`. Không ghép.
+    let repo = Repo::new("cpp-namespace");
+    repo.write("app/decode.rs", "unsafe extern \"C\" {\n    fn helper(x: i32) -> i32;\n}\n")
+        .write("native/ns.cc", "namespace ns {\nint helper(int x) { return x; }\n}\n");
+    assert_eq!(repo.edges(), Vec::<String>::new());
+}
+
+#[test]
+fn rust_extern_khong_ghi_abi_van_la_goi() {
+    // `extern { ... }` không ghi ABI mặc định là "C".
+    let repo = Repo::new("rust-extern-noabi");
+    repo.write("app/decode.rs", "extern {\n    fn legacy_init() -> i32;\n}\n")
+        .write("native/legacy.c", "int legacy_init(void) { return 0; }\n");
+    assert_eq!(repo.edges(), ["App -> Native qua legacy_init"]);
+}
