@@ -9,6 +9,22 @@ Cập nhật 2026-10-03.
 
 ### Đã xong, có bằng chứng
 
+- **Bộ đo lên hai mươi mốt repo:** thêm abseil-cpp (C++ Bazel,
+  include từ gốc `absl/...`), opentelemetry-python (sáu distribution chung
+  namespace PEP 420 `opentelemetry`; cạnh `Sdk -> Api`, `Exporter -> Proto`
+  ra đúng), go-sqlite3 (cgo). Lần chạy 2026-10-03: 19660 file, 0 bất nhất, 0
+  cảnh báo luật, 735/735, `sabotage.py` 7/7, 120 giây.
+- **Header vendor chỉ thuộc về cây chứa nó.** glfw (đã thử rồi bỏ) có năm
+  cạnh sai giữa các thư mục phiên bản: `<vulkan/vulkan.h>` của v3.3 khớp tên
+  duy nhất vào `v3.2/.../deps/`. Giờ file dưới `deps/`, `third_party/`,
+  `external/`… chỉ được đoán cho file cùng cây; `deps/` ở gốc (redis) thì cả
+  repo thấy. Review trước commit siết thêm hai chỗ: có bản vendor bị ẩn thì
+  chỉ nhận bản vendor của chính cây mình (stub trong `tests/` không thành
+  "duy nhất"), và tên vendor ghi trong chính include (`<external/api.h>`) là
+  chủ ý, không bị ẩn. 11 repo C/C++/Go cũ ra đúng số trước khi sửa. 385 test,
+  clippy sạch. Sau khi sửa glfw không còn cạnh nào để kiểm nên bị loại khỏi bộ đo;
+  test `c_header_vendor_chi_thay_duoc_tu_cay_chua_no` giữ lại ca này.
+
 - **Đã push lên `main`, CI xanh trên Linux.** Run 37134780674: 4/4 job, bộ
   đo 18 repo ra đúng số của macOS (17918 file, 0 bất nhất, 630/630,
   sabotage 7/7), job `repo thật` 2 phút 6 giây. Runner Linux ghim
@@ -92,8 +108,11 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-1. Chưa có repo nào đo: Go dùng cgo, gói không gian tên PEP 420 thật, C++ cỡ
-   lớn (Bazel).
+1. Cạnh cgo **giữa hai component** vẫn chưa được đo. Ở go-sqlite3, toàn bộ
+   định nghĩa C nằm trong `sqlite3-binding.c` 9 MB, vượt `MAX_FILE_BYTES`
+   (4 MB): archctl báo QUÁ LỚN, nhưng không ghép được `C.x` nào. Cần một repo
+   Go mà mã C nằm ở thư mục riêng, file dưới 4 MB.
+2. PEP 420 mới có một repo (opentelemetry-python); chưa có dự phòng.
 
 Không có việc nào đang dở. **Đã quyết (2026-10-03): giữ repo private, CI là
 lời nhắc chứ không chặn** — gói GitHub Free không có branch protection cho repo

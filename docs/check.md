@@ -417,6 +417,6 @@ ra. Giờ:
 Bộ đọc `.gitignore` chỉ đủ cho câu hỏi này: mẫu sau thắng mẫu trước, `!` đưa
 trở lại, mẫu có `/` thì neo vào thư mục chứa file, thư mục cha bị bỏ thì con
 cũng bị. Chưa hiểu `[abc]`. Bộ đo đối
-chiếu nó với chính `git check-ignore` trên mười tám repo.
+chiếu nó với chính `git check-ignore` trên hai mươi mốt repo.
 
 Thêm mẫu glob vào `.arch/.archignore` để bỏ qua thêm.

@@ -635,3 +635,96 @@ fn c_header_chuan_khong_khop_vao_shim_trong_repo() {
         .write("src/http/h.c", "#include <stdio.h>\n#include <sys/types.h>\n");
     assert_eq!(repo.judge(), (vec![], vec![]));
 }
+
+#[test]
+fn c_header_vendor_chi_thay_duoc_tu_cay_chua_no() {
+    // glfw đặt mỗi phiên bản ở một thư mục. v3.2 vendor `deps/vulkan/vulkan.h`,
+    // v3.3 thì dùng bản của hệ thống. Khớp tên duy nhất từng nối
+    // `<vulkan/vulkan.h>` của v3.3 vào bản copy của v3.2: năm cạnh sai.
+    // `deps/` ở gốc như redis thì cả repo thấy được.
+    let repo = Repo::new("cvendor");
+    repo.write(
+        ".arch/system.arch",
+        "\
+component Old  at old/**  @human #accepted
+component New  at new/**  @human #accepted
+component Deps at deps/** @human #accepted
+component O    at o/**    @human #accepted
+allow New -> O
+",
+    )
+    .write("old/glfw/deps/vulkan/vulkan.h", "")
+    .write("old/glfw/src/a.c", "#include <vulkan/vulkan.h>\n")
+    .write("deps/hiredis/hiredis.h", "")
+    .write("new/glfw/src/b.c", "#include <vulkan/vulkan.h>\n#include <hiredis.h>\n");
+    let (edges, unresolved) = repo.judge();
+    assert_eq!(edges, ["New -> Deps (2)"], "{edges:?}");
+    assert!(unresolved.is_empty(), "{unresolved:?}");
+}
+
+#[test]
+fn c_header_vendor_cay_cua_minh_van_thay() {
+    // `v3.2/` không được khớp thành tiền tố của `v3.20/`.
+    let repo = Repo::new("cvendorown");
+    repo.write(
+        ".arch/system.arch",
+        "\
+component Old     at old/**             @human #accepted
+component OldDeps at old/glfw/deps/**   @human #accepted
+component V2      at v3.2/**            @human #accepted
+component V20     at v3.20/**           @human #accepted
+component O       at o/**               @human #accepted
+allow Old -> O
+allow V20 -> O
+",
+    )
+    .write("old/glfw/deps/vulkan/vulkan.h", "")
+    .write("old/glfw/src/a.c", "#include <vulkan/vulkan.h>\n")
+    .write("v3.2/deps/gl/glext.h", "")
+    .write("v3.20/src/b.c", "#include <gl/glext.h>\n");
+    let (edges, unresolved) = repo.judge();
+    assert_eq!(edges, ["Old -> OldDeps (1)"], "{edges:?}");
+    assert!(unresolved.is_empty(), "{unresolved:?}");
+}
+
+#[test]
+fn c_ban_vendor_bi_an_thi_khong_chon_ban_con_lai() {
+    // Bản copy vendor của cây khác là dấu hiệu header thuộc thư viện ngoài.
+    // Stub còn lại trong `tests/` không vì thế mà thành "duy nhất".
+    let repo = Repo::new("cvendorstub");
+    repo.write(
+        ".arch/system.arch",
+        "\
+component Old   at old/**   @human #accepted
+component New   at new/**   @human #accepted
+component Tests at tests/** @human #accepted
+component O     at o/**     @human #accepted
+allow New -> O
+",
+    )
+    .write("old/deps/vulkan/vulkan.h", "")
+    .write("tests/stub/vulkan/vulkan.h", "")
+    .write("new/src/a.c", "#include <vulkan/vulkan.h>\n");
+    assert_eq!(repo.judge(), (vec![], vec![]));
+}
+
+#[test]
+fn c_ten_vendor_nam_trong_include_la_chu_y() {
+    // `<external/api.h>` ghi rõ thư mục: đó là header của dự án, không phải
+    // bản vendor của một cây khác.
+    let repo = Repo::new("cvendorspec");
+    repo.write(
+        ".arch/system.arch",
+        "\
+component Src at src/**     @human #accepted
+component Inc at include/** @human #accepted
+component O   at o/**       @human #accepted
+allow Src -> O
+",
+    )
+    .write("include/external/api.h", "")
+    .write("src/a.c", "#include <external/api.h>\n");
+    let (edges, unresolved) = repo.judge();
+    assert_eq!(edges, ["Src -> Inc (1)"], "{edges:?}");
+    assert!(unresolved.is_empty(), "{unresolved:?}");
+}

@@ -156,7 +156,7 @@ jobs:
       - name: dựng archctl
         run: cargo build --release --locked
 
-      # Tải mười tám repo ở đúng commit ghim trong `bench/repos.tsv`, rồi chạy hai
+      # Tải hai mươi mốt repo ở đúng commit ghim trong `bench/repos.tsv`, rồi chạy hai
       # phép thử. Luật do `init --from-code` sinh ra, nâng lên `#accepted`,
       # kiểm lại chính mã đó thì phải ra 0 vi phạm — mỗi vi phạm là một chỗ bộ
       # khám phá và bộ kiểm chứng nhìn khác nhau. Và mọi lệnh phải chạy được

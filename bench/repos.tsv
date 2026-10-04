@@ -4,16 +4,19 @@
 # submodule được tải ở đúng commit mà repo cha ghi lại.
 #
 # tên	url	commit	submodule	vì sao có mặt
+abseil-cpp	https://github.com/abseil/abseil-cpp.git	33a35cf45087dffab22c0c9ae817021a45e93a47	-	C++, Bazel, include từ gốc workspace kiểu "absl/..."
 core	https://github.com/vuejs/core.git	4ab865a848a1da3d10fb674f857e5fff13094644	-	TypeScript monorepo, alias trong tsconfig
 curl	https://github.com/curl/curl.git	6b506de183dafdb1e57072297d9730cfc8b81513	-	C, include path đọc từ CMakeLists
 etcd	https://github.com/etcd-io/etcd.git	64f26db45f5feb2c491a9eb82768a2f41fc857df	-	Go, hạ tầng phân tán, nhiều go.mod trong một repo
 excalidraw	https://github.com/excalidraw/excalidraw.git	ed10ac7dca7e40f3f4a31269b4bfba980d0db41e	-	ứng dụng React, TSX, workspace npm
 flask	https://github.com/pallets/flask.git	d73fa1cdcbd8b1465c151db8924ba58b1dd14e35	-	Python, layout src/
+go-sqlite3	https://github.com/mattn/go-sqlite3.git	dbbe931904f2ee06546448fbe7cf7780f61bc110	-	Go cgo, amalgamation sqlite3 9 MB vượt ngưỡng dò, archctl báo QUÁ LỚN thay vì ghép cgo
 hugo	https://github.com/gohugoio/hugo.git	6b3ba3a7e22ae2809605b8118aeed08b244f1955	-	Go, 943 file, đồ thị dày
 langchain	https://github.com/langchain-ai/langchain.git	57236d55d9ffc8634bda987861e6fce460aff268	-	Python LLM, nhiều package trong libs/
 leveldb	https://github.com/google/leveldb.git	7ee830d02b623e8ffe0b95d59a74db1e58da04c5	-	C++, storage engine, CMake
 netbox	https://github.com/netbox-community/netbox.git	5a9a9d2a25318ff68fdd567959a2d4f1f7080b21	-	ứng dụng Django chia tầng, quản lý hạ tầng mạng
 nginx	https://github.com/nginx/nginx.git	2b5c2b605b5df669da5dec6749dcc76c07d1315d	-	C, máy chủ mạng, build bằng script auto/ chứ không CMake
+opentelemetry-python	https://github.com/open-telemetry/opentelemetry-python.git	5e8083e845dc0b0225d8674240c556c879ce852f	-	Python, nhiều distribution chung namespace PEP 420 `opentelemetry`
 pydantic-core	https://github.com/pydantic/pydantic-core.git	383eb95a19433754c0cecf7025b50c26b6d97a36	-	Rust lẫn Python
 redis	https://github.com/redis/redis.git	b540ca49cba815f3fbe634363c3df68d4f4f127a	-	C, dependency vendor trong deps/
 ripgrep	https://github.com/BurntSushi/ripgrep.git	3fce3b5bb0236da2df6d99672afb8a719642eca7	-	Rust workspace nhiều crate

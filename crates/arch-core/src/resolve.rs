@@ -415,7 +415,7 @@ impl Resolver {
                 return Resolved::Path(found);
             }
             if !is_standard_header(spec)
-                && let Some(found) = self.c_unique(spec)
+                && let Some(found) = self.c_unique(importer, spec)
             {
                 return Resolved::Path(found);
             }
@@ -428,17 +428,31 @@ impl Resolver {
         Resolved::Missing
     }
 
-    /// File duy nhất trong repo có đuôi đường dẫn là `spec`. Hai file khớp thì
+    /// File duy nhất trong repo có đuôi đường dẫn là `spec`, trong số những
+    /// file `importer` thấy được (xem [`vendored_owner`]). Hai file khớp thì
     /// không chọn: một cạnh sai tốn lòng tin hơn một cạnh bị bỏ sót.
-    fn c_unique(&self, spec: &str) -> Option<String> {
+    ///
+    /// Có bản vendor bị ẩn thì header thuộc một thư viện ngoài, và chỉ bản
+    /// vendor của chính cây `importer` mới được chọn. Một stub trong `tests/`
+    /// không vì bản kia bị ẩn mà thành "duy nhất".
+    fn c_unique(&self, importer: &str, spec: &str) -> Option<String> {
         let spec = normalize(spec)?;
         let name = spec.rsplit('/').next()?;
         let files = self.c_files.get_or_init(|| find_c_files(&self.root));
         let suffix = format!("/{spec}");
-        let mut hits =
-            files.get(name)?.iter().filter(|f| **f == spec || f.ends_with(&suffix));
-        match (hits.next(), hits.next()) {
-            (Some(one), None) => Some(one.clone()),
+        let mut hidden = false;
+        let mut visible = Vec::new();
+        for f in files.get(name)?.iter().filter(|f| **f == spec || f.ends_with(&suffix)) {
+            // Chỉ xét phần đứng trước `spec`: `<external/api.h>` ghi rõ thư
+            // mục, đó là chủ ý của người viết include.
+            let owner = vendored_owner(&f[..f.len() - spec.len()]);
+            match owner {
+                Some(o) if !importer.starts_with(o) => hidden = true,
+                _ => visible.push((f, owner.is_some())),
+            }
+        }
+        match visible.as_slice() {
+            [(one, vendored)] if !hidden || *vendored => Some((*one).clone()),
             _ => None,
         }
     }
@@ -993,6 +1007,27 @@ fn find_py_roots(root: &Path) -> PyRoots {
         }
     }
     out
+}
+
+/// Thư mục chứa mã vendor của bên thứ ba.
+const VENDOR_DIRS: &[&str] = &["deps", "third_party", "thirdparty", "3rdparty", "external"];
+
+/// Phần đường dẫn đứng trước thư mục vendor đầu tiên, kèm `/` cuối: cây sở
+/// hữu bản vendor đó. `None` nếu `path` không nằm trong thư mục vendor nào.
+///
+/// Header vendor chỉ thuộc về cây chứa nó. glfw đặt mỗi phiên bản ở một thư
+/// mục; v3.2 vendor `deps/vulkan/vulkan.h`, v3.3 thì dùng bản của hệ thống.
+/// Không có giới hạn này thì `<vulkan/vulkan.h>` của v3.3 khớp tên duy nhất
+/// vào bản của v3.2. `deps/` ở gốc như redis có cây sở hữu là cả repo.
+fn vendored_owner(path: &str) -> Option<&str> {
+    let mut at = 0;
+    for part in path.split('/') {
+        if VENDOR_DIRS.contains(&part) {
+            return Some(&path[..at]);
+        }
+        at += part.len() + 1;
+    }
+    None
 }
 
 /// File C/C++ trong repo, gom theo tên file. Chạm giới hạn thì trả bảng rỗng,
