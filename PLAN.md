@@ -9,6 +9,14 @@ Cập nhật 2026-10-04.
 
 ### Đã xong, có bằng chứng
 
+- **Rust có thước đo chuẩn, chỉ trên CI** (2026-10-04): `oracle.py --require
+  syn` dựng trình đọc `syn` 2.0.87 (ghim `=`, không Cargo.lock) dưới
+  `target/bench/syn-oracle/`; CI mở mạng cho riêng bước đó, archctl vẫn dựng
+  offline. Máy dev không bật, không tải gì. Run 37214317001 trên nhánh thử:
+  6 repo, 1 509 file, 18 303 import khớp cả tên lẫn dòng ngay lần đầu, 0 file
+  syn không đọc được; 548 import trong thân macro (tokio 534) không đối chiếu
+  được và đếm riêng.
+
 - **Go có thước đo chuẩn** (2026-10-04, `261799d`, CI xanh ở run 37213550539
   với Go 1.24 có sẵn trên image `ubuntu-24.04`, khớp đúng các số trên máy dev): `oracle.py` dựng một trình
   đọc `go/parser` (`ImportsOnly`) thành binary tạm, đối chiếu cả tên lẫn dòng;
@@ -201,7 +209,9 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-1. Rust chưa có thước đo chuẩn (không có crate `syn` khi offline).
+1. Phần Rust của oracle chưa có kiểu phá trong `sabotage.py` (sabotage chỉ phá
+   file Python của flask, và Rust cần mạng). Logic so sánh dùng chung nên đã
+   được phá gián tiếp, nhưng nhánh miễn trừ import trong macro thì chưa.
 
 Các repo `googleapis/python-*` đơn lẻ đã archive và rỗng, nên ca lồng hai cấp
 dùng monorepo dạng sparse.

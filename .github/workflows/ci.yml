@@ -183,5 +183,12 @@ jobs:
       # Image ghim ở trên có sẵn cả bốn (Python 3.12, Clang 18, Node 22 — đủ
       # mới cho `module.stripTypeScriptTypes` —, Go). `--require` để ngày nào
       # image thiếu một cái thì bước này đỏ, thay vì lặng lẽ bỏ qua phần đó.
+      #
+      # Rust đối chiếu với `syn`, phải tải từ crates.io, nên riêng bước này mở
+      # lại mạng cho cargo. archctl đã dựng xong ở trên khi còn offline; crate
+      # tải về chỉ vào trình đọc của bộ đo dưới `target/bench/syn-oracle/`,
+      # không vào archctl. Phiên bản ghim `=` trong `SYN_MANIFEST` của oracle.py.
       - name: đối chiếu với parser chuẩn
-        run: python3 bench/oracle.py --archctl target/release/archctl --require clang,node,go
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: python3 bench/oracle.py --archctl target/release/archctl --require clang,node,go,syn

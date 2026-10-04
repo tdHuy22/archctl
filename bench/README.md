@@ -98,8 +98,12 @@ bộ trích, nên một lỗi trong bộ trích làm cả hai sai giống nhau m
   `module.stripTypeScriptTypes`. Chỉ import tĩnh, nên chỉ kiểm phía thiếu.
 - Go: `go/parser` ở chế độ `ImportsOnly`, dựng một lần thành binary tạm. Không
   xét build tag, giống archctl.
+- Rust: `syn`, ghim cứng phiên bản, dựng dưới `target/bench/syn-oracle/`. Phải
+  tải crate nên chỉ chạy khi `--require syn` (CI bật). `syn` không đọc vào thân
+  macro, nên import archctl thấy trong `macro_rules!`, `cfg_rt! { }`... được
+  đếm riêng, không tính là thừa.
 
-Python, C/C++ và Go đòi khớp cả tên lẫn số dòng: thiếu, thừa hay lệch dòng đều
+Python, C/C++, Go và Rust đòi khớp cả tên lẫn số dòng: thiếu, thừa hay lệch dòng đều
 là lệch. Thiếu clang, Node hay Go thì phần đó in `BỎ QUA`; `--require
 clang,node,go` biến việc thiếu thành mã thoát 2, và với Node thì đòi cả khả năng
 gỡ kiểu TS. Thước đo tự hỏng cũng là mã 2 chứ không phải "đạt": clang, Node hay

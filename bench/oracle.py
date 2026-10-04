@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Đối chiếu import archctl đọc được với parser chuẩn của từng ngôn ngữ.
 
-    python3 bench/oracle.py [--archctl <binary>] [--only flask,curl] [--require clang,node,go]
+    python3 bench/oracle.py [--archctl <binary>] [--only flask,curl] [--require clang,node,go,syn]
 
 Phép nhất quán của `bench.py` so archctl với chính nó: bộ khám phá và bộ kiểm
 dùng chung một bộ trích, nên một lỗi trong bộ trích làm cả hai sai giống nhau
@@ -23,9 +23,15 @@ Thước đo, chạy trên repo mà `bench.py` đã tải về `target/bench/rep
 - Go: `go/parser` ở chế độ `ImportsOnly`, dựng một lần thành binary tạm. Như
   archctl, không xét build tag: file nào cũng tính, `import "C"` cũng là import.
 
-Rust không có parser chuẩn chạy được ở đây (`syn` cần tải crate).
+- Rust: `syn` (bản ghim cứng trong SYN_MANIFEST), dựng thành binary dưới
+  `target/bench/syn-oracle/`. Phải tải crate từ crates.io, nên chỉ chạy khi
+  `--require syn`; CI bật nó, máy dev mặc định BỎ QUA. Cây `use` được trải ra
+  giống archctl (`{self}` là tiền tố, `*` là chính tiền tố, `self`/`super`
+  trong `mod x { }` đổi về module của file). `syn` không đọc vào thân macro,
+  nên import archctl đọc được bên trong `macro_rules!`, `quote! { }`... không
+  tính là thừa; chúng được đếm riêng.
 
-Python, C/C++, Go: thiếu, thừa và lệch số dòng đều là lệch. Thiếu clang, Node hay Go
+Python, C/C++, Go, Rust: thiếu, thừa và lệch số dòng đều là lệch. Thiếu clang, Node hay Go
 thì phần đó in BỎ QUA và không tính là đạt; `--require` biến việc thiếu thành
 lỗi, và với Node thì đòi cả khả năng gỡ kiểu TS. Một thước đo không parse được
 quá nửa số file của một repo là thước đo hỏng chứ không phải mã hỏng: dừng,
@@ -123,6 +129,158 @@ func main() {
 		js, _ := json.Marshal(specs)
 		fmt.Fprintf(out, "%s\t%s\n", file, js)
 	}
+}
+"""
+
+# Không có Cargo.lock: mọi crate trong cây đều ghim `=`, nên cargo không có gì
+# để chọn. `[workspace]` rỗng để cargo không coi nó thuộc workspace của repo.
+SYN_MANIFEST = """
+[package]
+name = "syn-oracle"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+syn = { version = "=2.0.87", default-features = false, features = ["full", "parsing", "visit"] }
+proc-macro2 = { version = "=1.0.89", default-features = false, features = ["span-locations"] }
+unicode-ident = "=1.0.13"
+
+[workspace]
+"""
+
+# Cùng giao thức với GO_SOURCE, nhưng mỗi dòng trả về là
+# {"imports": [[dòng, đường dẫn]], "macros": [[dòng đầu, dòng cuối]]}.
+SYN_SOURCE = r"""
+use std::io::{BufRead, Write};
+use syn::visit::{self, Visit};
+use syn::UseTree;
+
+#[derive(Default)]
+struct V {
+    inline: Vec<String>,
+    imports: Vec<(usize, String)>,
+    macros: Vec<(usize, usize)>,
+}
+
+fn join(prefix: &str, word: &str) -> String {
+    if prefix.is_empty() { word.to_string() } else { format!("{prefix}::{word}") }
+}
+
+/// Bản sao của `from_file_module` trong `scan/rustlang.rs`.
+fn from_file_module(path: &str, inline: &[String]) -> String {
+    if inline.is_empty() {
+        return path.to_string();
+    }
+    let segs: Vec<&str> = path.split("::").collect();
+    let (supers, rest) = match segs[0] {
+        "super" => {
+            let n = segs.iter().take_while(|s| **s == "super").count();
+            (n, &segs[n..])
+        }
+        "self" => (0, &segs[1..]),
+        _ => return path.to_string(),
+    };
+    let out: Vec<&str> = if supers > inline.len() {
+        std::iter::repeat_n("super", supers - inline.len()).chain(rest.iter().copied()).collect()
+    } else {
+        std::iter::once("self")
+            .chain(inline[..inline.len() - supers].iter().map(String::as_str))
+            .chain(rest.iter().copied())
+            .collect()
+    };
+    out.join("::")
+}
+
+impl V {
+    fn push(&mut self, line: usize, path: String) {
+        if !path.is_empty() {
+            let path = from_file_module(&path, &self.inline);
+            self.imports.push((line, path));
+        }
+    }
+
+    /// `line` là dòng của từ đầu tiên trong đoạn đường dẫn đang đọc: archctl
+    /// gộp `a::b::c` thành một token và báo dòng của token đó.
+    fn tree(&mut self, t: &UseTree, prefix: &str, line: Option<usize>) {
+        match t {
+            UseTree::Path(p) => {
+                let l = line.unwrap_or(p.ident.span().start().line);
+                self.tree(&p.tree, &join(prefix, &p.ident.to_string()), Some(l));
+            }
+            UseTree::Name(n) => self.leaf(prefix, &n.ident, line),
+            UseTree::Rename(r) => self.leaf(prefix, &r.ident, line),
+            UseTree::Glob(g) => {
+                let l = line.unwrap_or(g.star_token.spans[0].start().line);
+                self.push(l, prefix.to_string());
+            }
+            UseTree::Group(g) => {
+                for item in &g.items {
+                    self.tree(item, prefix, None);
+                }
+            }
+        }
+    }
+
+    fn leaf(&mut self, prefix: &str, ident: &syn::Ident, line: Option<usize>) {
+        let l = line.unwrap_or(ident.span().start().line);
+        let word = ident.to_string();
+        let path = if word == "self" && !prefix.is_empty() { prefix.to_string() } else { join(prefix, &word) };
+        self.push(l, path);
+    }
+}
+
+impl<'a> Visit<'a> for V {
+    fn visit_item_use(&mut self, u: &'a syn::ItemUse) {
+        self.tree(&u.tree, "", None);
+    }
+
+    fn visit_item_extern_crate(&mut self, e: &'a syn::ItemExternCrate) {
+        self.push(e.extern_token.span.start().line, e.ident.to_string());
+    }
+
+    fn visit_item_mod(&mut self, m: &'a syn::ItemMod) {
+        let inline = m.content.is_some();
+        if inline {
+            self.inline.push(m.ident.to_string());
+        }
+        visit::visit_item_mod(self, m);
+        if inline {
+            self.inline.pop();
+        }
+    }
+
+    fn visit_macro(&mut self, m: &'a syn::Macro) {
+        let start = m.bang_token.span.start().line;
+        let end = m.delimiter.span().close().end().line;
+        self.macros.push((start, end));
+        visit::visit_macro(self, m);
+    }
+}
+
+fn main() {
+    let stdin = std::io::stdin();
+    let mut out = std::io::BufWriter::new(std::io::stdout());
+    for row in stdin.lock().lines() {
+        let row = row.unwrap();
+        let (root, file) = row.split_once('\t').unwrap();
+        let parsed = std::fs::read_to_string(format!("{root}/{file}"))
+            .ok()
+            .and_then(|src| syn::parse_file(&src).ok());
+        let Some(ast) = parsed else {
+            writeln!(out, "{file}\tERR").unwrap();
+            continue;
+        };
+        let mut v = V::default();
+        v.visit_file(&ast);
+        let imports: Vec<String> = v
+            .imports
+            .iter()
+            .map(|(l, p)| format!("[{l},\"{}\"]", p.replace('\\', "\\\\").replace('"', "\\\"")))
+            .collect();
+        let macros: Vec<String> = v.macros.iter().map(|(a, b)| format!("[{a},{b}]")).collect();
+        writeln!(out, "{file}\t{{\"imports\":[{}],\"macros\":[{}]}}", imports.join(","), macros.join(",")).unwrap();
+    }
 }
 """
 
@@ -237,6 +395,41 @@ def go_truth(helper, root, files):
     return out
 
 
+def build_syn_helper(cache):
+    """Dựng trình đọc `syn` dưới `cache/syn-oracle`; lần sau dùng lại bản đã dựng."""
+    proj = Path(cache) / "syn-oracle"
+    (proj / "src").mkdir(parents=True, exist_ok=True)
+    for path, text in [(proj / "Cargo.toml", SYN_MANIFEST), (proj / "src/main.rs", SYN_SOURCE)]:
+        if not path.exists() or path.read_text() != text:
+            path.write_text(text)
+    env = {**os.environ, "CARGO_NET_OFFLINE": "false", "CARGO_TARGET_DIR": str(proj / "target")}
+    p = subprocess.run(["cargo", "build", "--release", "--quiet", "--manifest-path", str(proj / "Cargo.toml")],
+                       capture_output=True, text=True, timeout=900, env=env)
+    if p.returncode != 0:
+        bench.die(f"không dựng được trình đọc `syn`: {p.stderr.strip()[-600:]}")
+    return str(proj / "target/release/syn-oracle")
+
+
+def syn_truth(helper, root, files):
+    """file → (Counter `(dòng, đường dẫn)`, các khoảng dòng của macro); None nếu syn không đọc được."""
+    feed = "".join(f"{root}\t{f}\n" for f in files)
+    p = subprocess.run([helper], input=feed, capture_output=True, text=True, timeout=900)
+    if p.returncode != 0:
+        bench.die(f"trình đọc `syn` thoát {p.returncode} ở {root}: {p.stderr.strip()[-300:]}")
+    out = {}
+    for row in p.stdout.splitlines():
+        file, _, value = row.partition("\t")
+        if value == "ERR":
+            out[file] = None
+            continue
+        v = json.loads(value)
+        out[file] = (collections.Counter((line, spec) for line, spec in v["imports"]), v["macros"])
+    unanswered = sorted(set(files) - set(out))
+    if unanswered:
+        bench.die(f"trình đọc `syn` không trả lời cho {len(unanswered)} file ở {root}, ví dụ {unanswered[0]}")
+    return out
+
+
 def tool_version(cmd):
     p = subprocess.run(cmd, capture_output=True, text=True)
     first = (p.stdout or p.stderr).strip().splitlines()
@@ -271,6 +464,7 @@ class Tally:
     def __init__(self, label):
         self.label, self.files, self.imports, self.unparsed = label, 0, 0, 0
         self.bad, self.examples = 0, []
+        self.in_macro = 0  # import archctl đọc được trong thân macro, parser không thấy
 
     def note(self, msg):
         self.bad += 1
@@ -280,6 +474,8 @@ class Tally:
     def line(self, repo):
         head = f"  {repo:22} {self.label:6} {self.files:5} file, {self.imports:6} import"
         tail = f", {self.unparsed} không parse được" if self.unparsed else ""
+        if self.in_macro:
+            tail += f", {self.in_macro} trong macro không đối chiếu"
         verdict = "khớp" if not self.bad else f"{self.bad} LỆCH"
         return f"{head}{tail}: {verdict}"
 
@@ -308,7 +504,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--archctl", default=str(ROOT / "target/release/archctl"))
     ap.add_argument("--only", help="tên repo, cách nhau bằng dấu phẩy")
-    ap.add_argument("--require", default="", help="công cụ bắt buộc phải có: clang, node, go")
+    ap.add_argument("--require", default="", help="công cụ bắt buộc phải có: clang, node, go, syn (tải crate)")
     ap.add_argument("--cache", default=str(ROOT / "target/bench"))
     args = ap.parse_args()
 
@@ -326,7 +522,7 @@ def main():
     have_go = shutil.which("go") is not None
     strip_ts = have_node and node_can_strip_types()
     required = args.require.split(",")
-    unknown = set(filter(None, required)) - {"clang", "node", "go"}
+    unknown = set(filter(None, required)) - {"clang", "node", "go", "syn"}
     if unknown:
         bench.die(f"`--require` không biết: {', '.join(sorted(unknown))}")
     for tool, ok in [("clang", have_clang), ("node", have_node), ("go", have_go)]:
@@ -338,7 +534,9 @@ def main():
     clang_v = tool_version(["clang", "--version"]) if have_clang else "BỎ QUA: không có"
     node_v = tool_version(["node", "--version"]) if have_node else "BỎ QUA: không có"
     go_v = tool_version(["go", "version"]) if have_go else "BỎ QUA: không có"
-    print(f"python {sys.version.split()[0]} · clang: {clang_v} · node: {node_v} · go: {go_v}"
+    use_syn = "syn" in required
+    syn_v = "2.0.87" if use_syn else "BỎ QUA: cần tải crate, bật bằng --require syn"
+    print(f"python {sys.version.split()[0]} · clang: {clang_v} · node: {node_v} · go: {go_v} · syn: {syn_v}"
           + ("" if strip_ts or not have_node else " (không gỡ được kiểu TS: BỎ QUA .ts)"))
 
     missing_repos = [r for r in repos if not (Path(args.cache) / "repos" / r).is_dir()]
@@ -347,6 +545,7 @@ def main():
 
     workdir = tempfile.TemporaryDirectory(prefix="archctl-oracle-")
     go_helper = build_go_helper(workdir.name) if have_go else None
+    syn_helper = build_syn_helper(args.cache) if use_syn else None
 
     bad = 0
     for repo in repos:
@@ -401,6 +600,21 @@ def main():
                     continue
                 check_lines(go, file, want, got[file])
             tallies.append(go)
+
+        if syn_helper and by_lang["Rust"]:
+            rs = Tally("Rust")
+            for file, truth in syn_truth(syn_helper, root, by_lang["Rust"]).items():
+                if truth is None:
+                    rs.unparsed += 1
+                    continue
+                want, macros = truth
+                have = collections.Counter(got[file])
+                for (line, spec), n in (have - want).items():
+                    if any(a <= line <= b for a, b in macros):
+                        have[(line, spec)] -= n
+                        rs.in_macro += n
+                check_lines(rs, file, want, +have)
+            tallies.append(rs)
 
         for t in tallies:
             sane(t, repo)

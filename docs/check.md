@@ -67,6 +67,7 @@ request:
 | C, C++ | lexer thô của clang 21 | 4 239 file, 23 044 `#include`: khớp cả tên lẫn dòng |
 | JS, TS | parser module của Node 24 | 1 007 file, 3 310 import tĩnh: không thiếu cái nào |
 | Go | `go/parser` của Go 1.27, chế độ `ImportsOnly` | 2 168 file, 13 921 import: khớp cả tên lẫn dòng |
+| Rust | `syn` 2.0.87, chỉ chạy trên CI | 1 509 file, 18 303 `use`/`extern crate`: khớp cả tên lẫn dòng; 548 import nằm trong thân macro (`syn` không đọc vào) không đối chiếu, 534 trong số đó ở tokio (`cfg_rt! { ... }`) |
 
 Trước khi sửa, cũng phép đối chiếu đó cho:
 
@@ -84,8 +85,8 @@ Trước khi sửa, cũng phép đối chiếu đó cho:
   bị bỏ qua cả câu: etcd mất 4 import, hugo 1. Trong khối `import ( ... )` thì
   vẫn đọc đúng.
 
-Rust chưa có thước đo chạy được ở đây (`syn` cần tải crate); Rust được kiểm
-bằng test trong `crates/arch-core/tests/scan.rs`.
+Rust đối chiếu với `syn` cần tải crate, nên chỉ chạy khi có `--require syn`;
+CI bật cờ đó, máy dev mặc định bỏ qua. Lần đầu chạy, Rust khớp hết.
 
 ## Cạnh liên ngôn ngữ
 
