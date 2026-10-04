@@ -104,7 +104,7 @@ lõi, nên job có giới hạn 25 phút.
 Nó thoát 2 — không phải 1 — khi không tải được repo, để một lần mạng chập chờn
 không trông giống một lỗi của archctl.
 
-Ngay sau đó, `bench/sabotage.py` phá archctl mười kiểu và đòi bộ đo bắt đúng
+Ngay sau đó, `bench/sabotage.py` phá archctl mười ba kiểu và đòi bộ đo bắt đúng
 từng kiểu. Bộ đo chỉ có giá trị khi mỗi phép kiểm của nó đổ được; bước này
 giữ điều đó đúng qua những lần sửa sau.
 
@@ -118,8 +118,9 @@ Node, `go/parser` của Go, và `syn` cho Rust. Bốn cái đầu có sẵn trê
 mở lại mạng cho cargo (`CARGO_NET_OFFLINE: "false"`); archctl đã dựng xong ở
 bước trước khi còn offline, và crate tải về chỉ vào trình đọc của bộ đo, ghim
 cứng bằng `=`. `--require clang,node,go,syn` để ngày thiếu một cái thì bước
-này đỏ chứ không lặng lẽ bỏ qua. Ba trong mười kiểu phá của
-`sabotage.py` nhắm vào bước này.
+này đỏ chứ không lặng lẽ bỏ qua. Sáu trong mười ba kiểu phá của
+`sabotage.py` nhắm vào bước này: ba ở file Python, ba ở file Rust. Phần Rust
+cũng cần `syn`, nên bước sabotage mở mạng giống bước đối chiếu.
 
 ## Còn một chốt nữa không nằm trong YAML
 

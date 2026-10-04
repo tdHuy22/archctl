@@ -9,6 +9,12 @@ Cập nhật 2026-10-04.
 
 ### Đã xong, có bằng chứng
 
+- **Phần Rust của oracle đổ được** (2026-10-04): `sabotage.py --rust-repo
+  ripgrep` phá thêm ba kiểu ở file Rust (mất import, lệch dòng, import giả
+  ngoài macro — kiểu cuối giữ phép miễn trừ trong macro không rộng ra). CI
+  bật nó và mở mạng cho bước sabotage. Run 37216343770 trên nhánh thử: 16/16
+  lượt đạt (13 kiểu phá + 3 lượt không phá).
+
 - **Rust có thước đo chuẩn, chỉ trên CI** (2026-10-04): `oracle.py --require
   syn` dựng trình đọc `syn` 2.0.87 (ghim `=`, không Cargo.lock) dưới
   `target/bench/syn-oracle/`; CI mở mạng cho riêng bước đó, archctl vẫn dựng
@@ -209,9 +215,7 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-1. Phần Rust của oracle chưa có kiểu phá trong `sabotage.py` (sabotage chỉ phá
-   file Python của flask, và Rust cần mạng). Logic so sánh dùng chung nên đã
-   được phá gián tiếp, nhưng nhánh miễn trừ import trong macro thì chưa.
+Không còn việc nào trong danh sách; thước đo chuẩn đã phủ cả năm ngôn ngữ.
 
 Các repo `googleapis/python-*` đơn lẻ đã archive và rỗng, nên ca lồng hai cấp
 dùng monorepo dạng sparse.

@@ -149,7 +149,10 @@ file, bỏ khoá
 thêm chú thích. Mỗi kiểu phải làm `bench.py` thoát 1, **và phải bị đúng phép
 kiểm dành cho nó bắt** — không chỉ đỏ vì một lý do khác. Ba kiểu nữa làm hỏng
 đầu ra `scan --json` — mất một import, lệch một dòng, thêm một import giả — và
-phải làm `oracle.py` thoát 1. CI chạy bước này sau bộ đo.
+phải làm `oracle.py` thoát 1. `--rust-repo ripgrep` thêm ba kiểu y vậy ở file
+Rust, đối chiếu bằng `syn` nên cần mạng; kiểu thêm import giả nằm ngoài macro,
+nên nó cũng giữ cho phép miễn trừ import trong thân macro không rộng ra. CI
+chạy bước này sau bộ đo, với `--rust-repo ripgrep`.
 
 Nó có mặt vì bộ đo này từng nằm ngoài git, và lúc đưa vào, đọc lại thì bốn
 phép kiểm không kiểm gì: một cái chỉ xét file có tồn tại vì vế sau của `or`

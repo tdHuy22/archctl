@@ -11,6 +11,12 @@ và bộ đo này từng có bốn phép kiểm như vậy.
 `oracle.py` cũng vậy: ba kiểu phá đầu ra `scan --json` (mất một import, lệch
 một dòng, thêm một import giả) phải làm nó thoát 1. `--repo` phải có file
 Python, vì phần đối chiếu Python không cần công cụ nào ngoài chính Python.
+
+`--rust-repo ripgrep` phá thêm ba kiểu như vậy ở file Rust, đối chiếu bằng
+`oracle.py --require syn` — tức là tải crate, nên chỉ CI bật. Phần Rust miễn
+trừ import nằm trong thân macro; kiểu `rust-extra` đặt import giả ở ngoài macro
+và đòi nó vẫn bị báo thừa, để một lần sửa làm phép miễn trừ rộng ra (nuốt cả
+file) đỏ ở đây. `--rust-repo` phải có import Rust đầu tiên nằm ngoài macro.
 """
 import argparse
 import json
@@ -40,18 +46,24 @@ ORACLE_MODES = {
     "scan-line": "lệch dòng:",
     "scan-extra": "thừa:",
 }
+RUST_ORACLE_MODES = {
+    "rust-drop": "thiếu:",
+    "rust-line": "lệch dòng:",
+    "rust-extra": "thừa:",
+}
 
 
 def sabotage_scan(rep: dict, mode: str):
-    """Làm hỏng import đầu tiên của file Python đầu tiên có import."""
+    """Làm hỏng import đầu tiên của file đầu tiên có import, Python hay Rust tuỳ kiểu."""
+    ext, kind = (".rs", mode[len("rust-"):]) if mode.startswith("rust-") else (".py", mode[len("scan-"):])
     for f in rep["files"]:
-        if f["file"].endswith(".py") and f["imports"]:
+        if f["file"].endswith(ext) and f["imports"]:
             imports = f["imports"]
-            if mode == "scan-drop":
+            if kind == "drop":
                 imports.pop(0)
-            elif mode == "scan-line":
+            elif kind == "line":
                 imports[0]["line"] += 1
-            elif mode == "scan-extra":
+            elif kind == "extra":
                 imports.append({**imports[0], "spec": "khong_co_that"})
             return
 
@@ -78,7 +90,7 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
         out = json.dumps(rep)
     elif mode == "diff" and args[:1] == ["diff"]:
         out = "kiến trúc a → b\n"
-    elif mode in ORACLE_MODES and args[:1] == ["scan"] and "--json" in args:
+    elif (mode in ORACLE_MODES or mode in RUST_ORACLE_MODES) and args[:1] == ["scan"] and "--json" in args:
         rep = json.loads(out)
         sabotage_scan(rep, mode)
         out = json.dumps(rep)
@@ -95,6 +107,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--archctl", default=str(ROOT / "target/release/archctl"))
     ap.add_argument("--repo", default="flask")
+    ap.add_argument("--rust-repo", help="phá cả phần Rust của oracle.py trên repo này (tải crate `syn`)")
     args = ap.parse_args()
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -106,18 +119,23 @@ def main():
         fake.chmod(0o755)
 
         bad = 0
-        runs = [("bench.py", m, e) for m, e in [("", None), *MODES.items()]]
-        runs += [("oracle.py", m, e) for m, e in [("", None), *ORACLE_MODES.items()]]
-        for script, mode, expect in runs:
+        runs = [("bench.py", args.repo, m, e) for m, e in [("", None), *MODES.items()]]
+        runs += [("oracle.py", args.repo, m, e) for m, e in [("", None), *ORACLE_MODES.items()]]
+        if args.rust_repo:
+            runs += [("oracle.py", args.rust_repo, m, e)
+                     for m, e in [("", None), *RUST_ORACLE_MODES.items()]]
+        for script, repo, mode, expect in runs:
             env = {**os.environ, "SABOTAGE": mode,
                    "SABOTAGE_REAL": str(Path(args.archctl).resolve())}
             extra = ["--rounds", "1"] if script == "bench.py" else []
+            if mode in RUST_ORACLE_MODES or (script == "oracle.py" and repo == args.rust_repo):
+                extra = ["--require", "syn"]
             p = subprocess.run(
                 [sys.executable, str(HERE / script), "--archctl", str(fake),
-                 "--only", args.repo, *extra],
+                 "--only", repo, *extra],
                 capture_output=True, text=True, env=env,
             )
-            label = f"{script[:-3]} {mode or 'không phá'}"
+            label = f"{script[:-3]} {mode or 'không phá'}" + (f" ({repo})" if repo != args.repo else "")
             caught = expect is None or expect in p.stdout
             want = 0 if expect is None else 1
             if p.returncode == want and caught:
