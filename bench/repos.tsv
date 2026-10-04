@@ -14,6 +14,7 @@ go-sqlite3	https://github.com/mattn/go-sqlite3.git	dbbe931904f2ee06546448fbe7cf7
 hugo	https://github.com/gohugoio/hugo.git	6b3ba3a7e22ae2809605b8118aeed08b244f1955	-	Go, 943 file, đồ thị dày
 langchain	https://github.com/langchain-ai/langchain.git	57236d55d9ffc8634bda987861e6fce460aff268	-	Python LLM, nhiều package trong libs/
 leveldb	https://github.com/google/leveldb.git	7ee830d02b623e8ffe0b95d59a74db1e58da04c5	-	C++, storage engine, CMake
+libbpfgo	https://github.com/aquasecurity/libbpfgo.git	96cbab36fb96ce52522352809a335b7ff3fef8ef	libbpf	Go, binding eBPF qua cgo, Go ở gốc gọi submodule C libbpf/
 netbox	https://github.com/netbox-community/netbox.git	5a9a9d2a25318ff68fdd567959a2d4f1f7080b21	-	ứng dụng Django chia tầng, quản lý hạ tầng mạng
 nginx	https://github.com/nginx/nginx.git	2b5c2b605b5df669da5dec6749dcc76c07d1315d	-	C, máy chủ mạng, build bằng script auto/ chứ không CMake
 opentelemetry-python	https://github.com/open-telemetry/opentelemetry-python.git	5e8083e845dc0b0225d8674240c556c879ce852f	-	Python, nhiều distribution chung namespace PEP 420 `opentelemetry`

@@ -172,12 +172,27 @@ fn c(toks: &[Token]) -> Foreign {
             Some(Tok::Word(_) | Tok::Punct('*'))
         ) && i > 0;
         let close = paren_end(toks, i + 1);
-        if has_type && matches!(toks.get(close + 1).map(|t| &t.tok), Some(Tok::Punct('{'))) {
+        if has_type && !is_macro_call(toks, i) && matches!(toks.get(close + 1).map(|t| &t.tok), Some(Tok::Punct('{'))) {
             out.provides.push(hit(name, toks[i].line));
         }
         i = close.max(i) + 1;
     }
     out
+}
+
+/// `s32 BPF_STRUCT_OPS(name, …) {` trong chương trình eBPF trông y như một
+/// định nghĩa hàm, nhưng hàm thật là `name`, còn `BPF_STRUCT_OPS` ở phía Go lại
+/// là một hằng enum. Hai dấu hiệu cùng lúc: tên viết hoa toàn bộ (quy ước của
+/// macro), và đối số đầu là một tên trần chứ không phải tham số có kiểu.
+/// `SHA256(const unsigned char *d, …)` của OpenSSL là hàm thật, và vẫn được
+/// tính.
+fn is_macro_call(toks: &[Token], i: usize) -> bool {
+    let Tok::Word(name) = &toks[i].tok else { return false };
+    let upper = name.bytes().any(|b| b.is_ascii_uppercase())
+        && !name.bytes().any(|b| b.is_ascii_lowercase());
+    upper
+        && matches!(toks.get(i + 2).map(|t| &t.tok), Some(Tok::Word(w)) if w != "void")
+        && matches!(toks.get(i + 3).map(|t| &t.tok), Some(Tok::Punct(',' | ')')))
 }
 
 fn paren_end(toks: &[Token], open: usize) -> usize {

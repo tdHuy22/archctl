@@ -18,7 +18,7 @@ use std::path::Path;
 /// Thư mục không nói gì về kiến trúc của sản phẩm. Bỏ khi **chọn bố cục**;
 /// chúng vẫn được kiểm bình thường sau đó.
 const ASIDE: &[&str] = &[
-    "test", "tests", "testing", "spec", "specs", "__tests__", "e2e", "example", "examples",
+    "test", "tests", "testing", "selftest", "selftests", "spec", "specs", "__tests__", "e2e", "example", "examples",
     "bench", "benches", "doc", "docs", "deps", "vendor", "third_party", "thirdparty",
     "fixtures", "testdata",
 ];
@@ -108,6 +108,11 @@ fn observe_edges(
 ) -> Vec<(String, String)> {
     let resolver = Resolver::new(root);
     let mut edges: Vec<(String, String)> = Vec::new();
+    // Cạnh liên ngôn ngữ, ghép theo tên đúng như `check` làm. Thiếu phần này
+    // thì lời gọi cgo của libbpfgo sang thư mục C khác là cạnh mà bộ kiểm thấy
+    // còn luật sinh ra không có, và luật tự vi phạm chính nó.
+    let mut ffi_calls: Vec<(&String, String)> = Vec::new();
+    let mut ffi_provides: BTreeMap<String, String> = BTreeMap::new();
 
     for file in files {
         let Some(lang) = Lang::for_path(file) else { continue };
@@ -117,7 +122,21 @@ fn observe_edges(
             continue;
         }
 
-        for import in lang.imports(&src) {
+        let scan = lang.scan_all(&src, &Default::default(), &[]);
+        ffi_calls.extend(scan.foreign.calls.into_iter().map(|c| (from, c.symbol)));
+        for provided in scan.foreign.provides {
+            // Hai component cùng cung cấp một tên thì bỏ cả hai, như `check`.
+            ffi_provides
+                .entry(provided.symbol)
+                .and_modify(|owner| {
+                    if owner != from {
+                        owner.clear();
+                    }
+                })
+                .or_insert_with(|| from.clone());
+        }
+
+        for import in scan.imports {
             let Resolved::Path(target) = resolver.resolve(lang, file, &import) else { continue };
             let Some(to) = group_of_target(root, &target, prefix).and_then(|g| owners.get(&g))
             else {
@@ -126,6 +145,11 @@ fn observe_edges(
             if to != from {
                 edges.push((from.clone(), to.clone()));
             }
+        }
+    }
+    for (from, symbol) in ffi_calls {
+        if let Some(to) = ffi_provides.get(&symbol).filter(|o| !o.is_empty() && *o != from) {
+            edges.push((from.clone(), to.clone()));
         }
     }
     edges.sort();

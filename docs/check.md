@@ -61,6 +61,10 @@ Ghép theo tên, nên nó thận trọng ở mấy chỗ:
   mà đoán sai sinh ra một cạnh không có thật.
 - **Không ghép được thì im lặng.** `memcpy` nằm trong libc, không có định
   nghĩa nào trong repo. FFI tới thư viện hệ thống là chuyện thường.
+- **Macro bọc hàm không phải là định nghĩa hàm C.** `s32 BPF_STRUCT_OPS(name, …) {`
+  là macro bọc hàm `name`; ở phía Go, `C.BPF_STRUCT_OPS` lại là hằng enum.
+  Nhận ra bằng hai dấu hiệu: tên viết hoa toàn bộ, và đối số đầu là một tên
+  trần. `SHA256(const unsigned char *d, …)` vẫn là hàm.
 - **`C.CString`, `C.int` của cgo tự rụng**, vì chúng không khớp định nghĩa nào
   trong repo.
 
@@ -417,6 +421,6 @@ ra. Giờ:
 Bộ đọc `.gitignore` chỉ đủ cho câu hỏi này: mẫu sau thắng mẫu trước, `!` đưa
 trở lại, mẫu có `/` thì neo vào thư mục chứa file, thư mục cha bị bỏ thì con
 cũng bị. Chưa hiểu `[abc]`. Bộ đo đối
-chiếu nó với chính `git check-ignore` trên hai mươi mốt repo.
+chiếu nó với chính `git check-ignore` trên hai mươi hai repo.
 
 Thêm mẫu glob vào `.arch/.archignore` để bỏ qua thêm.

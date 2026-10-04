@@ -168,3 +168,42 @@ fn ham_he_thong_khong_ghep_duoc_thi_im_lang() {
     repo.write("app/decode.rs", "unsafe extern \"C\" {\n    fn memcpy(d: *mut u8, s: *const u8, n: usize);\n}\n");
     assert!(repo.edges().is_empty());
 }
+
+#[test]
+fn macro_dang_dinh_nghia_ham_khong_phai_la_cung_cap() {
+    // libbpfgo: chương trình eBPF viết `s32 BPF_STRUCT_OPS(simple_enqueue, …) {`,
+    // một macro bọc định nghĩa hàm. Phía Go có `C.BPF_STRUCT_OPS`, nhưng đó là
+    // hằng enum của kernel. Tên viết hoa toàn bộ là quy ước của macro.
+    let repo = Repo::new("macro");
+    repo.write(
+        "app/prog.go",
+        "package app\n\n// #include <linux/bpf.h>\nimport \"C\"\n\nconst T = C.BPF_STRUCT_OPS\n",
+    )
+    .write("native/sched.bpf.c", "s32 BPF_STRUCT_OPS(simple_enqueue, u64 flags) { return 0; }\n");
+    assert!(repo.edges().is_empty(), "{:?}", repo.edges());
+}
+
+#[test]
+fn ham_c_viet_hoa_van_la_cung_cap() {
+    // OpenSSL có `SHA256`, `MD5`, `HMAC`: hàm thật, tên viết hoa. Khác macro
+    // ở chỗ trong ngoặc là tham số có kiểu, không phải một tên trần.
+    let repo = Repo::new("upper");
+    repo.write(
+        "app/hash.rs",
+        "unsafe extern \"C\" {\n    fn SHA256(d: *const u8, n: usize, md: *mut u8) -> *mut u8;\n    fn RAND(v: u32) -> u32;\n}\n",
+    )
+    .write(
+        "native/sha.c",
+        "unsigned char *SHA256(const unsigned char *d, size_t n, unsigned char *md) { return md; }\n\
+         unsigned RAND(void) { return 4; }\n",
+    );
+    assert_eq!(repo.edges(), ["App -> Native qua RAND", "App -> Native qua SHA256"]);
+}
+
+#[test]
+fn ham_ben_trong_doi_so_macro_khong_phai_la_cung_cap() {
+    let repo = Repo::new("wrap");
+    repo.write("app/decode.rs", "unsafe extern \"C\" {\n    fn inner(n: u32);\n}\n")
+        .write("native/w.c", "WRAP(static int inner(int x) { return x; })\n");
+    assert!(repo.edges().is_empty(), "{:?}", repo.edges());
+}

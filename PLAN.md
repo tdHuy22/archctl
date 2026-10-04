@@ -5,9 +5,26 @@ Mô tả sản phẩm ở [README.md](README.md); file này chỉ ghi trạng th
 
 ## §0 Đang ở đâu, việc tiếp theo
 
-Cập nhật 2026-10-03.
+Cập nhật 2026-10-04.
 
 ### Đã xong, có bằng chứng
+
+- **Cạnh cgo giữa hai component giờ được đo.** Thêm libbpfgo
+  (Go ở gốc, submodule C `libbpf/`) vào bộ đo; nó lộ ba chỗ hỏng, cả ba đã
+  sửa, có test:
+  - `selftest/` (24 thư mục, mỗi cái một `main.go`) thắng gốc repo khi chọn
+    bố cục; 145/205 file — cả thư viện — nằm ngoài sơ đồ. `selftest`,
+    `selftests` giờ nằm trong `ASIDE`.
+  - Bộ khám phá chỉ đọc import, không ghép cạnh ffi như `check`, nên luật
+    sinh ra tự vi phạm (`Core -> Selftest` qua ffi). Giờ nó ghép theo đúng
+    cách của `check`.
+  - Cạnh đó còn là cạnh sai: `s32 BPF_STRUCT_OPS(name, …) {` bị đọc thành
+    định nghĩa hàm `BPF_STRUCT_OPS`. Giờ tên viết hoa toàn bộ mà đối số đầu là
+    một tên trần thì là macro; `SHA256(const unsigned char *d, …)` vẫn là hàm
+    (review bắt bản đầu làm mất cạnh tới hàm viết hoa của OpenSSL).
+  Kết quả: `Core -> Libbpf` có 113 lời gọi cgo, 111 tên. 22 repo, 19865 file,
+  0 bất nhất, 0 cảnh báo luật, 770/770, `sabotage.py` 7/7; 21 repo cũ ra đúng
+  số cũ. 390 test, clippy sạch.
 
 - **Bộ đo lên hai mươi mốt repo:** thêm abseil-cpp (C++ Bazel,
   include từ gốc `absl/...`), opentelemetry-python (sáu distribution chung
@@ -108,11 +125,7 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-1. Cạnh cgo **giữa hai component** vẫn chưa được đo. Ở go-sqlite3, toàn bộ
-   định nghĩa C nằm trong `sqlite3-binding.c` 9 MB, vượt `MAX_FILE_BYTES`
-   (4 MB): archctl báo QUÁ LỚN, nhưng không ghép được `C.x` nào. Cần một repo
-   Go mà mã C nằm ở thư mục riêng, file dưới 4 MB.
-2. PEP 420 mới có một repo (opentelemetry-python); chưa có dự phòng.
+1. PEP 420 mới có một repo (opentelemetry-python); chưa có dự phòng.
 
 Không có việc nào đang dở. **Đã quyết (2026-10-03): giữ repo private, CI là
 lời nhắc chứ không chặn** — gói GitHub Free không có branch protection cho repo

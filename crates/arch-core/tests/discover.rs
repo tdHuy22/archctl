@@ -270,3 +270,51 @@ fn luat_sinh_ra_tu_ma_nay_thi_kiem_lai_phai_sach() {
         assert!(repo.self_check().is_empty(), "{name}: {:?}", repo.self_check());
     }
 }
+
+/// libbpfgo: Go ở gốc gọi vào libbpf qua cgo, không có `#include` nào trỏ tới
+/// file `.c` cung cấp hàm. Bộ khám phá chỉ đọc import thì không thấy cạnh mà
+/// bộ kiểm thấy, và luật sinh ra tự vi phạm chính nó.
+#[test]
+fn canh_cgo_giua_hai_component_co_trong_luat_sinh_ra() {
+    let mut files = vec![
+        "go.mod|module example.com/bpfgo".to_string(),
+        "libbpf/src/bpf.h|int bpf_map_fd(int x);".to_string(),
+        "libbpf/src/bpf.c|int bpf_map_fd(int x) { return x; }".to_string(),
+        // Cạnh `#include` đưa Core vào diện kiểm; lời gọi cgo sang Native thì
+        // không có import nào nói tới.
+        "shim.c|#include \"libbpf/src/bpf.h\"".to_string(),
+        "native/n.c|int native_tick(int x) { return x; }".to_string(),
+        "native/m.c|int native_tock(int x) { return x; }".to_string(),
+    ];
+    for i in 0..10 {
+        files.push(format!(
+            "f{i}.go|package bpfgo\n\nimport \"C\"\n\nfunc F{i}() int {{ return int(C.bpf_map_fd(1)) + int(C.native_tick(2)) }}"
+        ));
+    }
+    for t in ["a", "b", "c"] {
+        files.push(format!("selftest/{t}/main.go|package main"));
+    }
+    let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+    let repo = Repo::new("cgo", &refs);
+    let mut names = repo.names();
+    names.retain(|n| n != "Selftest");
+    assert_eq!(names, ["Core", "Libbpf", "Native"]);
+    assert!(repo.self_check().is_empty(), "{:?}", repo.self_check());
+}
+
+/// `selftest/` của libbpfgo có 24 thư mục con, mỗi cái một `main.go`. Không
+/// coi nó là test thì nó thắng gốc repo, và thư viện thật nằm ngoài sơ đồ.
+#[test]
+fn selftest_khong_duoc_chon_lam_goc() {
+    let mut files = vec!["go.mod|module example.com/bpfgo".to_string()];
+    for i in 0..6 {
+        files.push(format!("f{i}.go|package bpfgo"));
+        files.push(format!("pkg{i}/p.go|package pkg{i}"));
+    }
+    for i in 0..20 {
+        files.push(format!("selftest/t{i}/main.go|package main"));
+    }
+    let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+    let repo = Repo::new("selftest", &refs);
+    assert!(repo.names().contains(&"Core".to_string()), "{:?}", repo.globs());
+}
