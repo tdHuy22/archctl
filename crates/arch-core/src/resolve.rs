@@ -6,6 +6,7 @@
 //! phạm, tệ hơn hẳn việc nói thẳng là chưa biết.
 
 use crate::jsonc;
+use crate::scan::lexer::{Tok, Token};
 use crate::scan::{Import, Lang};
 use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -143,9 +144,15 @@ pub struct Resolver {
     /// đối và không khớp alias nào, nên repo không phải TypeScript không tốn
     /// gì cả.
     npm_packages: OnceCell<Vec<(String, String)>>,
+    /// Thư mục có thể là gốc chạy của một chương trình Python: gốc repo, và
+    /// thư mục có `pyproject.toml`, `setup.py`, `setup.cfg`, `manage.py`. Đọc
+    /// muộn, và một lượt quét cây dùng cho cả `py_roots` lẫn `extensions`.
+    py_projects: OnceCell<Vec<String>>,
     /// Gốc import của Python, tra theo tên cấp cao nhất. Xem [`find_py_roots`].
     /// Đọc muộn như `npm_packages`.
     py_roots: OnceCell<PyRoots>,
+    /// Extension mà `setup.py` khai — xem [`Extensions`].
+    extensions: OnceCell<Extensions>,
     /// Thư mục include mà build của C/C++ khai báo. Đọc muộn: repo không có
     /// file C nào thì không phải quét tìm `Makefile` làm gì.
     c_includes: OnceCell<Vec<String>>,
@@ -246,7 +253,9 @@ impl Resolver {
             rust_crates: find_rust_crates(root),
             ts_configs: find_ts_configs(root),
             npm_packages: OnceCell::new(),
+            py_projects: OnceCell::new(),
             py_roots: OnceCell::new(),
+            extensions: OnceCell::new(),
             c_includes: OnceCell::new(),
             c_files: OnceCell::new(),
             listing: RefCell::new(HashMap::new()),
@@ -375,7 +384,7 @@ impl Resolver {
         }
         let path = spec.replace('.', "/");
         let top = spec.split('.').next().unwrap_or(spec);
-        let roots = self.py_roots.get_or_init(|| find_py_roots(&self.root));
+        let roots = self.py_roots();
         // `os`, `numpy`: không gốc nào có tên này, khỏi hỏi hệ thống file.
         let Some(bases) = roots.get(top) else {
             return Resolved::Package(top.to_string());
@@ -474,6 +483,30 @@ impl Resolver {
         (out, natives)
     }
 
+    fn py_projects(&self) -> &[String] {
+        self.py_projects.get_or_init(|| find_py_projects(&self.root))
+    }
+
+    fn py_roots(&self) -> &PyRoots {
+        self.py_roots.get_or_init(|| find_py_roots(&self.root, self.py_projects()))
+    }
+
+    /// Extension mà các `setup.py` của dự án khai.
+    pub fn extensions(&self) -> &Extensions {
+        self.extensions.get_or_init(|| Extensions::read(&self.root, self.py_projects()))
+    }
+
+    /// Khoá ghép của phía native trong `file`, sau khi thay
+    /// `TORCH_EXTENSION_NAME` bằng tên thật. `None` khi không biết chắc tên đó:
+    /// cạnh đoán sai còn tệ hơn không có cạnh.
+    pub fn bind_extension(&self, file: &str, key: &str) -> Option<String> {
+        if !key.contains(crate::scan::foreign::EXTENSION_NAME) {
+            return Some(key.to_string());
+        }
+        let name = self.extensions().for_source(file)?;
+        Some(key.replacen(crate::scan::foreign::EXTENSION_NAME, name, 1))
+    }
+
     /// Module `spec` phân giải ra `found` có thể là module mở rộng không: chỉ
     /// có stub, không tìm thấy, hoặc nằm trong một package của dự án mà
     /// package đó không có file nào cho nó.
@@ -487,6 +520,10 @@ impl Resolver {
                 Some(rest) => (relative_stem(importer, rest), false),
                 None => (None, false),
             },
+            // Tên mà `setup.py` khai là extension thì là module của dự án, kể
+            // cả ở cấp cao nhất (`import amp_C` của apex) — thứ mà không có
+            // khai báo đó thì không phân biệt được với gói bên ngoài.
+            Resolved::Package(_) if self.extensions().declares(spec) => (Some(spec.replace('.', "/")), false),
             Resolved::Package(top) if spec.contains('.') && !spec.starts_with('.') => {
                 (self.absolute_stem(importer, top, spec), false)
             }
@@ -504,7 +541,7 @@ impl Resolver {
     /// `top` là của dự án: dưới gốc gần file gọi nhất có gói đó. `None` khi
     /// `top` là gói bên ngoài — `torch._C` không bao giờ là module của repo này.
     fn absolute_stem(&self, importer: &str, top: &str, spec: &str) -> Option<String> {
-        let roots = self.py_roots.get_or_init(|| find_py_roots(&self.root));
+        let roots = self.py_roots();
         let bases = roots.get(top)?;
         let base = bases
             .iter()
@@ -1184,13 +1221,16 @@ type PyRoots = HashMap<String, Vec<(String, String)>>;
 /// Đọc mỗi thư mục gốc một lần rồi lập bảng theo tên: monorepo có hàng chục
 /// gốc, mỗi file hàng chục import, và phần lớn import là thư viện ngoài —
 /// hỏi hệ thống file cho từng cặp thì `check` của langchain chậm gấp năm.
-fn find_py_roots(root: &Path) -> PyRoots {
+fn find_py_projects(root: &Path) -> Vec<String> {
     let mut projects = vec![String::new()];
     let markers = ["pyproject.toml", "setup.py", "setup.cfg", "manage.py"];
     collect_dirs_with(root, "", 0, &markers, &mut projects);
     projects.sort();
     projects.dedup();
+    projects
+}
 
+fn find_py_roots(root: &Path, projects: &[String]) -> PyRoots {
     let mut out: PyRoots = HashMap::new();
     for project in projects {
         let p = if project.is_empty() { String::new() } else { format!("{project}/") };
@@ -1216,6 +1256,230 @@ fn find_py_roots(root: &Path) -> PyRoots {
         }
     }
     out
+}
+
+/// Extension Python mà `setup.py` khai: `CppExtension("pkg._C", ["a.cpp"])`,
+/// `CUDAExtension(name="amp_C", sources=[…])`, cả qua biến (`extension =
+/// CUDAExtension` rồi `extension("pkg._C", sources)`).
+///
+/// Đó là cách duy nhất biết `TORCH_EXTENSION_NAME` mang tên gì: khi biên dịch
+/// từng file nguồn, `torch.utils.cpp_extension` đặt nó bằng đoạn cuối của tên
+/// extension chứa file đó. Tên đặt qua biến (`name=ext_name`) thì không đọc.
+#[derive(Debug, Default)]
+pub struct Extensions {
+    /// Tên đầy đủ → file nguồn (tương đối với gốc repo) khi danh sách nguồn
+    /// viết thẳng; `None` khi nó tính lúc chạy (`glob`, biến).
+    declared: HashMap<String, Option<Vec<String>>>,
+    /// File nguồn → tên đầy đủ của extension liệt kê nó. Chuỗi rỗng là file
+    /// có trong hai extension: không biết mang tên nào.
+    by_source: HashMap<String, String>,
+}
+
+impl Extensions {
+    fn read(root: &Path, projects: &[String]) -> Self {
+        // `setup.py` thật vài chục KB. Trần mỗi file và trần tổng: đọc nó nằm
+        // trên đường hook, và số file theo số project, không bị chặn.
+        const MAX_SETUP_BYTES: u64 = 1 << 20;
+        const MAX_TOTAL_BYTES: u64 = 8 << 20;
+        let mut out = Extensions::default();
+        let mut total = 0u64;
+        for project in projects {
+            let dir = if project.is_empty() { String::new() } else { format!("{project}/") };
+            let Some(src) = read_bounded(&root.join(format!("{dir}setup.py")), MAX_SETUP_BYTES) else {
+                continue;
+            };
+            total += src.len() as u64;
+            if total > MAX_TOTAL_BYTES {
+                break;
+            }
+            for (name, sources) in parse_setup(&Lang::Python.tokens(&src)) {
+                let sources = sources.map(|s| {
+                    s.iter().map(|f| format!("{dir}{}", f.trim_start_matches("./"))).collect::<Vec<_>>()
+                });
+                match out.declared.entry(name) {
+                    // Cùng một tên khai ở hai nhánh `if`: gộp nguồn, và một
+                    // bên không biết nguồn thì cả hai không biết.
+                    std::collections::hash_map::Entry::Occupied(mut e) => match (e.get_mut(), sources) {
+                        (Some(known), Some(more)) => known.extend(more),
+                        (known, _) => *known = None,
+                    },
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(sources);
+                    }
+                }
+            }
+        }
+        for (name, sources) in &out.declared {
+            for file in sources.iter().flatten() {
+                out.by_source
+                    .entry(file.clone())
+                    .and_modify(|owner| {
+                        if owner != name {
+                            owner.clear();
+                        }
+                    })
+                    .or_insert_with(|| name.clone());
+            }
+        }
+        out
+    }
+
+    /// `full` (`amp_C`, `pkg._C`) có phải tên một extension của dự án không.
+    pub fn declares(&self, full: &str) -> bool {
+        self.declared.contains_key(full)
+    }
+
+    /// Tên mà `TORCH_EXTENSION_NAME` mang khi biên dịch `file`: đoạn cuối của
+    /// tên extension có `file` trong danh sách nguồn. Không có thì chỉ khi dự
+    /// án khai đúng một extension và nguồn của nó tính lúc chạy. Nhiều
+    /// extension mà không biết file thuộc cái nào thì không đoán.
+    pub fn for_source(&self, file: &str) -> Option<&str> {
+        let full = match self.by_source.get(file) {
+            Some(owner) if owner.is_empty() => return None,
+            Some(owner) => owner.as_str(),
+            None => match self.declared.iter().next() {
+                Some((name, None)) if self.declared.len() == 1 => name.as_str(),
+                _ => return None,
+            },
+        };
+        Some(full.rsplit('.').next().unwrap_or(full))
+    }
+}
+
+/// Nội dung một file thường, nếu nó không quá `max` byte. Không theo được tới
+/// thiết bị hay FIFO: `setup.py -> /dev/zero` có kích thước 0 theo metadata
+/// nhưng đọc mãi không hết, và git commit được symlink.
+fn read_bounded(path: &Path, max: u64) -> Option<String> {
+    use std::io::Read as _;
+    let file = std::fs::File::open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > max {
+        return None;
+    }
+    let mut src = String::new();
+    file.take(max + 1).read_to_string(&mut src).ok()?;
+    (src.len() as u64 <= max).then_some(src)
+}
+
+/// Các lời gọi dựng extension trong một `setup.py`: `(tên, nguồn nếu viết thẳng)`.
+///
+/// Tuyến tính theo số token, kể cả với `E(E(E(…)))` lồng sâu: `setup.py` là
+/// input không tin được, và đọc nó nằm trên đường hook.
+fn parse_setup(toks: &[Token]) -> Vec<(String, Option<Vec<String>>)> {
+    let is_ext = |w: &str| w.rsplit('.').next().is_some_and(|last| last.ends_with("Extension"));
+    let closing = matching_brackets(toks);
+    // `extension = CUDAExtension`
+    let aliases: HashSet<&str> = toks
+        .windows(3)
+        .filter_map(|w| match (&w[0].tok, &w[1].tok, &w[2].tok) {
+            (Tok::Word(a), Tok::Punct('='), Tok::Word(b)) if is_ext(b) => Some(a.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut out = Vec::new();
+    for i in 0..toks.len() {
+        let Tok::Word(callee) = &toks[i].tok else { continue };
+        if !(is_ext(callee) || aliases.contains(&callee.as_str()))
+            || toks.get(i + 1).map(|t| &t.tok) != Some(&Tok::Punct('('))
+            // `class CMakeExtension(Extension):` là định nghĩa, không phải lời gọi.
+            || i.checked_sub(1).is_some_and(|k| matches!(&toks[k].tok, Tok::Word(w) if w == "class" || w == "def"))
+        {
+            continue;
+        }
+        let (mut name, mut sources, mut position) = (None, None, 0);
+        for arg in call_args(toks, &closing, i + 1) {
+            match arg {
+                [Token { tok: Tok::Word(key), .. }, Token { tok: Tok::Punct('='), .. }, value @ ..] => {
+                    match key.as_str() {
+                        "name" => name = single_str(value),
+                        "sources" => sources = str_list(value),
+                        _ => {}
+                    }
+                }
+                _ => {
+                    match position {
+                        0 => name = name.or_else(|| single_str(arg)),
+                        1 => sources = sources.or_else(|| str_list(arg)),
+                        _ => {}
+                    }
+                    position += 1;
+                }
+            }
+        }
+        if let Some(name) = name {
+            out.push((name, sources));
+        }
+    }
+    out
+}
+
+/// Với mỗi dấu mở ngoặc, vị trí dấu đóng của nó; `usize::MAX` khi không đóng.
+/// Một lượt, bằng stack.
+fn matching_brackets(toks: &[Token]) -> Vec<usize> {
+    let mut out = vec![usize::MAX; toks.len()];
+    let mut open: Vec<usize> = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        match t.tok {
+            Tok::Punct('(' | '[' | '{') => open.push(i),
+            Tok::Punct(')' | ']' | '}') => {
+                if let Some(o) = open.pop() {
+                    out[o] = i;
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Đối số cấp ngoài cùng của lời gọi có `(` ở `open`, cắt theo dấu phẩy. Nhảy
+/// qua cả nhóm ngoặc lồng bên trong thay vì đi từng token, nên tổng công của
+/// mọi lời gọi là tuyến tính. Lời gọi không đóng thì không có đối số nào.
+fn call_args<'a>(toks: &'a [Token], closing: &[usize], open: usize) -> Vec<&'a [Token]> {
+    let close = closing[open];
+    if close == usize::MAX {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let (mut i, mut start) = (open + 1, open + 1);
+    while i < close {
+        match toks[i].tok {
+            Tok::Punct('(' | '[' | '{') if closing[i] != usize::MAX => i = closing[i] + 1,
+            Tok::Punct(',') => {
+                out.push(&toks[start..i]);
+                i += 1;
+                start = i;
+            }
+            _ => i += 1,
+        }
+    }
+    if start < close {
+        out.push(&toks[start..close]);
+    }
+    out
+}
+
+fn single_str(arg: &[Token]) -> Option<String> {
+    match arg {
+        [Token { tok: Tok::Str(s), .. }] => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// `["a.cpp", "b.cu"]`, chỉ khi mọi phần tử là chuỗi viết thẳng.
+fn str_list(arg: &[Token]) -> Option<Vec<String>> {
+    let [Token { tok: Tok::Punct('['), .. }, inner @ .., Token { tok: Tok::Punct(']'), .. }] = arg else {
+        return None;
+    };
+    let mut out = Vec::new();
+    for (k, t) in inner.iter().enumerate() {
+        match (&t.tok, k % 2) {
+            (Tok::Str(s), 0) => out.push(s.clone()),
+            (Tok::Punct(','), 1) => {}
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 /// Thư mục chứa mã vendor của bên thứ ba.

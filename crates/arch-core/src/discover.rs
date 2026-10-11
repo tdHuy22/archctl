@@ -210,7 +210,12 @@ fn scan_files(root: &Path, files: &[String], wanted: impl Fn(&str) -> bool) -> V
             file: file.clone(),
             targets: Vec::new(),
             calls: scan.foreign.calls.into_iter().map(|c| c.symbol).collect(),
-            provides: scan.foreign.provides.into_iter().map(|c| c.symbol).collect(),
+            provides: scan
+                .foreign
+                .provides
+                .into_iter()
+                .filter_map(|c| resolver.bind_extension(file, &c.symbol))
+                .collect(),
             natives: Vec::new(),
         };
         for import in scan.imports {

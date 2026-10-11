@@ -7,6 +7,7 @@
 #
 # tên	url	commit	submodule	sparse	vì sao có mặt
 abseil-cpp	https://github.com/abseil/abseil-cpp.git	33a35cf45087dffab22c0c9ae817021a45e93a47	-	-	C++, Bazel, include từ gốc workspace kiểu "absl/..."
+apex	https://github.com/NVIDIA/apex.git	575968bc1f9127ccd61003a681472a83af4ff1a1	-	-	Python DL cộng C++/CUDA: nhiều extension `torch.utils.cpp_extension` đặt tên qua `TORCH_EXTENSION_NAME`, danh sách nguồn viết thẳng trong `setup.py`, import ở cấp cao nhất (`import amp_C`)
 core	https://github.com/vuejs/core.git	4ab865a848a1da3d10fb674f857e5fff13094644	-	-	TypeScript monorepo, alias trong tsconfig
 curl	https://github.com/curl/curl.git	6b506de183dafdb1e57072297d9730cfc8b81513	-	-	C, include path đọc từ CMakeLists
 etcd	https://github.com/etcd-io/etcd.git	64f26db45f5feb2c491a9eb82768a2f41fc857df	-	-	Go, hạ tầng phân tán, nhiều go.mod trong một repo

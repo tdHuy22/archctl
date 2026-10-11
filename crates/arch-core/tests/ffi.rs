@@ -492,3 +492,120 @@ fn hai_component_cung_cung_cap_module_hay_op_thi_bo_ca_hai() {
         .write("app/x.py", "import torch\nimport app._core\ntorch.ops.mylib.f(a)\n");
     assert!(repo.edges().is_empty(), "{:?}", repo.edges());
 }
+
+// ---- `TORCH_EXTENSION_NAME`: tên module do `setup.py` đặt ----
+//
+// Extension dựng bằng `torch.utils.cpp_extension` viết
+// `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)`: tên module là đoạn cuối của tên
+// khai trong `CppExtension`/`CUDAExtension("pkg._C", sources)`. Chỉ ghép khi
+// biết chắc file C++ thuộc extension nào: nó có trong danh sách source viết
+// thẳng, hoặc `setup.py` chỉ khai đúng một extension.
+
+#[test]
+fn torch_extension_name_theo_danh_sach_source_viet_thang() {
+    // apex: nhiều extension, mỗi cái một danh sách source, import ở cấp cao nhất.
+    let repo = Repo::new("ext-sources");
+    repo.write(
+        "setup.py",
+        "from setuptools import setup\n\
+         from torch.utils.cpp_extension import BuildExtension, CppExtension, CUDAExtension\n\
+         ext_modules = []\n\
+         ext_modules.append(CppExtension(\"apex_C\", [\"native/flatten.cpp\"]))\n\
+         ext_modules.append(\n    CUDAExtension(\n        name=\"amp_C\",\n        sources=[\"native/amp.cpp\", \"native/amp_kernel.cu\"],\n    )\n)\n\
+         setup(name=\"apex\", ext_modules=ext_modules, cmdclass={\"build_ext\": BuildExtension})\n",
+    )
+    .write("native/flatten.cpp", "PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {\n  m.def(\"flatten\", &flatten);\n}\n")
+    .write("native/amp.cpp", "PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {\n  m.def(\"scale\", &scale);\n}\n")
+    .write("app/x.py", "import apex_C\nimport amp_C\nimport numpy\n");
+    assert_eq!(repo.edges(), ["App -> Native qua amp_C", "App -> Native qua apex_C"]);
+}
+
+#[test]
+fn torch_extension_name_mot_extension_khai_qua_bien() {
+    // detectron2: `extension = CUDAExtension` rồi `extension("pkg._C", sources)`
+    // với `sources` lấy bằng glob. Chỉ một extension, nên macro là nó.
+    let repo = Repo::new("ext-single");
+    repo.write(
+        "setup.py",
+        "import glob\nfrom torch.utils.cpp_extension import CppExtension, CUDAExtension\n\
+         def get_extensions():\n    sources = glob.glob(\"native/**/*.cpp\")\n    extension = CppExtension\n\
+         \x20   if cuda:\n        extension = CUDAExtension\n\
+         \x20   return [extension(\"app._C\", sources, include_dirs=[\"native\"])]\n",
+    )
+    .write("native/vision.cpp", "PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {\n  m.def(\"nms\", &nms);\n}\n")
+    .write(
+        "native/ops.cpp",
+        "TORCH_LIBRARY(TORCH_EXTENSION_NAME, m) {\n  m.def(\"roi_align(Tensor x) -> Tensor\");\n}\n",
+    )
+    .write("app/__init__.py", "")
+    .write("app/layers.py", "import torch\nfrom app import _C\ny = torch.ops._C.roi_align(x)\n");
+    assert_eq!(repo.edges(), ["App -> Native qua app._C", "App -> Native qua torch.ops._C.roi_align"]);
+}
+
+#[test]
+fn nhieu_extension_khong_co_danh_sach_source_thi_khong_doan() {
+    // vllm: nhiều `CMakeExtension`, source do CMake chọn. Không biết file C++
+    // nào thuộc module nào.
+    let repo = Repo::new("ext-many");
+    repo.write(
+        "setup.py",
+        "ext_modules = [CMakeExtension(name=\"app._C\"), CMakeExtension(name=\"app._moe_C\")]\n",
+    )
+    .write("native/a.cpp", "PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {}\n")
+    .write("app/__init__.py", "")
+    .write("app/x.py", "import app._C\nimport app._moe_C\n");
+    assert!(repo.edges().is_empty(), "{:?}", repo.edges());
+}
+
+#[test]
+fn setup_py_long_nhau_sau_khong_lam_treo() {
+    // `setup.py` là input không tin được: lời gọi lồng nhau rất sâu không được
+    // biến bộ đọc thành bậc hai và làm treo hook.
+    let repo = Repo::new("ext-nested");
+    let deep = format!(
+        "{}\"app._C\"{}\n",
+        "CUDAExtension(".repeat(60_000),
+        ")".repeat(60_000)
+    );
+    // Dưới ngưỡng 1 MB mỗi `setup.py`, nên bộ đọc thật sự phải đọc nó.
+    assert!(deep.len() < 1 << 20);
+    repo.write("setup.py", &deep)
+        .write("native/a.cpp", "PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {}\n")
+        .write("app/__init__.py", "")
+        .write("app/x.py", "from app import _C\n");
+    let started = std::time::Instant::now();
+    let _ = repo.edges();
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+}
+
+#[test]
+fn setup_py_nhieu_ten_extension_khong_lam_cham_hook() {
+    // 50 000 extension tên khác nhau, dưới ngưỡng 1 MB: tra tên phải là băm,
+    // không phải quét danh sách cho mỗi tên.
+    let repo = Repo::new("ext-many-names");
+    let mut src = String::from("E = CppExtension\nmods = [\n");
+    for i in 0..50_000 {
+        src.push_str(&format!("E(\"n{i}\"),\n"));
+    }
+    src.push_str("]\n");
+    assert!(src.len() < 1 << 20);
+    repo.write("setup.py", &src)
+        .write("native/a.cpp", "PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {}\n")
+        .write("app/x.py", "import n49999\nimport numpy\n");
+    let started = std::time::Instant::now();
+    let _ = repo.edges();
+    assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+}
+
+#[cfg(unix)]
+#[test]
+fn setup_py_tro_toi_thiet_bi_khong_bi_doc_mai() {
+    // Git commit được symlink. `setup.py -> /dev/zero` có kích thước 0 theo
+    // metadata nhưng đọc mãi không hết.
+    let repo = Repo::new("ext-devzero");
+    repo.write("app/x.py", "import os\n");
+    std::os::unix::fs::symlink("/dev/zero", repo.0.join("setup.py")).unwrap();
+    let started = std::time::Instant::now();
+    let _ = repo.edges();
+    assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+}

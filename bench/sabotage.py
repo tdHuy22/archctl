@@ -17,6 +17,9 @@ liên ngôn ngữ khỏi cả luật `init` sinh ra lẫn vi phạm `check` báo
 ghép hỏng ở cả hai phía cùng lúc. Phép kiểm đồng nhất không thấy gì; chỉ danh
 sách cạnh bắt buộc trong `consistency.CROSSINGS` bắt được.
 
+`--notebook-repo matplotlib` phá thêm hai kiểu ở notebook (mất import, lệch
+dòng), đối chiếu bằng IPython cài vào venv nên cần mạng; CI bật nó.
+
 `--rust-repo ripgrep` phá thêm ba kiểu như vậy ở file Rust, đối chiếu bằng
 `oracle.py --require syn` — tức là tải crate, nên chỉ CI bật. Phần Rust miễn
 trừ import nằm trong thân macro; kiểu `rust-extra` đặt import giả ở ngoài macro
@@ -60,11 +63,17 @@ RUST_ORACLE_MODES = {
     "rust-line": "lệch dòng:",
     "rust-extra": "thừa:",
 }
+NOTEBOOK_ORACLE_MODES = {
+    "nb-drop": "thiếu:",
+    "nb-line": "lệch dòng:",
+}
 
 
 def sabotage_scan(rep: dict, mode: str):
-    """Làm hỏng import đầu tiên của file đầu tiên có import, Python hay Rust tuỳ kiểu."""
-    ext, kind = (".rs", mode[len("rust-"):]) if mode.startswith("rust-") else (".py", mode[len("scan-"):])
+    """Làm hỏng import đầu tiên của file đầu tiên có import: Python, Rust hay notebook tuỳ kiểu."""
+    prefix, ext = next((p, e) for p, e in [("rust-", ".rs"), ("nb-", ".ipynb"), ("scan-", ".py")]
+                       if mode.startswith(p))
+    kind = mode[len(prefix):]
     for f in rep["files"]:
         if f["file"].endswith(ext) and f["imports"]:
             imports = f["imports"]
@@ -126,7 +135,8 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
         out = json.dumps(rep)
     elif mode == "diff" and args[:1] == ["diff"]:
         out = "kiến trúc a → b\n"
-    elif (mode in ORACLE_MODES or mode in RUST_ORACLE_MODES) and args[:1] == ["scan"] and "--json" in args:
+    elif (mode in ORACLE_MODES or mode in RUST_ORACLE_MODES or mode in NOTEBOOK_ORACLE_MODES) \
+            and args[:1] == ["scan"] and "--json" in args:
         rep = json.loads(out)
         sabotage_scan(rep, mode)
         out = json.dumps(rep)
@@ -144,6 +154,8 @@ def main():
     ap.add_argument("--archctl", default=str(ROOT / "target/release/archctl"))
     ap.add_argument("--repo", default="flask")
     ap.add_argument("--rust-repo", help="phá cả phần Rust của oracle.py trên repo này (tải crate `syn`)")
+    ap.add_argument("--notebook-repo",
+                    help="phá cả phần notebook của oracle.py trên repo này (cài IPython vào venv)")
     ap.add_argument("--crossing-repo", default="pydantic-core",
                     help="repo có cạnh liên ngôn ngữ bắt buộc, cho kiểu phá `crossing`")
     args = ap.parse_args()
@@ -164,12 +176,17 @@ def main():
         if args.rust_repo:
             runs += [("oracle.py", args.rust_repo, m, e)
                      for m, e in [("", None), *RUST_ORACLE_MODES.items()]]
+        if args.notebook_repo:
+            runs += [("oracle.py", args.notebook_repo, m, e)
+                     for m, e in [("", None), *NOTEBOOK_ORACLE_MODES.items()]]
         for script, repo, mode, expect in runs:
             env = {**os.environ, "SABOTAGE": mode,
                    "SABOTAGE_REAL": str(Path(args.archctl).resolve())}
             extra = ["--rounds", "1"] if script == "bench.py" else []
             if mode in RUST_ORACLE_MODES or (script == "oracle.py" and repo == args.rust_repo):
                 extra = ["--require", "syn"]
+            if mode in NOTEBOOK_ORACLE_MODES or (script == "oracle.py" and repo == args.notebook_repo):
+                extra = ["--require", "ipython"]
             p = subprocess.run(
                 [sys.executable, str(HERE / script), "--archctl", str(fake),
                  "--only", repo, *extra],

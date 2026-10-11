@@ -157,7 +157,7 @@ jobs:
       - name: dựng archctl
         run: cargo build --release --locked
 
-      # Tải hai mươi sáu repo ở đúng commit ghim trong `bench/repos.tsv`, rồi chạy hai
+      # Tải hai mươi bảy repo ở đúng commit ghim trong `bench/repos.tsv`, rồi chạy hai
       # phép thử. Luật do `init --from-code` sinh ra, nâng lên `#accepted`,
       # kiểm lại chính mã đó thì phải ra 0 vi phạm — mỗi vi phạm là một chỗ bộ
       # khám phá và bộ kiểm chứng nhìn khác nhau. Và mọi lệnh phải chạy được
@@ -175,10 +175,11 @@ jobs:
       # `--rust-repo` phá thêm phần Rust của bước đối chiếu bên dưới, phần dùng
       # `syn` tải từ crates.io — nên bước này cũng mở lại mạng cho cargo, như
       # bước đối chiếu. archctl đã dựng xong ở trên khi còn offline.
+      # `--notebook-repo` phá phần notebook, đối chiếu bằng IPython cài qua pip.
       - name: bộ đo đổ được
         env:
           CARGO_NET_OFFLINE: "false"
-        run: python3 bench/sabotage.py --archctl target/release/archctl --rust-repo ripgrep
+        run: python3 bench/sabotage.py --archctl target/release/archctl --rust-repo ripgrep --notebook-repo matplotlib
 
       # Phép tự nhất quán ở trên so archctl với chính nó: bộ khám phá và bộ
       # kiểm dùng chung bộ trích, nên một lỗi trong bộ trích làm cả hai sai
@@ -194,7 +195,12 @@ jobs:
       # lại mạng cho cargo. archctl đã dựng xong ở trên khi còn offline; crate
       # tải về chỉ vào trình đọc của bộ đo dưới `target/bench/syn-oracle/`,
       # không vào archctl. Phiên bản ghim `=` trong `SYN_MANIFEST` của oracle.py.
+      #
+      # Notebook đối chiếu với IPython, cài bằng pip vào venv dưới
+      # `target/bench/ipython-oracle/`. Mọi gói ghim `==` kèm sha256 trong
+      # `bench/ipython-requirements.txt`, chỉ wheel: không file nào khác bản đã
+      # ghim, không `setup.py` nào chạy lúc cài. Job chỉ có quyền đọc, không secret.
       - name: đối chiếu với parser chuẩn
         env:
           CARGO_NET_OFFLINE: "false"
-        run: python3 bench/oracle.py --archctl target/release/archctl --require clang,node,go,syn
+        run: python3 bench/oracle.py --archctl target/release/archctl --require clang,node,go,syn,ipython

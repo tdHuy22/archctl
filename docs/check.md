@@ -68,6 +68,7 @@ request. Bảng dưới là lần đo khi bộ đo có 24 repo:
 | JS, TS | parser module của Node 24 | 1 007 file, 3 310 import tĩnh: không thiếu cái nào |
 | Go | `go/parser` của Go 1.27, chế độ `ImportsOnly` | 2 168 file, 13 921 import: khớp cả tên lẫn dòng |
 | Rust | `syn` 2.0.87, chỉ chạy trên CI | 1 509 file, 18 303 `use`/`extern crate`: khớp cả tên lẫn dòng; 548 import nằm trong thân macro (`syn` không đọc vào) không đối chiếu, 534 trong số đó ở tokio (`cfg_rt! { ... }`) |
+| Notebook (2026-10-11) | `TransformerManager` của IPython 9.17.1 cộng `ast`, chỉ chạy trên CI | 3 notebook của matplotlib, 16 import: khớp cả tên lẫn dòng. Các notebook khó trong `tests/notebook.rs` (magic trong chuỗi `"""`, `%%time`, `%%script python3`, khoá trùng, dòng trống đầu ô) cũng khớp |
 
 Trước khi sửa, cũng phép đối chiếu đó cho:
 
@@ -160,7 +161,7 @@ torch.ops._C.rotary_embedding(…)         STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops
 | Bên cung cấp | Nhận bằng |
 | --- | --- |
 | Rust (PyO3) | `#[pymodule]` trên `fn x` hoặc `mod x`; `#[pyo3(name = "...")]` đổi tên |
-| C, C++ | `PYBIND11_MODULE(x, m)`, `NB_MODULE(x, m)` (nanobind), định nghĩa `PyInit_x` của C API |
+| C, C++ | `PYBIND11_MODULE(x, m)`, `NB_MODULE(x, m)` (nanobind), định nghĩa `PyInit_x` của C API; `x` là `TORCH_EXTENSION_NAME` thì tên đọc từ `setup.py` — xem dưới |
 | C++ (PyTorch) | `m.def("op(…)")` trong khối `TORCH_LIBRARY*(ns, m) { }`, kể cả `FRAGMENT`, `STABLE_`, macro bọc lại như `TORCH_LIBRARY_EXPAND` |
 | Bên gọi | |
 | Python | import một module mà repo không có mã Python nào cho nó; `torch.ops.ns.op` |
@@ -189,6 +190,17 @@ Chỗ dễ sai là phía gọi, và luật ở đó chặt:
   lúc build) ghép nhầm vào op CPU cùng tên. Phần này bỏ sót chứ không đoán:
   trên vllm, 265 lời gọi ở 54 file ghép được, và cả 161 tên op đều có chuỗi
   schema tương ứng trong `csrc/`.
+- **`TORCH_EXTENSION_NAME` đọc từ `setup.py`.** Extension dựng bằng
+  `torch.utils.cpp_extension` viết `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)`
+  hay `TORCH_LIBRARY(TORCH_EXTENSION_NAME, m)`, và tên thật là đoạn cuối của
+  tên trong `CppExtension`/`CUDAExtension("pkg._C", sources)`, kể cả gọi qua
+  biến (`extension = CUDAExtension`). File C++ có trong danh sách nguồn viết
+  thẳng của extension nào thì mang tên extension đó. Danh sách nguồn tính lúc
+  chạy (`glob`) thì chỉ ghép khi `setup.py` khai đúng một extension; nhiều
+  extension như vllm thì không đoán. Tên đã khai trong `setup.py` cũng làm
+  import ở cấp cao nhất (`import amp_C` của apex) thành module của dự án. Trên
+  apex: 42 lời gọi tới 19 module, cả 19 đối chiếu được với `setup.py` bằng
+  `ast`. Tên đặt qua biến (`name=ext_name` của mmcv) thì không đọc.
 - **Import của module đã ghép được không còn bị báo "chưa phân giải".** Nó
   không ra file Python nào, nhưng nơi định nghĩa nó đã tìm thấy.
 
@@ -199,8 +211,8 @@ Chỗ dễ sai là phía gọi, và luật ở đó chặt:
 - **`ctypes` và `cffi` của Python** — tên hàm nằm trong chuỗi, và thư viện
   được chọn lúc chạy
 - **Op PyTorch qua biến trung gian** (`ops = torch.ops._C; ops.x()`), qua
-  `getattr`, hay có namespace là macro; op đăng ký bằng Python
-  (`torch.library`)
+  `getattr`, hay có namespace là macro mà `setup.py` không cho biết giá trị;
+  op đăng ký bằng Python (`torch.library`)
 - **Module mở rộng nằm thẳng ở gốc** (`import _core` không qua package nào):
   không phân biệt được với gói bên ngoài
 - **Tiến trình con, syscall, IPC, mạng**

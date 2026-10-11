@@ -67,6 +67,11 @@ impl Foreign {
     }
 }
 
+/// Đứng thay `TORCH_EXTENSION_NAME` trong khoá ghép phía native. Giá trị thật
+/// do `setup.py` đặt cho từng file nguồn — xem
+/// [`crate::resolve::Resolver::bind_extension`].
+pub const EXTENSION_NAME: &str = "@ext";
+
 /// Ai cung cấp `key`, trong bảng tên → component. Chuỗi rỗng là tên có hai
 /// component cùng cung cấp: không biết chọn bên nào, nên không ghép.
 pub fn provider<'a>(provides: &'a BTreeMap<String, String>, key: &str) -> Option<&'a String> {
@@ -360,6 +365,8 @@ fn binding_modules(toks: &[Token], out: &mut Foreign) {
             && w[3].tok == Tok::Punct(',')
             && let Tok::Word(name) = &w[2].tok
         {
+            // `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)`: tên do `setup.py` đặt.
+            let name = if name == "TORCH_EXTENSION_NAME" { EXTENSION_NAME } else { name };
             out.provides.push(module(name, w[2].line));
         }
     }
@@ -372,12 +379,14 @@ fn binding_modules(toks: &[Token], out: &mut Foreign) {
 /// `TORCH_LIBRARY_IMPL`: nó chỉ gắn kernel cho một op đã định nghĩa ở chỗ
 /// khác, và tính nó thì hai component cùng "cung cấp" một op.
 ///
-/// Namespace là đối số đầu, và chỉ namespace viết thẳng mới được ghép. Khi đó
-/// là macro (`TORCH_EXTENSION_NAME`, `CONCAT(TORCH_EXTENSION_NAME, _cache_ops)`)
-/// thì chỉ hệ thống build biết giá trị của nó, và cả khối bị bỏ qua. Đã thử
-/// đoán macro là một module mở rộng mà Python import: trên vllm, nơi có cả
-/// chục module như vậy, `torch.ops._vllm_fa3_C.get_scheduler_metadata` (của
-/// flash-attention, tải lúc build) ghép nhầm vào op CPU cùng tên.
+/// Namespace là đối số đầu. Viết thẳng thì ghép theo nó. `TORCH_EXTENSION_NAME`
+/// thì giá trị do `setup.py` cho biết, nếu cho biết chắc — xem
+/// [`crate::resolve::Resolver::bind_extension`]. Macro khác
+/// (`CONCAT(TORCH_EXTENSION_NAME, _cache_ops)`) thì chỉ hệ thống build biết, và
+/// cả khối bị bỏ qua. Đã thử đoán macro là một module mở rộng mà Python import:
+/// trên vllm, nơi có cả chục module như vậy,
+/// `torch.ops._vllm_fa3_C.get_scheduler_metadata` (của flash-attention, tải lúc
+/// build) ghép nhầm vào op CPU cùng tên.
 fn torch_ops(toks: &[Token], out: &mut Foreign) {
     for i in 0..toks.len() {
         let Tok::Word(w) = &toks[i].tok else { continue };
@@ -396,6 +405,12 @@ fn torch_ops(toks: &[Token], out: &mut Foreign) {
                 if !is_macro_name(ns) =>
             {
                 ns.as_str()
+            }
+            // Riêng `TORCH_EXTENSION_NAME` thì `setup.py` có thể cho biết giá trị.
+            [Token { tok: Tok::Word(ns), .. }, Token { tok: Tok::Punct(','), .. }, ..]
+                if ns == "TORCH_EXTENSION_NAME" =>
+            {
+                EXTENSION_NAME
             }
             _ => continue,
         };

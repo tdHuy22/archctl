@@ -173,6 +173,10 @@ trong tiến trình con và cũng được đọc: bỏ qua chúng là chừa m�
 luật. Notebook khai kernel khác Python (R, Julia) thì
 không được đọc.
 
+Cách đọc này được đối chiếu với chính IPython trong bộ đo: `bench/oracle.py
+--require ipython` biến đổi từng ô bằng `TransformerManager` như Jupyter rồi so
+import và số dòng với archctl.
+
 Notebook có output lớn (ảnh, bảng) có thể vượt ngưỡng 4 MB mỗi file và được báo
 là quá lớn. Xoá output trước khi commit (`jupyter nbconvert --clear-output
 --inplace`, hay nbstripout) thì vừa qua được ngưỡng, vừa giữ diff sạch.

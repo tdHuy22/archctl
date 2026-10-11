@@ -304,10 +304,12 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
             ffi_calls.push((from.clone(), path.clone(), call.clone()));
         }
         for provided in &scan.foreign.provides {
+            // `TORCH_EXTENSION_NAME` thành tên thật, hoặc bỏ nếu không biết chắc.
+            let Some(key) = resolver.bind_extension(path, &provided.symbol) else { continue };
             // Cùng một tên được hai component cung cấp thì không biết chọn
             // đâu, nên bỏ cả hai: đoán sai sinh ra một cạnh không có thật.
             ffi_provides
-                .entry(provided.symbol.clone())
+                .entry(key)
                 .and_modify(|owner| {
                     if owner != from {
                         owner.clear();

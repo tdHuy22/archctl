@@ -116,6 +116,12 @@ impl Lang {
         }
     }
 
+    /// Dòng token của `src` theo cấu hình của ngôn ngữ này. Cho phần đọc cấu
+    /// hình build viết bằng chính ngôn ngữ đó, như `setup.py`.
+    pub fn tokens(self, src: &str) -> Vec<Token> {
+        lexer::lex(src, &self.config())
+    }
+
     pub fn imports(self, src: &str) -> Vec<Import> {
         self.scan(src, &[]).imports
     }

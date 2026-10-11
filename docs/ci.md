@@ -89,7 +89,7 @@ khi mã dùng let-chain của 1.88, suốt nhiều tháng, vì không có gì ki
 
 ## Repo thật, ở mỗi pull request
 
-Job `repo thật` chạy [bench/bench.py](../bench/bench.py): tải hai mươi sáu repo ở
+Job `repo thật` chạy [bench/bench.py](../bench/bench.py): tải hai mươi bảy repo ở
 đúng commit ghim trong `bench/repos.tsv`, rồi đòi hai điều. Luật do `init
 --from-code` sinh ra, nâng lên `#accepted`, kiểm lại chính mã đó thì phải ra 0
 vi phạm. Và mọi lệnh phải chạy được trên mã người khác viết, chứ không chỉ trên

@@ -9,6 +9,36 @@ Cập nhật 2026-10-11.
 
 ### Đã xong, có bằng chứng
 
+- **Mốc "Còn mở sau ML/LLM", chưa commit** (2026-10-11). `oracle.py --require
+  ipython` đối chiếu import notebook với IPython (`bench/notebook_truth.py`,
+  gói ghim kèm sha256 trong `bench/ipython-requirements.txt`, chỉ wheel):
+  matplotlib 3 notebook 16 import khớp cả dòng; các notebook khó của test cũng
+  khớp. Sabotage thêm `nb-drop`, `nb-line`: 17/17. `TORCH_EXTENSION_NAME` đọc từ
+  `setup.py` (danh sách nguồn viết thẳng, hoặc đúng một extension): bộ đo thêm
+  `apex` (313 file), 42 lời gọi tới 19 module, cả 19 khớp `setup.py` theo `ast`;
+  cạnh bắt buộc `Bottleneck -> Csrc`. Threat model TM-5 (gói PyPI trong CI),
+  TM-6 (`setup.py` lồng sâu, nhiều tên, symlink tới `/dev/zero`; có test cho
+  cả ba). Review (sonnet) tìm 2 vừa, 3 nhẹ, đã sửa cả 5: đọc `setup.py` từng
+  bậc hai theo số tên (78 000 tên 5,4 s) và đọc không giới hạn qua symlink.
+  Biên nhận trên mã cuối: test, clippy, `cargo +1.88 check`, `verify` 3/3,
+  `check --strict` 0; bộ đo 27 repo 23 832 file 0 bất nhất 945/945; sabotage
+  17/17; oracle `--require clang,node,go,ipython` khớp hết. Đường hook một file
+  không chậm hơn bản gốc ở repo nào.
+
+- **Mốc ML/LLM, chưa commit** (2026-10-11). `docs/ml.md` với sáu công thức luật
+  và `examples/ml` (mỗi công thức một vi phạm cài sẵn, cộng một vi phạm trong
+  notebook; test `ml.rs` đòi đủ bảy). Đọc `.ipynb` (`scan/notebook.rs`): chỉ ô
+  code, số dòng là dòng trong file. Threat model 4 mục ở `.agent/threat-model.md`,
+  cả 4 chốt chặn có test. Bộ đo thêm `kubernetes` (sparse scheduler, 277 file)
+  và `pytorch-image-models` (346 file): 0 bất nhất, 70/70; oracle khớp
+  (Go 3 320 import, Python 3 129). Bộ đo 26 repo 23 519 file 0 bất nhất 910/910,
+  sabotage 14/14 (trước review). Review (opus) tìm 1 vừa, 5 nhẹ, đã sửa cả 6:
+  công thức `api` bỏ `eval` (bắt nhầm mọi `model.eval()`), magic trong chuỗi
+  `"""`/ngoặc không bị bỏ, khoá JSON trùng lấy khoá cuối, `%%script --bg
+  python3`, số repo trong tài liệu. Biên nhận trên mã cuối: test, clippy,
+  `cargo +1.88 check`, `verify` 3/3, `check --strict` 0; bộ đo 26 repo 23 519
+  file 0 bất nhất 910/910; sabotage 14/14.
+
 - **Cạnh Python ↔ native, chưa commit** (2026-10-11). Ghép import Python với
   module mở rộng (PyO3 `#[pymodule]`, `PYBIND11_MODULE`, `NB_MODULE`,
   `PyInit_`), và `torch.ops.ns.op` với `m.def` trong `TORCH_LIBRARY*`. Chỉ
@@ -275,7 +305,10 @@ bị loại ở curl); công thức luật ML/LLM kèm `verify` gọi công cụ
 Các ứng viên đó giờ là việc ở §1. Còn treo: có đưa tầng hạ tầng (service,
 triển khai) vào DSL không.
 
-Không có việc nào đang dở; thay đổi Python ↔ native chờ bạn cho commit.
+Không có việc nào đang dở. Mốc ML/LLM và mốc "Còn mở" đều chờ bạn cho commit.
+Việc
+tiếp theo nằm ở §1 (mốc "Còn mở sau mốc ML/LLM"); quyết định còn treo: mức
+oracle C++, tầng hạ tầng trong DSL.
 **Đã quyết (2026-10-03): giữ repo private, CI là
 lời nhắc chứ không chặn** — gói GitHub Free không có branch protection cho repo
 private, nên job đỏ không ngăn được commit vào `main`. Muốn đổi thì để repo
@@ -324,9 +357,17 @@ hàm, `ctypes` của Python và IPC thì không — xem [docs/check.md](docs/che
 
 ### ML/LLM dùng được ngay
 
-- [ ] Tài liệu công thức luật cho ML/LLM: `external` cho torch và SDK của LLM,
+- [x] Tài liệu công thức luật cho ML/LLM: `external` cho torch và SDK của LLM,
   `deny Serve -> Train`, `api` cấm `pickle`, `eval`; `verify` gọi công cụ
   ngoài để chụp kiến trúc mô hình rồi so với bản đã duyệt.
-- [ ] Đọc `.ipynb`: ô code đưa qua bộ quét Python.
-- [ ] Bộ đo: thêm một repo huấn luyện DL.
-- [ ] Bộ đo: thêm một repo hạ tầng viết bằng Go (Kubernetes, tải sparse).
+- [x] Đọc `.ipynb`: ô code đưa qua bộ quét Python.
+- [x] Bộ đo: thêm một repo huấn luyện DL.
+- [x] Bộ đo: thêm một repo hạ tầng viết bằng Go (Kubernetes, tải sparse).
+
+### Còn mở sau mốc ML/LLM
+
+- [x] `oracle.py` đối chiếu import trong notebook: ô code qua `json` cộng `ast`,
+  bỏ magic như IPython; hiện oracle bỏ qua `.ipynb`.
+- [x] Module mở rộng đặt tên bằng `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)`
+  (kiểu `torch.utils.cpp_extension`, gặp ở detectron2, mmcv): đọc tên thật từ
+  `CppExtension`/`CUDAExtension("pkg._C", …)` trong `setup.py`. Hiện không ghép.

@@ -44,6 +44,9 @@ CROSSINGS = {
     "matplotlib": [("Lib", "Src")],
     # Op PyTorch: `torch.ops._C.x` ↔ `STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops)`.
     "vllm": [("Vllm", "Csrc")],
+    # `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)`, tên lấy từ danh sách nguồn
+    # trong `setup.py`: `import fast_bottleneck` ↔ `apex/contrib/csrc/bottleneck/`.
+    "apex": [("Bottleneck", "Csrc")],
 }
 
 

@@ -4,7 +4,7 @@
 python3 bench/bench.py
 ```
 
-Một lệnh: dựng archctl bản release, tải hai mươi sáu repo ở đúng commit đã ghim
+Một lệnh: dựng archctl bản release, tải hai mươi bảy repo ở đúng commit đã ghim
 trong [repos.tsv](repos.tsv), rồi chạy hai phép thử trên từng repo. Chỉ cần
 Python 3 và git, không gói Python nào ngoài thư viện chuẩn.
 
@@ -17,7 +17,7 @@ chỗ mà luật `allow`/`deny` giữa component có nghĩa nhất.
 | Ngôn ngữ | Repo |
 | --- | --- |
 | TypeScript | vue core (monorepo, alias tsconfig), excalidraw (ứng dụng React, TSX) |
-| Python | flask (`src/`), netbox (Django, gốc là thư mục có `manage.py`), scikit-learn (ML), vllm (LLM serving, kernel C++), langchain (LLM, hai mươi hai `pyproject.toml` trong `libs/`), pytorch-image-models (huấn luyện DL) |
+| Python | flask (`src/`), netbox (Django, gốc là thư mục có `manage.py`), scikit-learn (ML), vllm (LLM serving, kernel C++), langchain (LLM, hai mươi hai `pyproject.toml` trong `libs/`), pytorch-image-models (huấn luyện DL), apex (DL cộng C++/CUDA, extension đặt tên trong `setup.py`) |
 | C | curl (CMake), redis (Makefile, `deps/`), nginx (`-I` trong script `auto/`, không file build nào đọc được) |
 | C++ | leveldb (storage engine, CMake) |
 | Rust | tokio, ripgrep, rusqlite, pydantic-core (với Python), zstd-rs (với C qua submodule) |
@@ -76,6 +76,7 @@ cạnh (`CROSSINGS` trong [consistency.py](consistency.py)):
 | pydantic-core | `PydanticCore -> Core` | module PyO3 `_pydantic_core` |
 | matplotlib | `Lib -> Src` | module pybind11 `_path` |
 | vllm | `Vllm -> Csrc` | op PyTorch `torch.ops._C.*` |
+| apex | `Bottleneck -> Csrc` | `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)`, tên đọc từ `setup.py` |
 
 Đổi `allow` đó thành `deny` thì `check` phải báo vi phạm qua ranh giới ngôn
 ngữ. Tự nhất quán không bắt được chỗ này: phần ghép hỏng ở cả `init` lẫn
@@ -121,8 +122,17 @@ bộ trích, nên một lỗi trong bộ trích làm cả hai sai giống nhau m
   tải crate nên chỉ chạy khi `--require syn` (CI bật). `syn` không đọc vào thân
   macro, nên import archctl thấy trong `macro_rules!`, `cfg_rt! { }`... được
   đếm riêng, không tính là thừa.
+- Notebook: `TransformerManager` của IPython biến đổi từng ô như Jupyter, rồi
+  `ast` đọc import; dòng của từng phần tử `source` lấy khi duyệt JSON bằng
+  `scanstring` chuẩn ([notebook_truth.py](notebook_truth.py)). IPython và các
+  gói nó kéo theo ghim `==` kèm sha256
+  ([ipython-requirements.txt](ipython-requirements.txt)), chỉ cài wheel, vào
+  venv dưới `target/bench/ipython-oracle/`,
+  nên chỉ chạy khi `--require ipython` (CI bật). Số dòng chỉ so khi mỗi dòng mã
+  là một chuỗi JSON riêng, ở những dòng JSON tăng dần (như mọi notebook Jupyter
+  ghi ra), và IPython không gộp dòng.
 
-Python, C/C++, Go và Rust đòi khớp cả tên lẫn số dòng: thiếu, thừa hay lệch dòng đều
+Python, notebook, C/C++, Go và Rust đòi khớp cả tên lẫn số dòng: thiếu, thừa hay lệch dòng đều
 là lệch. Thiếu clang, Node hay Go thì phần đó in `BỎ QUA`; `--require
 clang,node,go` biến việc thiếu thành mã thoát 2, và với Node thì đòi cả khả năng
 gỡ kiểu TS. Thước đo tự hỏng cũng là mã 2 chứ không phải "đạt": clang, Node hay
@@ -168,12 +178,13 @@ file, bỏ khoá
 thêm chú thích. Mỗi kiểu phải làm `bench.py` thoát 1, **và phải bị đúng phép
 kiểm dành cho nó bắt** — không chỉ đỏ vì một lý do khác. Ba kiểu nữa làm hỏng
 đầu ra `scan --json` — mất một import, lệch một dòng, thêm một import giả — và
-phải làm `oracle.py` thoát 1. Kiểu `crossing` xoá cạnh liên ngôn ngữ khỏi
+phải làm `oracle.py` thoát 1. `--notebook-repo matplotlib` thêm hai kiểu y vậy
+ở notebook, đối chiếu bằng IPython nên cần mạng. Kiểu `crossing` xoá cạnh liên ngôn ngữ khỏi
 cả luật `init` sinh ra lẫn vi phạm `check` báo, trên pydantic-core, và chỉ
 danh sách cạnh bắt buộc ở trên bắt được nó. `--rust-repo ripgrep` thêm ba kiểu y vậy ở file
 Rust, đối chiếu bằng `syn` nên cần mạng; kiểu thêm import giả nằm ngoài macro,
 nên nó cũng giữ cho phép miễn trừ import trong thân macro không rộng ra. CI
-chạy bước này sau bộ đo, với `--rust-repo ripgrep`.
+chạy bước này sau bộ đo, với `--rust-repo ripgrep --notebook-repo matplotlib`.
 
 Nó có mặt vì bộ đo này từng nằm ngoài git, và lúc đưa vào, đọc lại thì bốn
 phép kiểm không kiểm gì: một cái chỉ xét file có tồn tại vì vế sau của `or`

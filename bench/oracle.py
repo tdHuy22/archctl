@@ -31,7 +31,16 @@ Thước đo, chạy trên repo mà `bench.py` đã tải về `target/bench/rep
   nên import archctl đọc được bên trong `macro_rules!`, `quote! { }`... không
   tính là thừa; chúng được đếm riêng.
 
-Python, C/C++, Go, Rust: thiếu, thừa và lệch số dòng đều là lệch. Thiếu clang, Node hay Go
+- Notebook (`.ipynb`): `TransformerManager` của IPython biến đổi từng ô code
+  đúng như Jupyter, rồi `ast` đọc import; dòng của từng phần tử `source` lấy
+  khi duyệt JSON bằng `scanstring` chuẩn — xem `notebook_truth.py`. IPython
+  (ghim cứng kèm hash trong `ipython-requirements.txt`) cài vào venv dưới
+  `target/bench/ipython-oracle/`, nên chỉ chạy khi `--require ipython`; CI bật
+  nó. Số dòng chỉ so khi mỗi dòng mã là một chuỗi JSON riêng, ở những dòng JSON
+  tăng dần — như mọi notebook Jupyter ghi ra — và IPython không gộp dòng; còn
+  lại archctl chỉ hứa gần đúng, nên chỉ so tên.
+
+Python, notebook, C/C++, Go, Rust: thiếu, thừa và lệch số dòng đều là lệch. Thiếu clang, Node hay Go
 thì phần đó in BỎ QUA và không tính là đạt; `--require` biến việc thiếu thành
 lỗi, và với Node thì đòi cả khả năng gỡ kiểu TS. Một thước đo không parse được
 quá nửa số file của một repo là thước đo hỏng chứ không phải mã hỏng: dừng,
@@ -430,6 +439,59 @@ def syn_truth(helper, root, files):
     return out
 
 
+IPYTHON_REQUIREMENTS = HERE / "ipython-requirements.txt"
+
+
+def ipython_version():
+    m = re.search(r"^ipython==(\S+)", IPYTHON_REQUIREMENTS.read_text(), re.M)
+    return m.group(1) if m else "?"
+
+
+def build_ipython_helper(cache):
+    """Venv có IPython dưới `cache/ipython-oracle`; lần sau dùng lại nếu bản ghim không đổi.
+
+    Cài đúng file đã ghim kèm hash, chỉ wheel: gói bị chiếm quyền trên PyPI hay
+    bị tráo trên đường đi thì pip từ chối, và không `setup.py` nào chạy lúc cài.
+    """
+    home = Path(cache) / "ipython-oracle"
+    venv, installed = home / "venv", home / "installed.txt"
+    python = venv / "bin" / "python"
+    wanted = IPYTHON_REQUIREMENTS.read_text()
+    if not (python.exists() and installed.exists() and installed.read_text() == wanted):
+        shutil.rmtree(venv, ignore_errors=True)
+        home.mkdir(parents=True, exist_ok=True)
+        for cmd in ([sys.executable, "-m", "venv", str(venv)],
+                    [str(python), "-m", "pip", "install", "--quiet", "--disable-pip-version-check",
+                     "--no-deps", "--only-binary", ":all:", "--require-hashes",
+                     "--requirement", str(IPYTHON_REQUIREMENTS)]):
+            try:
+                p = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            except subprocess.TimeoutExpired:
+                bench.die(f"dựng thước đo IPython: `{cmd[2]}` quá 600 giây")
+            if p.returncode != 0:
+                bench.die(f"dựng thước đo IPython hỏng: {(p.stderr or p.stdout).strip()[-400:]}")
+        installed.write_text(wanted)
+    return str(python)
+
+
+def notebook_truth(python, root, files):
+    """`{file: (Counter (dòng, spec), exact)}`, hoặc None nếu file không đọc được."""
+    p = subprocess.run([python, str(HERE / "notebook_truth.py")],
+                       input="".join(f"{root}\t{f}\n" for f in files),
+                       capture_output=True, text=True, timeout=900)
+    if p.returncode != 0:
+        bench.die(f"thước đo notebook hỏng: {p.stderr.strip()[-400:]}")
+    out = {}
+    for line in p.stdout.splitlines():
+        file, res = line.split("\t", 1)
+        if res == "ERR":
+            out[file] = None
+            continue
+        r = json.loads(res)
+        out[file] = (collections.Counter((l, s) for l, s in r["imports"]), r["exact"])
+    return out
+
+
 def tool_version(cmd):
     p = subprocess.run(cmd, capture_output=True, text=True)
     first = (p.stdout or p.stderr).strip().splitlines()
@@ -472,7 +534,7 @@ class Tally:
             self.examples.append(msg)
 
     def line(self, repo):
-        head = f"  {repo:22} {self.label:6} {self.files:5} file, {self.imports:6} import"
+        head = f"  {repo:22} {self.label:8} {self.files:5} file, {self.imports:6} import"
         tail = f", {self.unparsed} không parse được" if self.unparsed else ""
         if self.in_macro:
             tail += f", {self.in_macro} trong macro không đối chiếu"
@@ -504,7 +566,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--archctl", default=str(ROOT / "target/release/archctl"))
     ap.add_argument("--only", help="tên repo, cách nhau bằng dấu phẩy")
-    ap.add_argument("--require", default="", help="công cụ bắt buộc phải có: clang, node, go, syn (tải crate)")
+    ap.add_argument("--require", default="",
+                    help="công cụ bắt buộc phải có: clang, node, go, syn (tải crate), ipython (tải gói)")
     ap.add_argument("--cache", default=str(ROOT / "target/bench"))
     args = ap.parse_args()
 
@@ -522,7 +585,7 @@ def main():
     have_go = shutil.which("go") is not None
     strip_ts = have_node and node_can_strip_types()
     required = args.require.split(",")
-    unknown = set(filter(None, required)) - {"clang", "node", "go", "syn"}
+    unknown = set(filter(None, required)) - {"clang", "node", "go", "syn", "ipython"}
     if unknown:
         bench.die(f"`--require` không biết: {', '.join(sorted(unknown))}")
     for tool, ok in [("clang", have_clang), ("node", have_node), ("go", have_go)]:
@@ -536,7 +599,10 @@ def main():
     go_v = tool_version(["go", "version"]) if have_go else "BỎ QUA: không có"
     use_syn = "syn" in required
     syn_v = "2.0.87" if use_syn else "BỎ QUA: cần tải crate, bật bằng --require syn"
+    use_ipython = "ipython" in required
+    ipy_v = ipython_version() if use_ipython else "BỎ QUA: cần tải gói, bật bằng --require ipython"
     print(f"python {sys.version.split()[0]} · clang: {clang_v} · node: {node_v} · go: {go_v} · syn: {syn_v}"
+          f" · ipython: {ipy_v}"
           + ("" if strip_ts or not have_node else " (không gỡ được kiểu TS: BỎ QUA .ts)"))
 
     missing_repos = [r for r in repos if not (Path(args.cache) / "repos" / r).is_dir()]
@@ -546,6 +612,7 @@ def main():
     workdir = tempfile.TemporaryDirectory(prefix="archctl-oracle-")
     go_helper = build_go_helper(workdir.name) if have_go else None
     syn_helper = build_syn_helper(args.cache) if use_syn else None
+    nb_python = build_ipython_helper(args.cache) if use_ipython else None
 
     bad = 0
     for repo in repos:
@@ -568,6 +635,22 @@ def main():
                 continue
             check_lines(py, file, want, got[file])
         tallies.append(py)
+
+        notebooks = [f for f in by_lang["Python"] if f.endswith(".ipynb")]
+        if nb_python and notebooks:
+            nb = Tally("Notebook")
+            for file, truth in notebook_truth(nb_python, root, notebooks).items():
+                if truth is None:
+                    nb.unparsed += 1
+                    continue
+                want, exact = truth
+                have = got[file]
+                if not exact:
+                    # Số dòng ở đây archctl chỉ hứa gần đúng: so tên thôi.
+                    want = collections.Counter((0, s) for (_, s) in want.elements())
+                    have = collections.Counter((0, s) for (_, s) in have.elements())
+                check_lines(nb, file, want, have)
+            tallies.append(nb)
 
         if have_clang and by_lang["C/C++"]:
             c = Tally("C/C++")
