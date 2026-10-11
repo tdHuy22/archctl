@@ -9,7 +9,7 @@ Cập nhật 2026-10-11.
 
 ### Đã xong, có bằng chứng
 
-- **Oracle đối chiếu cạnh binding** (2026-10-11, commit sau `7fd016b`; bạn chọn raw token
+- **Oracle đối chiếu cạnh binding** (2026-10-11, commit `3167cc9`; bạn chọn raw token
   của clang). `archctl scan` in thêm cạnh liên ngôn ngữ của từng file (khoá
   thô). `oracle.py` bảng "Binding": C/C++ trên token thô của clang, `torch.ops`
   theo `ast`, PyO3 theo `syn`. Lần đầu chạy khớp hết: vllm 287 file 1 470 đầu
@@ -322,10 +322,44 @@ bị loại ở curl); công thức luật ML/LLM kèm `verify` gọi công cụ
 Các ứng viên đó giờ là việc ở §1. Còn treo: có đưa tầng hạ tầng (service,
 triển khai) vào DSL không.
 
-Không có việc nào đang dở, mọi mốc đã commit. Việc
-tiếp theo: không còn việc nào trong §1. Quyết định còn treo: có đưa tầng hạ
-tầng (service, triển khai) vào DSL không; `.agent/threat-model.md` có vào git
+Không có việc nào đang dở, mọi mốc đã commit (`3167cc9` là cuối).
+
+**Kiểm lại yêu cầu ban đầu (2026-10-11): chưa khép hết.** Yêu cầu: phủ rộng
+chưa, phủ system, network, hạ tầng chưa, và có vẽ được kiến trúc ML/DL/LLM
 không.
+- Mã system, network, hạ tầng: có, trong bộ đo 27 repo (thêm kubernetes).
+- Kiến trúc tầng service, mạng, triển khai: chưa. DSL không có khái niệm đó,
+  archctl không đọc `.proto`, Dockerfile, YAML, `.tf`; chờ bạn quyết.
+- Kiến trúc module của ML/LLM: có, giờ gồm cả mã native. Sơ đồ tự dựng của
+  vllm có `Csrc` với 8 cạnh vào (`archctl export` ra 24 component, 216 cạnh);
+  file ngoài sơ đồ 3 086 → 2 775, trong đó 2 029 là `tests/`, 357 là `rust/`
+  (chỉ test nạp, bằng `pytest.importorskip`), còn lại `examples/`,
+  `benchmarks/`, `tools/` và vài thư mục nhỏ.
+- Kiến trúc mô hình theo layer: lúc kiểm mới là công thức, chưa chạy thật
+  (không có torch, chưa có `model_arch.txt`). Đã khép ở việc 4.1, xem dưới.
+- Topology lúc chạy (GPU worker, hàng đợi, LangGraph, DAG): chưa, ghi ở mục
+  "Chưa làm" của `docs/ml.md`.
+Việc còn lại ở mốc "Khép yêu cầu ban đầu" trong §1.
+
+**4.1 và 4.3 xong, chưa commit** (2026-10-11). `verify model_arch` chạy thật:
+`examples/ml/requirements-test.txt` ghim torch 2.14.0 (Linux lấy bản `+cpu` từ
+index của PyTorch), pytest và 13 gói kéo theo, 174 hash, chỉ bản ra trước
+2026-09-27; `examples/ml/tests/model_arch.txt` là `repr(Net())` thật; CI thêm
+job `kiến trúc mô hình`. Biên nhận: `verify model_arch` 1/1 trong venv
+`target/ml-venv`; đổi `depth` 4 → 5 hay xoá bản duyệt thì thoát 1; sửa một hash
+thì pip dừng, thoát 1; khoá Linux cài được bằng `uv pip install --python-platform
+x86_64-manylinux_2_28`. Bước pip thật trên runner Linux chưa chạy (cần push).
+`.agent/threat-model.md` vào git, thêm TM-7. Review (opus): 0 cao, 0 vừa, 3 nhẹ,
+đã sửa cả 3 (`.venv/` vào `.gitignore`, số dòng trong threat model, §0 này).
+
+**4.2: thiết kế chờ bạn chốt.** Bạn chọn đưa tầng service, mạng, triển khai
+vào DSL. Trang so sánh hai phương án và năm câu cần chốt:
+https://claude.ai/artifact/VVd2dz5WrcsyoKJBkvetPm. Khuyên: tầng riêng `service`
+và `link`; đợt đầu đọc Dockerfile và compose; mã chạy trong service xác định từ
+điểm vào theo đồ thị import; Helm, Kustomize, Terraform không render trong lõi;
+gRPC đợt hai. reuse-best: không công cụ nào vừa mô hình service, vừa đọc file
+triển khai, vừa đối chiếu với mã mà giữ 0 dependency; mượn mô hình deployment
+của Structurizr và `dependsOn` của Backstage, lint sâu gọi ngoài qua `verify`.
 **Đã quyết (2026-10-03): giữ repo private, CI là
 lời nhắc chứ không chặn** — gói GitHub Free không có branch protection cho repo
 private, nên job đỏ không ngăn được commit vào `main`. Muốn đổi thì để repo
@@ -388,3 +422,13 @@ hàm, `ctypes` của Python và IPC thì không — xem [docs/check.md](docs/che
 - [x] Module mở rộng đặt tên bằng `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)`
   (kiểu `torch.utils.cpp_extension`, gặp ở detectron2, mmcv): đọc tên thật từ
   `CppExtension`/`CUDAExtension("pkg._C", …)` trong `setup.py`. Hiện không ghép.
+
+### Khép yêu cầu ban đầu
+
+- [x] Cài torch bản CPU để chạy thật `verify model_arch`
+  (sinh `examples/ml/tests/model_arch.txt`, CI chạy nó ở job `kiến trúc mô hình`).
+- [ ] @ban Chốt năm câu thiết kế tầng service, mạng, triển khai trong DSL
+  (bạn đã chọn đưa vào DSL; trang phương án: https://claude.ai/artifact/VVd2dz5WrcsyoKJBkvetPm).
+- [x] `.agent/threat-model.md` vào git (bạn đồng ý), thêm TM-7.
+- [ ] @ban Push lên nhánh thử rồi chạy CI bằng `workflow_dispatch`
+  (job `kiến trúc mô hình` chưa chạy trên runner Linux lần nào).

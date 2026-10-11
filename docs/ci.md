@@ -5,7 +5,7 @@ CI quan trọng vì nó chạy ở nơi agent không với tới. Mọi ranh gi�
 rồi, nhưng cấm bằng cấu hình thì chỉ chắc bằng chính cấu hình đó, và cấu hình
 nằm trong repo.
 
-Repo này tự chạy CI của mình, bốn job:
+Repo này tự chạy CI của mình, năm job:
 [.github/workflows/ci.yml](../.github/workflows/ci.yml).
 
 ## Hai lệnh, đúng thứ tự
@@ -104,7 +104,7 @@ lõi, nên job có giới hạn 25 phút.
 Nó thoát 2 — không phải 1 — khi không tải được repo, để một lần mạng chập chờn
 không trông giống một lỗi của archctl.
 
-Ngay sau đó, `bench/sabotage.py` phá archctl mười ba kiểu và đòi bộ đo bắt đúng
+Ngay sau đó, `bench/sabotage.py` phá archctl hai mươi kiểu và đòi bộ đo bắt đúng
 từng kiểu. Bộ đo chỉ có giá trị khi mỗi phép kiểm của nó đổ được; bước này
 giữ điều đó đúng qua những lần sửa sau.
 
@@ -113,14 +113,27 @@ so archctl với chính nó, nên một lỗi trong bộ trích — chỗ cả b
 bộ kiểm cùng dùng — làm cả hai sai giống nhau mà vẫn ra "0 bất nhất". Vue core
 từng mất 21% import tĩnh như vậy suốt nhiều lần chạy xanh. Bước này đối chiếu
 với parser chuẩn: `ast` của Python, lexer thô của clang, parser module của
-Node, `go/parser` của Go, và `syn` cho Rust. Bốn cái đầu có sẵn trên image
-`ubuntu-24.04` đã ghim. `syn` thì phải tải từ crates.io, nên riêng bước này
+Node, `go/parser` của Go, `syn` cho Rust, và IPython cho notebook. Bốn cái đầu
+có sẵn trên image `ubuntu-24.04` đã ghim. `syn` thì phải tải từ crates.io, nên riêng bước này
 mở lại mạng cho cargo (`CARGO_NET_OFFLINE: "false"`); archctl đã dựng xong ở
 bước trước khi còn offline, và crate tải về chỉ vào trình đọc của bộ đo, ghim
-cứng bằng `=`. `--require clang,node,go,syn` để ngày thiếu một cái thì bước
-này đỏ chứ không lặng lẽ bỏ qua. Sáu trong mười ba kiểu phá của
-`sabotage.py` nhắm vào bước này: ba ở file Python, ba ở file Rust. Phần Rust
-cũng cần `syn`, nên bước sabotage mở mạng giống bước đối chiếu.
+cứng bằng `=`. IPython cài bằng pip vào venv riêng, mọi gói ghim `==` kèm
+sha256. `--require clang,node,go,syn,ipython` để ngày thiếu một cái thì bước
+này đỏ chứ không lặng lẽ bỏ qua. Mười hai trong hai mươi kiểu phá của
+`sabotage.py` nhắm vào bước này: ba ở import Python, ba ở import Rust, hai ở
+notebook, bốn ở cạnh Python ↔ native. Phần Rust cũng cần `syn`, nên bước
+sabotage mở mạng giống bước đối chiếu.
+
+## Kiến trúc mô hình chạy thật
+
+Job `kiến trúc mô hình` chạy công thức trong [ml.md](ml.md) trên
+`examples/ml`: dựng mô hình thật, so cây module với
+`examples/ml/tests/model_arch.txt`, đỏ khi khác. archctl không đọc được layer từ
+mã nguồn, nên phần này cần torch. Torch, pytest và mọi gói kéo theo ghim `==`
+kèm sha256 trong `examples/ml/requirements-test.txt`, chỉ wheel. Linux lấy torch
+bản CPU (196 MB) từ index của PyTorch, vì bản trên PyPI là bản CUDA. Job tách
+riêng để không kéo dài job `repo thật`, và chạy `archctl verify model_arch`
+đúng như người dùng chạy ở máy mình, với `python3` của venv.
 
 ## Còn một chốt nữa không nằm trong YAML
 

@@ -169,7 +169,7 @@ jobs:
         run: python3 bench/bench.py --archctl target/release/archctl --rounds 1
 
       # Bộ đo bắt được lỗi chỉ khi từng phép kiểm của nó đổ được. Bước này phá
-      # archctl mười ba kiểu và đòi bộ đo bắt đúng từng kiểu — nếu một lần sửa sau
+      # archctl hai mươi kiểu và đòi bộ đo bắt đúng từng kiểu — nếu một lần sửa sau
       # này vô tình làm một phép kiểm luôn đạt, nó đỏ ở đây.
       #
       # `--rust-repo` phá thêm phần Rust của bước đối chiếu bên dưới, phần dùng
@@ -207,3 +207,35 @@ jobs:
         env:
           CARGO_NET_OFFLINE: "false"
         run: python3 bench/oracle.py --archctl target/release/archctl --require clang,node,go,syn,ipython
+
+  mo-hinh:
+    name: kiến trúc mô hình
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: lấy mã
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: dựng archctl
+        run: cargo build --release --locked
+
+      # Công thức trong `docs/ml.md`: archctl không đọc được layer của mô hình
+      # từ mã nguồn, nên `verify model_arch` dựng mô hình thật rồi so cây module
+      # với bản đã duyệt. Cần torch. Mọi gói ghim `==` kèm sha256 trong
+      # `examples/ml/requirements-test.txt`, chỉ wheel, không `setup.py` nào chạy
+      # lúc cài. Linux lấy torch bản CPU (196 MB) từ index của PyTorch; bản trên
+      # PyPI là bản CUDA. Job chỉ có quyền đọc, không secret.
+      - name: cài torch bản CPU và pytest
+        run: |
+          python3 -m venv target/ml-venv
+          target/ml-venv/bin/python -m pip install --quiet --disable-pip-version-check \
+            --require-hashes --only-binary :all: --no-deps \
+            -r examples/ml/requirements-test.txt
+
+      # `verify` chạy lệnh đã khai trong `examples/ml/.arch/system.arch`, với
+      # `python3` của venv. Kiến trúc khác `tests/model_arch.txt` thì đỏ.
+      - name: chụp kiến trúc mô hình, so với bản đã duyệt
+        working-directory: examples/ml
+        run: PATH="$GITHUB_WORKSPACE/target/ml-venv/bin:$PATH" ../../target/release/archctl verify model_arch

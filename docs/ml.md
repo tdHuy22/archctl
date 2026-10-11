@@ -139,7 +139,37 @@ verify model_arch runs "python3 -m pytest -q tests/test_model_arch.py"
 `repr(Net())`, tức cây module đầy đủ, với `tests/model_arch.txt`. Lần đầu,
 hay khi đổi kiến trúc có chủ ý, chạy `UPDATE_ARCH=1 pytest
 tests/test_model_arch.py` để sinh lại file đó, và người duyệt đọc diff của nó
-như đọc diff của luật.
+như đọc diff của luật. Bản đã duyệt của ví dụ:
+
+```
+Net(
+  (embed): Embedding(1000, 64)
+  (blocks): ModuleList(
+    (0-3): 4 x Block(
+      (attn): MultiheadAttention(
+        (out_proj): NonDynamicallyQuantizableLinear(in_features=64, out_features=64, bias=True)
+      )
+      (up): Linear(in_features=64, out_features=256, bias=True)
+      (down): Linear(in_features=256, out_features=64, bias=True)
+    )
+  )
+  (head): Linear(in_features=64, out_features=1000, bias=True)
+)
+```
+
+Chạy ví dụ ở máy mình: cài torch và pytest vào một venv bằng
+[`requirements-test.txt`](../examples/ml/requirements-test.txt) (ghim `==` kèm
+sha256, torch bản CPU), rồi đặt venv lên đầu `PATH`:
+
+```
+python3 -m venv .venv
+.venv/bin/python -m pip install --require-hashes --only-binary :all: --no-deps \
+    -r requirements-test.txt
+PATH="$PWD/.venv/bin:$PATH" archctl verify model_arch
+```
+
+CI của repo này chạy đúng lệnh đó ở job `kiến trúc mô hình` ([ci.md](ci.md)).
+Đổi `depth` từ 4 thành 5 thì nó đỏ: "kiến trúc mô hình khác bản đã duyệt".
 
 `archctl verify` chạy lệnh và ghi biên nhận gắn với bản mã lúc chạy;
 `archctl check` nhắc khi biên nhận đã cũ hơn mã — xem [verify.md](verify.md).

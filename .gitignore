@@ -5,3 +5,5 @@ dist/
 **/.arch/.state
 **/.arch/.verified
 target/
+# venv tạo theo docs/ml.md; Python dưới 3.13 không tự sinh .gitignore trong đó
+.venv/
