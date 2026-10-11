@@ -19,7 +19,7 @@ from pathlib import Path
 
 LANG_EXTS = {
     ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".vue",
-    ".py", ".pyi", ".pyx", ".pxd", ".pxi",
+    ".py", ".pyi", ".pyx", ".pxd", ".pxi", ".ipynb",
     ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx", ".inl", ".cu", ".cuh",
     ".rs", ".go",
 }

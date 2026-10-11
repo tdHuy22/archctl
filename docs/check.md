@@ -7,7 +7,7 @@ Hiện kiểm **luật phụ thuộc giữa component** cho năm ngôn ngữ.
 | Ngôn ngữ | Phần mở rộng | Nhận được | Phân giải |
 | --- | --- | --- | --- |
 | TypeScript, JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs`, `.vue` (chỉ phần `<script>`) | `import`, `import type`, `import { type A, b }`, `export … from`, `import x = require()`, `require()`, `import()` | tương đối, `index.*`, `.js`→`.ts`, alias `paths` trong tsconfig, **gói anh em trong workspace npm** |
-| Python | `.py .pyi`, Cython `.pyx .pxd .pxi` | `import a.b`, `import a as b, c`, `from .x import y`, `cimport`, `from x cimport y` | tương đối theo số dấu chấm; tuyệt đối thử gốc repo và **mọi thư mục có `pyproject.toml`, `setup.py`, `setup.cfg`, `manage.py`** (cùng `src/`, `lib/` của chúng), package chứa file gọi trước; **gói không gian tên (PEP 420)**; `from pkg import sub` với `sub` là module con thì đích là **cả `pkg` lẫn `pkg/sub`** |
+| Python | `.py .pyi`, Cython `.pyx .pxd .pxi`, notebook `.ipynb` (chỉ ô code) | `import a.b`, `import a as b, c`, `from .x import y`, `cimport`, `from x cimport y` | tương đối theo số dấu chấm; tuyệt đối thử gốc repo và **mọi thư mục có `pyproject.toml`, `setup.py`, `setup.cfg`, `manage.py`** (cùng `src/`, `lib/` của chúng), package chứa file gọi trước; **gói không gian tên (PEP 420)**; `from pkg import sub` với `sub` là module con thì đích là **cả `pkg` lẫn `pkg/sub`** |
 | C, C++ | `.c .h .cc .cpp .cxx .hpp .hh .hxx .inl`, CUDA `.cu .cuh` | `#include "x"`, `#include <x>` | **thư mục `-I` đọc từ build**; `"…"` ưu tiên thư mục file gọi; không có build thì khớp tên **duy nhất** trong repo |
 | Rust | `.rs` | `use`, `pub use`, cây `use a::{b::{c, d as e}, self}`, `use {a, b}`, `extern crate` | theo cây module; **gốc crate của từng file** (thư viện, binary, test, đường dẫn khai trong `Cargo.toml`); nhìn xuyên re-export ở gốc; các crate anh em trong workspace |
 | Go | `.go` | `import "x"`, khối `import ( … )` | đọc `module` trong mọi `go.mod` tới độ sâu 4 (trừ `testdata/`, `vendor/`, thư mục ẩn) để tách nội bộ với bên ngoài; module dài nhất thắng |
@@ -58,8 +58,8 @@ vllm `deepseek_v2.py:488` lệch 1, matplotlib `test_axes.py` lệch 3. Giờ d�
 Phép tự nhất quán của bộ đo so archctl với chính nó — bộ khám phá và bộ kiểm
 dùng chung bộ trích — nên một lỗi trong bộ trích làm cả hai sai giống nhau mà
 vẫn ra "0 bất nhất". [bench/oracle.py](../bench/oracle.py) đối chiếu với parser
-chuẩn của từng ngôn ngữ trên 24 repo của bộ đo, và CI chạy nó ở mỗi pull
-request:
+chuẩn của từng ngôn ngữ trên mọi repo của bộ đo, và CI chạy nó ở mỗi pull
+request. Bảng dưới là lần đo khi bộ đo có 24 repo:
 
 | Ngôn ngữ | Thước đo | Kết quả 2026-10-04 |
 | --- | --- | --- |
@@ -553,7 +553,7 @@ ra. Giờ:
 Bộ đọc `.gitignore` chỉ đủ cho câu hỏi này: mẫu sau thắng mẫu trước, `!` đưa
 trở lại, mẫu có `/` thì neo vào thư mục chứa file, thư mục cha bị bỏ thì con
 cũng bị. Chưa hiểu `[abc]`. Bộ đo đối
-chiếu nó với chính `git check-ignore` trên hai mươi bốn repo.
+chiếu nó với chính `git check-ignore` trên mọi repo của bộ đo.
 
 Thêm mẫu glob vào `.arch/.archignore` để bỏ qua thêm.
 

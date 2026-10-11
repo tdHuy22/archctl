@@ -4,7 +4,7 @@
 python3 bench/bench.py
 ```
 
-Một lệnh: dựng archctl bản release, tải hai mươi bốn repo ở đúng commit đã ghim
+Một lệnh: dựng archctl bản release, tải hai mươi sáu repo ở đúng commit đã ghim
 trong [repos.tsv](repos.tsv), rồi chạy hai phép thử trên từng repo. Chỉ cần
 Python 3 và git, không gói Python nào ngoài thư viện chuẩn.
 
@@ -17,11 +17,11 @@ chỗ mà luật `allow`/`deny` giữa component có nghĩa nhất.
 | Ngôn ngữ | Repo |
 | --- | --- |
 | TypeScript | vue core (monorepo, alias tsconfig), excalidraw (ứng dụng React, TSX) |
-| Python | flask (`src/`), netbox (Django, gốc là thư mục có `manage.py`), scikit-learn (ML), vllm (LLM serving, kernel C++), langchain (LLM, hai mươi hai `pyproject.toml` trong `libs/`) |
+| Python | flask (`src/`), netbox (Django, gốc là thư mục có `manage.py`), scikit-learn (ML), vllm (LLM serving, kernel C++), langchain (LLM, hai mươi hai `pyproject.toml` trong `libs/`), pytorch-image-models (huấn luyện DL) |
 | C | curl (CMake), redis (Makefile, `deps/`), nginx (`-I` trong script `auto/`, không file build nào đọc được) |
 | C++ | leveldb (storage engine, CMake) |
 | Rust | tokio, ripgrep, rusqlite, pydantic-core (với Python), zstd-rs (với C qua submodule) |
-| Go | hugo (đồ thị dày), etcd (mười bốn `go.mod` trong một repo) |
+| Go | hugo (đồ thị dày), etcd (mười bốn `go.mod` trong một repo), kubernetes (phần scheduler, tải sparse; module staging có `go.mod` riêng) |
 
 Lần thêm tám repo cuối (etcd, excalidraw, langchain, leveldb, netbox, nginx,
 scikit-learn, vllm) bắt được bốn chỗ archctl không thấy cạnh nào mà cũng
@@ -39,6 +39,11 @@ file Python; mười một package của nó là 83 MB. Phép đếm số file b
 git đánh dấu nằm ngoài vùng sparse, và một thư mục sparse không có ở commit
 đã ghim là mã thoát 2 — không thì một tên gõ sai cho ra một repo rỗng mà vẫn
 đạt.
+
+kubernetes chỉ tải phần scheduler (`pkg/scheduler`, `cmd/kube-scheduler`, module
+staging `k8s.io/kube-scheduler`), 277 file. Import sang package khác của chính
+module `k8s.io/kubernetes`, như `pkg/features`, thành 67 cảnh báo chưa phân giải:
+archctl nhận đúng đó là mã nội bộ, chỉ là nó không được tải về.
 
 Repo tải về `target/bench/repos/` (khoảng 920 MB), bản làm việc ở
 `target/bench/work/`, kết quả chi tiết ở `target/bench/results.json`. Tất cả

@@ -143,6 +143,7 @@ agent, nên mỗi dependency thêm vào là một bề mặt tấn công thêm.
 | [docs/declarations.md](docs/declarations.md) | `flow`, `contract`, `boundary`, `invariant` |
 | [docs/verify.md](docs/verify.md) | Chạy thật các cách kiểm, và biên nhận tự hết hạn |
 | [docs/api.md](docs/api.md) | Hàm và từ khoá bị cấm |
+| [docs/ml.md](docs/ml.md) | Công thức luật cho dự án ML và LLM |
 | [docs/protocol.md](docs/protocol.md) | Giao thức agent–người |
 | [docs/adopt.md](docs/adopt.md) | `init --from-code` và `baseline` |
 | [docs/serve.md](docs/serve.md) | Sơ đồ tương tác |
@@ -201,7 +202,8 @@ archctl/
 ├── templates/    # khung .arch/ mà `archctl init` sinh ra
 ├── examples/
 │   ├── shop/     # dự án TypeScript, hai vi phạm cài sẵn
-│   └── sensor/   # Rust + C + Python + Go, mỗi ngôn ngữ một vi phạm
+│   ├── sensor/   # Rust + C + Python + Go, mỗi ngôn ngữ một vi phạm
+│   └── ml/       # dự án ML/LLM, mỗi công thức trong docs/ml.md một vi phạm
 └── crates/
     ├── arch-core/   # parser, mô hình, kiểm chứng, layout, xuất sơ đồ
     └── archctl/     # CLI và máy chủ sơ đồ

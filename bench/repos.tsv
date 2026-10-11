@@ -15,6 +15,7 @@ flask	https://github.com/pallets/flask.git	d73fa1cdcbd8b1465c151db8924ba58b1dd14
 go-sqlite3	https://github.com/mattn/go-sqlite3.git	dbbe931904f2ee06546448fbe7cf7780f61bc110	-	-	Go cgo, amalgamation sqlite3 9 MB vượt ngưỡng dò, archctl báo QUÁ LỚN thay vì ghép cgo
 google-cloud-python	https://github.com/googleapis/google-cloud-python.git	9b96af76254c33b9c3e0ceb390bbaeab2e33bbea	-	packages/google-api-core,packages/google-cloud-core,packages/google-cloud-datastore,packages/google-cloud-error-reporting,packages/google-cloud-firestore,packages/google-cloud-logging,packages/google-cloud-monitoring,packages/google-cloud-ndb,packages/google-cloud-pubsub,packages/google-cloud-storage,packages/google-cloud-trace	Python, namespace PEP 420 hai cấp google/ và google/cloud/ chung nhiều distribution (sparse 11 package)
 hugo	https://github.com/gohugoio/hugo.git	6b3ba3a7e22ae2809605b8118aeed08b244f1955	-	-	Go, 943 file, đồ thị dày
+kubernetes	https://github.com/kubernetes/kubernetes.git	137705d1d2709dbe645e26a5541827eec8c174f7	-	pkg/scheduler,cmd/kube-scheduler,staging/src/k8s.io/kube-scheduler	Go, hạ tầng điều phối container, module staging `k8s.io/kube-scheduler` có `go.mod` riêng nằm sâu bốn cấp (sparse phần scheduler)
 langchain	https://github.com/langchain-ai/langchain.git	57236d55d9ffc8634bda987861e6fce460aff268	-	-	Python LLM, nhiều package trong libs/
 leveldb	https://github.com/google/leveldb.git	7ee830d02b623e8ffe0b95d59a74db1e58da04c5	-	-	C++, storage engine, CMake
 libbpfgo	https://github.com/aquasecurity/libbpfgo.git	96cbab36fb96ce52522352809a335b7ff3fef8ef	libbpf	-	Go, binding eBPF qua cgo, Go ở gốc gọi submodule C libbpf/
@@ -23,6 +24,7 @@ netbox	https://github.com/netbox-community/netbox.git	5a9a9d2a25318ff68fdd567959
 nginx	https://github.com/nginx/nginx.git	2b5c2b605b5df669da5dec6749dcc76c07d1315d	-	-	C, máy chủ mạng, build bằng script auto/ chứ không CMake
 opentelemetry-python	https://github.com/open-telemetry/opentelemetry-python.git	5e8083e845dc0b0225d8674240c556c879ce852f	-	-	Python, nhiều distribution chung namespace PEP 420 `opentelemetry`
 pydantic-core	https://github.com/pydantic/pydantic-core.git	383eb95a19433754c0cecf7025b50c26b6d97a36	-	-	Rust lẫn Python
+pytorch-image-models	https://github.com/huggingface/pytorch-image-models.git	e84b179c5cddeb039736556b046614030061a9ee	-	-	Python DL, thư viện mô hình và huấn luyện (timm): models, layers, data, optim, scheduler, train.py
 redis	https://github.com/redis/redis.git	b540ca49cba815f3fbe634363c3df68d4f4f127a	-	-	C, dependency vendor trong deps/
 ripgrep	https://github.com/BurntSushi/ripgrep.git	3fce3b5bb0236da2df6d99672afb8a719642eca7	-	-	Rust workspace nhiều crate
 rusqlite	https://github.com/rusqlite/rusqlite.git	91f876c80114122670f455190d03c81d1f78b0af	-	-	Rust, mã gọn trong một crate

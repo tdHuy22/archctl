@@ -61,7 +61,8 @@ pub enum Via {
     /// Tên bảng dữ liệu, tìm trong định danh và trong chuỗi.
     Table,
     /// Lời gọi qua ranh giới ngôn ngữ: `extern "C"` của Rust, `C.x` của Go,
-    /// ghép với định nghĩa cùng tên ở phía C.
+    /// ghép với định nghĩa cùng tên ở phía C; import Python của module mở
+    /// rộng và `torch.ops.ns.op`, ghép với phía native định nghĩa chúng.
     Ffi,
 }
 

@@ -1,0 +1,63 @@
+# Một dự án ML/LLM nhỏ: dữ liệu → đặc trưng → mô hình → huấn luyện, phục vụ,
+# và một ứng dụng RAG gọi LLM qua một cổng duy nhất.
+# Cố ý chứa bảy vi phạm, mỗi công thức luật một cái, và notebook cũng
+# không được đi tắt — xem docs/ml.md.
+
+component Data     at mlapp/data/**       @human #accepted
+component Features at mlapp/features/**   @human #accepted
+component Models   at mlapp/models/**     @human #accepted
+component Ops      at mlapp/ops/**        @human #accepted
+component Kernels  at csrc/**             @human #accepted
+component Train    at mlapp/train/**      @human #accepted
+component Serve    at mlapp/serve/**      @human #accepted
+component LLM      at mlapp/llm/**        @human #accepted
+component Rag      at mlapp/rag/**        @human #accepted
+component Web      at mlapp/web/**        @human #accepted
+component Notebooks at notebooks/**      @human #accepted
+
+external Torch     at "torch"             @human #accepted
+external Pandas    at "pandas"            @human #accepted
+external OpenAI    at "openai"            @human #accepted
+external Anthropic at "anthropic"         @human #accepted
+
+allow Data     -> Pandas
+allow Features -> Data
+allow Models   -> Torch, Ops
+allow Ops      -> Torch, Kernels
+allow Train    -> Models, Features, Data, Torch
+allow Serve    -> Models, Torch
+allow LLM      -> OpenAI, Anthropic
+allow Rag      -> LLM
+allow Web      -> Rag, LLM, Serve
+allow Notebooks -> Features, Models, LLM
+
+# 1. Phục vụ không kéo mã huấn luyện vào: image phục vụ phình ra, và một thay
+#    đổi ở vòng lặp huấn luyện làm hỏng đường phục vụ.
+deny Serve -> Train
+
+# 2. Chỉ cổng LLM được gọi nhà cung cấp. Thử lại, đổi nhà cung cấp, đếm chi
+#    phí, che khoá API đều nằm ở một chỗ.
+deny * -> OpenAI, Anthropic except LLM
+
+# 3. Khâu dữ liệu và đặc trưng không biết gì về framework học sâu, để chạy
+#    được ở nơi không có GPU và đổi framework không phải viết lại chúng.
+deny Data     -> Torch
+deny Features -> Torch
+
+# 4. `pickle` chạy được mã tuỳ ý khi nạp; mô hình nạp bằng safetensors.
+#    Không thêm `eval`: nhóm `api` khớp cả tên đứng sau dấu chấm, nên mọi
+#    `model.eval()` của PyTorch sẽ thành vi phạm.
+api Unsafe at "pickle"   @human #accepted
+deny * -> Unsafe
+
+# 5. Lỗi của nhà cung cấp LLM không lọt khỏi cổng: tầng ngoài chỉ thấy
+#    `LLMUnavailable`.
+boundary LLMCalls contains LLM:   @human #accepted
+  contain  RateLimitError, APITimeoutError
+
+# 6. Op C++ chỉ được gọi qua lớp bọc `Ops`. Không có `allow Train -> Kernels`,
+#    nên `torch.ops.mlapp_ops.x` gọi từ Train là vi phạm qua ranh giới ngôn ngữ.
+
+# Kiến trúc mô hình theo layer không đọc được bằng phân tích tĩnh: chụp nó khi
+# chạy thật rồi so với bản đã duyệt.
+verify model_arch runs "python3 -m pytest -q tests/test_model_arch.py"   @human #accepted

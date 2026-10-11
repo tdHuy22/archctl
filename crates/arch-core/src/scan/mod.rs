@@ -9,6 +9,7 @@ pub mod lexer;
 mod clang;
 pub mod foreign;
 mod golang;
+mod notebook;
 mod python;
 mod rustlang;
 mod ts;
@@ -57,7 +58,8 @@ impl Lang {
             // `.vue`: chỉ phần `<script>`, xem [`source_view`].
             "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" | "vue" => Lang::TypeScript,
             // `.pyx`, `.pxd`, `.pxi`: Cython, Python cộng thêm `cimport`.
-            "py" | "pyi" | "pyx" | "pxd" | "pxi" => Lang::Python,
+            // `.ipynb`: chỉ ô code, xem [`source_view`].
+            "py" | "pyi" | "pyx" | "pxd" | "pxi" | "ipynb" => Lang::Python,
             // `.cu`, `.cuh`: CUDA, tức C++. `.inc` cố ý không có: abseil dùng
             // nó cho C++, nhưng curl dùng cho Makefile và scikit-learn cho
             // reStructuredText.
@@ -324,7 +326,13 @@ pub fn imports_for(path: &str, src: &str) -> Option<(Lang, Vec<Import>)> {
 /// "Don't import './x'", và không có import nào. Mọi thứ ngoài khối script
 /// thành khoảng trắng, giữ nguyên dấu xuống dòng để số dòng vẫn đúng với file
 /// gốc.
+///
+/// Notebook (`.ipynb`) cũng vậy: chỉ ô code, mỗi dòng mã ở đúng dòng của nó
+/// trong file JSON — xem `notebook.rs`.
 pub fn source_view<'a>(path: &str, src: &'a str) -> std::borrow::Cow<'a, str> {
+    if path.ends_with(".ipynb") {
+        return std::borrow::Cow::Owned(notebook::code_view(src));
+    }
     if !path.ends_with(".vue") {
         return std::borrow::Cow::Borrowed(src);
     }
