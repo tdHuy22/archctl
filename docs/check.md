@@ -143,17 +143,72 @@ Ghép theo tên, nên nó thận trọng ở mấy chỗ:
 - **`C.CString`, `C.int` của cgo tự rụng**, vì chúng không khớp định nghĩa nào
   trong repo.
 
+### Python gọi mã native
+
+Python không khai báo tên hàm native như `extern "C"`. Hai đầu có chung một
+thứ khác: **tên module mở rộng**, và với PyTorch là **tên op**.
+
+```python
+# python/pkg/__init__.py                 // src/lib.rs
+from ._core import Validator             #[pymodule] mod _core { … }
+
+# vllm/_custom_ops.py                    // csrc/torch_bindings.cpp
+torch.ops._C.rotary_embedding(…)         STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
+                                           ops.def("rotary_embedding(Tensor positions, …)");
+```
+
+| Bên cung cấp | Nhận bằng |
+| --- | --- |
+| Rust (PyO3) | `#[pymodule]` trên `fn x` hoặc `mod x`; `#[pyo3(name = "...")]` đổi tên |
+| C, C++ | `PYBIND11_MODULE(x, m)`, `NB_MODULE(x, m)` (nanobind), định nghĩa `PyInit_x` của C API |
+| C++ (PyTorch) | `m.def("op(…)")` trong khối `TORCH_LIBRARY*(ns, m) { }`, kể cả `FRAGMENT`, `STABLE_`, macro bọc lại như `TORCH_LIBRARY_EXPAND` |
+| Bên gọi | |
+| Python | import một module mà repo không có mã Python nào cho nó; `torch.ops.ns.op` |
+
+Chỗ dễ sai là phía gọi, và luật ở đó chặt:
+
+- **Chỉ import không ra mã Python.** Module không có file nào, hoặc chỉ có stub
+  `.pyi` — pydantic-core có `_pydantic_core.pyi` nằm cạnh, và stub chỉ mô tả
+  kiểu. Có `_core.py` thật thì đó là cạnh Python thường.
+- **Chỉ module trong package của chính repo.** `torch._C` là module mở rộng
+  của PyTorch. Repo có `PYBIND11_MODULE(_C, m)` cũng không làm `import
+  torch._C` thành cạnh.
+- **Cùng một tên, nhiều chỗ nạp thì phải chọn.** Phía native chỉ đặt tên
+  module, còn nó nằm trong package nào là do cấu hình build. Có stub `.pyi`
+  thì stub nói module nằm đâu: `pkgb` import `._core` mà stub ở `pkga` thì
+  `pkgb._core` là thứ khác và vẫn bị báo chưa phân giải. Không có stub thì
+  mọi import phải trỏ cùng một chỗ; hai package cùng nạp `_core` của riêng
+  mình thì không ghép bên nào.
+- **Op ghép theo cả namespace lẫn tên.** `torch.ops.aten.add` không bao giờ
+  ghép với `mylib::add`. `TORCH_LIBRARY_IMPL` không tính là cung cấp: nó chỉ
+  gắn kernel cho op đã định nghĩa ở chỗ khác.
+- **Namespace viết bằng macro thì không ghép.** `TORCH_EXTENSION_NAME` do hệ
+  thống build định nghĩa. Đã thử coi nó là một module mở rộng mà Python
+  import, nhưng vllm import cả chục module như vậy, và
+  `torch.ops._vllm_fa3_C.get_scheduler_metadata` (op của flash-attention, tải
+  lúc build) ghép nhầm vào op CPU cùng tên. Phần này bỏ sót chứ không đoán:
+  trên vllm, 265 lời gọi ở 54 file ghép được, và cả 161 tên op đều có chuỗi
+  schema tương ứng trong `csrc/`.
+- **Import của module đã ghép được không còn bị báo "chưa phân giải".** Nó
+  không ra file Python nào, nhưng nơi định nghĩa nó đã tìm thấy.
+
 ### Vẫn còn vô hình
 
 - **Liên kết động** — `dlopen` cộng tên hàm dựng lúc chạy
 - **Con trỏ hàm và vtable**
 - **`ctypes` và `cffi` của Python** — tên hàm nằm trong chuỗi, và thư viện
   được chọn lúc chạy
+- **Op PyTorch qua biến trung gian** (`ops = torch.ops._C; ops.x()`), qua
+  `getattr`, hay có namespace là macro; op đăng ký bằng Python
+  (`torch.library`)
+- **Module mở rộng nằm thẳng ở gốc** (`import _core` không qua package nào):
+  không phân biệt được với gói bên ngoài
 - **Tiến trình con, syscall, IPC, mạng**
 
 `archctl check --changed` chỉ ghép trong tập file đang xét, nên nó có thể bỏ
 sót cạnh liên ngôn ngữ khi phía cung cấp không nằm trong tập. Lần quét đầy đủ
-— và CI — vẫn thấy.
+— và CI — vẫn thấy. Cũng vì thế, ở đường hook một import module mở rộng không
+có stub vẫn bị báo chưa phân giải, dù lần quét đầy đủ thì không.
 
 **Hệ quả cho mã hệ thống và bảo mật:** với C/C++, `#include` là điều kiện cần
 nhưng rất xa điều kiện đủ. Loại luật phù hợp hơn cho các mảng đó là **hàm bị

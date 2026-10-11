@@ -5,9 +5,26 @@ Mô tả sản phẩm ở [README.md](README.md); file này chỉ ghi trạng th
 
 ## §0 Đang ở đâu, việc tiếp theo
 
-Cập nhật 2026-10-04.
+Cập nhật 2026-10-11.
 
 ### Đã xong, có bằng chứng
+
+- **Cạnh Python ↔ native, chưa commit** (2026-10-11). Ghép import Python với
+  module mở rộng (PyO3 `#[pymodule]`, `PYBIND11_MODULE`, `NB_MODULE`,
+  `PyInit_`), và `torch.ops.ns.op` với `m.def` trong `TORCH_LIBRARY*`. Chỉ
+  namespace viết thẳng: đoán namespace macro từng ghép nhầm
+  `_vllm_fa3_C` trên vllm. Cùng tên module mà nạp từ nhiều chỗ thì stub `.pyi`
+  quyết. `init --from-code` đưa thư mục native bên cạnh gốc vào sơ đồ (vllm
+  `Csrc`, pydantic-core `PydanticCore`). Bộ đo có `CROSSINGS` (4 cạnh bắt
+  buộc) và kiểu phá `crossing`. Review (sonnet) tìm 5, sửa 3 (cạnh giả khi
+  hai package cùng nạp `_core`, `descend` tính cả `tests/`, đường dẫn trong
+  danh sách bỏ sót), 2 ghi vào tài liệu. Biên nhận sau sửa: 441 test, clippy
+  `-D warnings`, `cargo +1.88 check`, `verify` 3/3, `check --strict` 0; bộ đo
+  24 repo 22 893 file 0 bất nhất 840/840; sabotage 14/14. vllm: 265 lời gọi
+  op ghép được, cả 161 tên có schema trong `csrc/`. matplotlib: `.ft2font` ở
+  `_backend_pdf_ps.py:26` (lỗi của matplotlib) từng ghép nhầm vào module native,
+  giờ lại báo chưa phân giải. Đo A/B: `check` +0–3%, hook không đổi, `init`
+  vllm 592 → 812 ms.
 
 - **Phần Rust của oracle đổ được** (2026-10-04): `sabotage.py --rust-repo
   ripgrep` phá thêm ba kiểu ở file Rust (mất import, lệch dòng, import giả
@@ -215,7 +232,16 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-Không còn việc nào trong danh sách; thước đo chuẩn đã phủ cả năm ngôn ngữ.
+Làm theo các mốc ở §1, bắt đầu từ mốc "Cạnh Python ↔ native". Thước đo
+chuẩn đã phủ cả năm ngôn ngữ.
+
+**Đã quyết (2026-10-11): cạnh binding Python ↔ native tự viết.** Đã tìm theo
+skill reuse-best. Không công cụ tĩnh nào phủ cả PyO3, pybind11, nanobind
+và `torch.ops`. [metacall/meta-ast](https://github.com/metacall/meta-ast)
+chỉ nhận lời gọi `metacall_load_from_*`.
+[pybind11-stubgen](https://github.com/pybind/pybind11-stubgen) phải import
+module đã build. Oracle sau này: `ast` cho phía Python, `syn` cho PyO3,
+raw token của clang cho C++.
 
 Các repo `googleapis/python-*` đơn lẻ đã archive và rỗng, nên ca lồng hai cấp
 dùng monorepo dạng sparse.
@@ -226,7 +252,31 @@ khuyên chưa nên; chờ bạn quyết. Số đo trên máy này: lex cả repo
 hơn khoảng 11–14 lần; riêng khởi động `python3.14` kèm vài module chuẩn đã 82 ms, trong khi
 `check <file>` của Rust trên netbox hết 39 ms.
 
-Không có việc nào đang dở. **Đã quyết (2026-10-03): giữ repo private, CI là
+**Đang cân nhắc (2026-10-06): mở rộng sang hạ tầng và ML/DL/LLM.** Đã rà, chờ
+bạn chọn hướng. Mã thuộc mảng system, network, hạ tầng đã có trong bộ đo
+(redis, leveldb, libbpf, nginx, curl, tokio, etcd, netbox, opentelemetry).
+Kiến trúc ở tầng service, mạng, triển khai thì chưa: DSL không có khái niệm
+đó, và archctl không đọc `.proto`, Dockerfile, YAML k8s, `.tf`, `.ipynb`.
+Với ML/LLM, kiến trúc module vẽ và kiểm được: một project mẫu có luật `deny
+* -> OpenAI except LLM` và `deny Serve -> Train` bắt đúng 3/3 vi phạm. Ba
+thứ chưa thấy:
+- cạnh Python sang mã native: `torch.ops._C.rotary_embedding` của vllm ứng
+  với `csrc/libtorch_stable/torch_bindings.cpp:400`; `#[pymodule]` của
+  pydantic-core;
+- kiến trúc mô hình theo layer;
+- topology lúc chạy.
+Sơ đồ tự dựng của vllm có 24 component và 216 cạnh. Có 3 086 trên 5 624 file
+nằm ngoài sơ đồ, gồm cả 313 file C++/CUDA trong `csrc/`. Ứng viên theo thứ
+tự đáng làm: cạnh PyO3, pybind11 và `TORCH_LIBRARY` trong `scan/foreign.rs`
+(phải tính cả cách đưa `csrc/` vào sơ đồ, vì việc gộp "anh em của gốc" từng
+bị loại ở curl); công thức luật ML/LLM kèm `verify` gọi công cụ ngoài; đọc
+`.ipynb`. Kiến trúc mô hình và tầng hạ tầng thì trỏ ra công cụ ngoài, đừng
+đưa vào lõi.
+Các ứng viên đó giờ là việc ở §1. Còn treo: có đưa tầng hạ tầng (service,
+triển khai) vào DSL không.
+
+Không có việc nào đang dở; thay đổi Python ↔ native chờ bạn cho commit.
+**Đã quyết (2026-10-03): giữ repo private, CI là
 lời nhắc chứ không chặn** — gói GitHub Free không có branch protection cho repo
 private, nên job đỏ không ngăn được commit vào `main`. Muốn đổi thì để repo
 public hoặc lên Pro; lý do ở [docs/ci.md](docs/ci.md).
@@ -255,3 +305,28 @@ luật đổi. Xem [docs/verify.md](docs/verify.md).
 
 Cạnh liên ngôn ngữ: `extern "C"` và `C.x` đã ghép được; `dlopen`, con trỏ
 hàm, `ctypes` của Python và IPC thì không — xem [docs/check.md](docs/check.md).
+
+## §1 Các mốc
+
+### Cạnh Python ↔ native
+
+- [x] Ghép module mở rộng với import Python: `#[pymodule]` của PyO3,
+  `PYBIND11_MODULE`, `NB_MODULE`. Chỉ tính import không trỏ tới file `.py`
+  (pydantic-core: `from ._pydantic_core import` hiện dừng ở file `.pyi`).
+- [x] Ghép op của PyTorch: `m.def("op(…)")` trong khối `TORCH_LIBRARY*` với
+  `torch.ops.<ns>.<op>` (vllm: `csrc/` ↔ `vllm/_custom_ops.py`).
+- [x] Bộ khám phá đưa vào sơ đồ thư mục ở đầu kia của cạnh liên ngôn ngữ
+  (`csrc/` của vllm, `python/` của pydantic-core), không kéo theo `tests/`.
+- [x] Bộ đo: số mới cho vllm và pydantic-core, thêm kiểu phá vào `sabotage.py`.
+- [ ] @ban Chọn mức oracle cho C++ rồi để `oracle.py` đối chiếu cạnh binding
+  (raw token của clang, hay tree-sitter chỉ chạy ở CI).
+- [x] Tài liệu: mục cạnh liên ngôn ngữ trong `docs/check.md`, README.
+
+### ML/LLM dùng được ngay
+
+- [ ] Tài liệu công thức luật cho ML/LLM: `external` cho torch và SDK của LLM,
+  `deny Serve -> Train`, `api` cấm `pickle`, `eval`; `verify` gọi công cụ
+  ngoài để chụp kiến trúc mô hình rồi so với bản đã duyệt.
+- [ ] Đọc `.ipynb`: ô code đưa qua bộ quét Python.
+- [ ] Bộ đo: thêm một repo huấn luyện DL.
+- [ ] Bộ đo: thêm một repo hạ tầng viết bằng Go (Kubernetes, tải sparse).

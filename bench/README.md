@@ -62,6 +62,20 @@ Và archctl phải quét **đúng số file nguồn mà git có**. Số này đ�
 (hay mọi thứ trong nó) bị ignore, hoặc khi không có `.gitignore` nào để hỏi. Lệch là archctl bỏ sót mã được commit: etcd từng mất cả package Go
 `tests/robustness/coverage/` vì tên thư mục trùng tên output, không một lời nào.
 
+Và luật sinh ra phải có **các cạnh liên ngôn ngữ đã biết**, mỗi họ ghép một
+cạnh (`CROSSINGS` trong [consistency.py](consistency.py)):
+
+| Repo | Cạnh | Qua |
+| --- | --- | --- |
+| libbpfgo | `Core -> Libbpf` | cgo |
+| pydantic-core | `PydanticCore -> Core` | module PyO3 `_pydantic_core` |
+| matplotlib | `Lib -> Src` | module pybind11 `_path` |
+| vllm | `Vllm -> Csrc` | op PyTorch `torch.ops._C.*` |
+
+Đổi `allow` đó thành `deny` thì `check` phải báo vi phạm qua ranh giới ngôn
+ngữ. Tự nhất quán không bắt được chỗ này: phần ghép hỏng ở cả `init` lẫn
+`check` thì hai bên vẫn khớp nhau, và cạnh biến mất trong im lặng.
+
 **Luồng lệnh** ([flows.py](flows.py)). Mọi lệnh — `init`, `check` theo bốn
 đường, `parse`, `export`, `baseline`, `propose`/`accept`/`block`/`reject`,
 `diff`, `serve` — trên mã người khác viết. Test trong `crates/*/tests/` dựng dự
@@ -149,7 +163,9 @@ file, bỏ khoá
 thêm chú thích. Mỗi kiểu phải làm `bench.py` thoát 1, **và phải bị đúng phép
 kiểm dành cho nó bắt** — không chỉ đỏ vì một lý do khác. Ba kiểu nữa làm hỏng
 đầu ra `scan --json` — mất một import, lệch một dòng, thêm một import giả — và
-phải làm `oracle.py` thoát 1. `--rust-repo ripgrep` thêm ba kiểu y vậy ở file
+phải làm `oracle.py` thoát 1. Kiểu `crossing` xoá cạnh liên ngôn ngữ khỏi
+cả luật `init` sinh ra lẫn vi phạm `check` báo, trên pydantic-core, và chỉ
+danh sách cạnh bắt buộc ở trên bắt được nó. `--rust-repo ripgrep` thêm ba kiểu y vậy ở file
 Rust, đối chiếu bằng `syn` nên cần mạng; kiểu thêm import giả nằm ngoài macro,
 nên nó cũng giữ cho phép miễn trừ import trong thân macro không rộng ra. CI
 chạy bước này sau bộ đo, với `--rust-repo ripgrep`.

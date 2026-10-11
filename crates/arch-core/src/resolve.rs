@@ -31,6 +31,58 @@ pub enum Resolved {
     Missing,
 }
 
+/// Import Python có thể đang nạp một module mở rộng viết bằng ngôn ngữ khác —
+/// xem [`Resolver::import_targets`]. Chỉ là ứng viên: ghép được với phía
+/// native (`#[pymodule]`, `PYBIND11_MODULE`) mới thành cạnh.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeImport {
+    /// Tên module, đoạn cuối của đường dẫn chấm: thứ phía native đặt tên.
+    pub module: String,
+    /// Cách viết trong mã.
+    pub shown: String,
+    /// Module nằm ở đâu: đường dẫn không đuôi, tương đối với gốc. Hai import
+    /// cùng chỗ là cùng một module.
+    pub at: String,
+    /// Có stub `.pyi` ở đúng chỗ đó.
+    pub stub: bool,
+}
+
+/// Những import module mở rộng được ghép, dạng `(tên module, chỗ)`.
+///
+/// Phía native chỉ đặt tên module (`_core`), không nói nó nằm trong package
+/// nào; điều đó do cấu hình build quyết. Nên khi nhiều chỗ cùng nạp một tên
+/// thì phải chọn:
+///
+/// - Có stub `.pyi` thì stub nói module nằm đâu. `pkgb` import `._core` mà
+///   stub nằm trong `pkga` thì `pkgb._core` là thứ khác — file sinh lúc
+///   build, hay một import hỏng — và không được ghép.
+/// - Không có stub thì mọi import phải trỏ cùng một chỗ. Hai package cùng nạp
+///   `_core` của riêng mình thì không biết module native thuộc về bên nào.
+pub fn settle_natives<'a>(
+    imports: impl IntoIterator<Item = &'a NativeImport>,
+) -> HashSet<(&'a str, &'a str)> {
+    let mut seen: HashMap<&str, (HashSet<&str>, HashSet<&str>)> = HashMap::new();
+    for n in imports {
+        let (all, stubs) = seen.entry(n.module.as_str()).or_default();
+        all.insert(n.at.as_str());
+        if n.stub {
+            stubs.insert(n.at.as_str());
+        }
+    }
+    let mut out = HashSet::new();
+    for (module, (all, stubs)) in seen {
+        let keep = if !stubs.is_empty() {
+            stubs
+        } else if all.len() == 1 {
+            all
+        } else {
+            HashSet::new()
+        };
+        out.extend(keep.into_iter().map(|at| (module, at)));
+    }
+    out
+}
+
 /// Một module Python `a/b` có thể là những file này, theo thứ tự. `.pxd` và
 /// `.pyx` là của Cython: `cimport` lấy khai báo ở `.pxd`, và một module chỉ có
 /// bản `.pyx` vẫn là module sau khi biên dịch.
@@ -365,10 +417,32 @@ impl Resolver {
         import: &Import,
         base: &Resolved,
     ) -> Vec<String> {
-        let Resolved::Path(base) = base else { return Vec::new() };
+        self.import_targets(lang, importer, import, base).0
+    }
+
+    /// Như [`Self::submodules`], cộng thêm những module mà import này nạp nhưng
+    /// trong dự án **không có mã Python nào** cho nó: không có file, hoặc chỉ
+    /// có stub `.pyi`. Đó là ứng viên module mở rộng — xem [`NativeImport`]
+    /// và [`settle_natives`].
+    ///
+    /// Chỉ xét module nằm trong một package của chính dự án: `torch._C` là
+    /// module mở rộng của PyTorch, không phải `_C` của repo này.
+    ///
+    /// Gộp chung một hàm vì cả hai cùng dò từng tên trong `from pkg import a,
+    /// b`; dò hai lượt là gấp đôi phần tốn nhất.
+    pub fn import_targets(
+        &self,
+        lang: Lang,
+        importer: &str,
+        import: &Import,
+        base: &Resolved,
+    ) -> (Vec<String>, Vec<NativeImport>) {
         if lang != Lang::Python {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
+        let mut natives: Vec<NativeImport> = Vec::new();
+        self.native_candidate(importer, &import.spec, base, &mut natives);
+        let Resolved::Path(base) = base else { return (Vec::new(), natives) };
         // Module con nằm đâu thì tuỳ `base` là gì. Gói thường (`__init__.py`)
         // chỉ có một thư mục — `__path__` của nó — nên module con nằm ngay
         // trong đó, không phải ở project bên cạnh có gói cùng tên. Module file
@@ -379,14 +453,17 @@ impl Resolver {
             let dir = dir_of(base);
             Some(if dir.is_empty() { String::new() } else { format!("{dir}/") })
         } else if PY_MODULE_SUFFIXES.iter().any(|s| !s.contains('/') && file.ends_with(s)) {
-            return Vec::new();
+            return (Vec::new(), natives);
         } else {
             None
         };
         let mut out: Vec<String> = Vec::new();
         for name in &import.names {
             let sep = if import.spec.ends_with('.') { "" } else { "." };
-            if let Resolved::Path(found) = self.python(importer, &format!("{}{sep}{name}", import.spec))
+            let spec = format!("{}{sep}{name}", import.spec);
+            let found = self.python(importer, &spec);
+            self.native_candidate(importer, &spec, &found, &mut natives);
+            if let Resolved::Path(found) = found
                 && &found != base
                 && within.as_ref().is_none_or(|w| found.starts_with(w.as_str()))
                 && !out.contains(&found)
@@ -394,7 +471,47 @@ impl Resolver {
                 out.push(found);
             }
         }
-        out
+        (out, natives)
+    }
+
+    /// Module `spec` phân giải ra `found` có thể là module mở rộng không: chỉ
+    /// có stub, không tìm thấy, hoặc nằm trong một package của dự án mà
+    /// package đó không có file nào cho nó.
+    fn native_candidate(&self, importer: &str, spec: &str, found: &Resolved, out: &mut Vec<NativeImport>) {
+        let (at, stub) = match found {
+            Resolved::Path(p) if p.ends_with(".pyi") => {
+                let at = p.strip_suffix("/__init__.pyi").or_else(|| p.strip_suffix(".pyi"));
+                (at.map(str::to_string), true)
+            }
+            Resolved::Missing => match spec.strip_prefix('.') {
+                Some(rest) => (relative_stem(importer, rest), false),
+                None => (None, false),
+            },
+            Resolved::Package(top) if spec.contains('.') && !spec.starts_with('.') => {
+                (self.absolute_stem(importer, top, spec), false)
+            }
+            _ => (None, false),
+        };
+        let module = spec.rsplit('.').next().unwrap_or_default();
+        if let Some(at) = at
+            && !module.is_empty()
+        {
+            out.push(NativeImport { module: module.to_string(), shown: spec.to_string(), at, stub });
+        }
+    }
+
+    /// Chỗ module tuyệt đối `spec` sẽ nằm nếu nó là file, khi gói cấp cao nhất
+    /// `top` là của dự án: dưới gốc gần file gọi nhất có gói đó. `None` khi
+    /// `top` là gói bên ngoài — `torch._C` không bao giờ là module của repo này.
+    fn absolute_stem(&self, importer: &str, top: &str, spec: &str) -> Option<String> {
+        let roots = self.py_roots.get_or_init(|| find_py_roots(&self.root));
+        let bases = roots.get(top)?;
+        let base = bases
+            .iter()
+            .filter(|(project, _)| within(project, importer))
+            .max_by_key(|(project, _)| project.len())
+            .or_else(|| bases.first())?;
+        Some(format!("{}{}", base.1, spec.replace('.', "/")))
     }
 
     /// Module `path` dưới các thư mục gốc `bases`, theo thứ tự.
@@ -412,20 +529,7 @@ impl Resolver {
     }
 
     fn python_relative(&self, importer: &str, rest: &str) -> Resolved {
-        let extra_dots = rest.len() - rest.trim_start_matches('.').len();
-        let module = rest.trim_start_matches('.');
-
-        let mut base: Vec<&str> = dir_of(importer).split('/').filter(|s| !s.is_empty()).collect();
-        for _ in 0..extra_dots {
-            if base.pop().is_none() {
-                return Resolved::Missing;
-            }
-        }
-        let mut prefix = base.join("/");
-        if !module.is_empty() {
-            let tail = module.replace('.', "/");
-            prefix = if prefix.is_empty() { tail } else { format!("{prefix}/{tail}") };
-        }
+        let Some(prefix) = relative_stem(importer, rest) else { return Resolved::Missing };
         if !self.may_hold_module(&prefix) {
             return Resolved::Missing;
         }
@@ -1050,6 +1154,23 @@ fn collect_dirs_with(root: &Path, prefix: &str, depth: usize, names: &[&str], ou
         let next = if prefix.is_empty() { child } else { format!("{prefix}/{child}") };
         collect_dirs_with(root, &next, depth + 1, names, out);
     }
+}
+
+/// Đường dẫn không đuôi mà import tương đối `from .<rest>` trỏ tới, tính từ
+/// file gọi. `None` khi số dấu chấm đi lên quá gốc repo.
+fn relative_stem(importer: &str, rest: &str) -> Option<String> {
+    let extra_dots = rest.len() - rest.trim_start_matches('.').len();
+    let module = rest.trim_start_matches('.');
+    let mut base: Vec<&str> = dir_of(importer).split('/').filter(|s| !s.is_empty()).collect();
+    for _ in 0..extra_dots {
+        base.pop()?;
+    }
+    let mut prefix = base.join("/");
+    if !module.is_empty() {
+        let tail = module.replace('.', "/");
+        prefix = if prefix.is_empty() { tail } else { format!("{prefix}/{tail}") };
+    }
+    Some(prefix)
 }
 
 /// Tên cấp cao nhất → `(package, thư mục gốc)` có tên đó, theo thứ tự

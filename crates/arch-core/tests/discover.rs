@@ -318,3 +318,85 @@ fn selftest_khong_duoc_chon_lam_goc() {
     let repo = Repo::new("selftest", &refs);
     assert!(repo.names().contains(&"Core".to_string()), "{:?}", repo.globs());
 }
+
+/// vllm: gốc mã nguồn là `vllm/`, còn kernel C++ nằm ở `csrc/` bên cạnh. Python
+/// gọi chúng qua `torch.ops._C.x`, không qua import nào. Bộ khám phá chỉ chia
+/// gốc mã nguồn thì cả tầng kernel nằm ngoài sơ đồ.
+///
+/// Thư mục ở đầu kia của một cạnh liên ngôn ngữ được đưa vào. `tests/` cũng gọi
+/// `torch.ops._C` nhưng không vào: test không nói gì về kiến trúc.
+#[test]
+fn thu_muc_native_o_dau_kia_cua_canh_lien_ngon_ngu_vao_so_do() {
+    let mut files = vec![
+        "pyproject.toml|[project]\nname = \"vllm\"".to_string(),
+        "vllm/__init__.py|".to_string(),
+        "vllm/_custom_ops.py|import torch\n\ndef rms_norm(x):\n    torch.ops._C.rms_norm(x)".to_string(),
+        "csrc/torch_bindings.cpp|STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {\n  ops.def(\"rms_norm(Tensor x) -> ()\");\n}"
+            .to_string(),
+        "csrc/attention/attn.cu|int attn(int x) { return x; }".to_string(),
+        "tests/test_ops.py|import torch\ntorch.ops._C.rms_norm(x)".to_string(),
+        "benchmarks/bench_ops.py|import torch\ntorch.ops._C.rms_norm(x)".to_string(),
+    ];
+    for d in ["engine", "worker", "entrypoints"] {
+        for i in 0..3 {
+            files.push(format!("vllm/{d}/m{i}.py|from vllm import _custom_ops"));
+        }
+    }
+    let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+    let repo = Repo::new("vllm-csrc", &refs);
+    let globs = repo.globs();
+    assert!(globs.contains(&("Csrc".to_string(), "csrc/**".to_string())), "{globs:?}");
+    assert!(!globs.iter().any(|(_, g)| g.starts_with("tests") || g.starts_with("benchmarks")), "{globs:?}");
+    let d = discover(&repo.0, &[]);
+    assert!(d.edges.contains(&("Vllm".to_string(), "Csrc".to_string())), "{:?}", d.edges);
+    assert!(repo.self_check().is_empty(), "{:?}", repo.self_check());
+}
+
+/// pydantic-core: chiều ngược lại. Gốc mã nguồn là Rust ở `src/`, còn gói
+/// Python ở `python/pydantic_core/` import module mở rộng mà Rust định nghĩa.
+/// `python/` chỉ bọc một gói, nên component lấy tên gói.
+#[test]
+fn goi_python_goi_vao_rust_vao_so_do_voi_ten_cua_goi() {
+    let mut files = vec![
+        "Cargo.toml|[package]\nname = \"core\"".to_string(),
+        "pyproject.toml|[project]\nname = \"pkg\"".to_string(),
+        "src/lib.rs|use pyo3::prelude::*;\n\n#[pymodule]\nmod _core {}".to_string(),
+        "python/pkg/__init__.py|from ._core import Validator".to_string(),
+        "python/pkg/_core.pyi|class Validator: ...".to_string(),
+        "python/pkg/schema.py|from typing import Any".to_string(),
+        "tests/test_core.py|from pkg._core import Validator".to_string(),
+        // Test nằm cạnh gói không làm hỏng việc đi xuống `python/pkg/`.
+        "python/tests/test_schema.py|from pkg.schema import Any".to_string(),
+    ];
+    for d in ["input", "validators", "serializers"] {
+        for i in 0..3 {
+            files.push(format!("src/{d}/m{i}.rs|pub fn f{i}() {{}}"));
+        }
+    }
+    let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+    let repo = Repo::new("pyo3-python", &refs);
+    let globs = repo.globs();
+    assert!(globs.contains(&("Pkg".to_string(), "python/pkg/**".to_string())), "{globs:?}");
+    let d = discover(&repo.0, &[]);
+    assert!(d.edges.iter().any(|(f, _)| f == "Pkg"), "{:?}", d.edges);
+    assert!(repo.self_check().is_empty(), "{:?}", repo.self_check());
+}
+
+/// Thư mục bên cạnh mà không có cạnh liên ngôn ngữ nào nối vào thì vẫn ở ngoài,
+/// như trước: curl có `src/` (công cụ) cạnh `lib/` (thư viện) mà không nối
+/// với nhau qua ranh giới ngôn ngữ nào.
+#[test]
+fn thu_muc_ben_canh_khong_co_canh_lien_ngon_ngu_thi_van_o_ngoai() {
+    let mut files = vec!["pyproject.toml|[project]\nname = \"app\"".to_string()];
+    for d in ["web", "core", "store"] {
+        for i in 0..3 {
+            files.push(format!("app/{d}/m{i}.py|import os"));
+        }
+    }
+    files.push("native/x.cpp|int f(int x) { return x; }".to_string());
+    files.push("scripts/tool.py|import app.web.m0".to_string());
+    let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+    let repo = Repo::new("no-partner", &refs);
+    let globs = repo.globs();
+    assert!(!globs.iter().any(|(_, g)| g.starts_with("native") || g.starts_with("scripts")), "{globs:?}");
+}

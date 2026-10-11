@@ -12,6 +12,11 @@ và bộ đo này từng có bốn phép kiểm như vậy.
 một dòng, thêm một import giả) phải làm nó thoát 1. `--repo` phải có file
 Python, vì phần đối chiếu Python không cần công cụ nào ngoài chính Python.
 
+Kiểu `crossing` chạy trên `--crossing-repo` (mặc định pydantic-core): xoá cạnh
+liên ngôn ngữ khỏi cả luật `init` sinh ra lẫn vi phạm `check` báo, tức là phần
+ghép hỏng ở cả hai phía cùng lúc. Phép kiểm đồng nhất không thấy gì; chỉ danh
+sách cạnh bắt buộc trong `consistency.CROSSINGS` bắt được.
+
 `--rust-repo ripgrep` phá thêm ba kiểu như vậy ở file Rust, đối chiếu bằng
 `oracle.py --require syn` — tức là tải crate, nên chỉ CI bật. Phần Rust miễn
 trừ import nằm trong thân macro; kiểu `rust-extra` đặt import giả ở ngoài macro
@@ -21,6 +26,7 @@ file) đỏ ở đây. `--rust-repo` phải có import Rust đầu tiên nằm n
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -39,6 +45,9 @@ MODES = {
     "hash": "hash đổi sau khi luật đổi",
     "diff": "diff: thêm chú thích",
 }
+
+# kiểu phá chạy trên `--crossing-repo` → phép kiểm phải bắt được nó
+CROSSING_MODES = {"crossing": "thiếu cạnh liên ngôn ngữ"}
 
 # kiểu phá đầu ra `scan --json` → dòng `oracle.py` phải in ra
 ORACLE_MODES = {
@@ -68,12 +77,39 @@ def sabotage_scan(rep: dict, mode: str):
             return
 
 
+def crossing_edges() -> set:
+    sys.path.insert(0, str(HERE))
+    import consistency
+    return {edge for edges in consistency.CROSSINGS.values() for edge in edges}
+
+
+def drop_crossings_from_law(args: list[str]):
+    """Luật `init` sinh ra mất mọi cạnh liên ngôn ngữ bắt buộc."""
+    root = Path(args[args.index("--root") + 1]) if "--root" in args else Path.cwd()
+    law = root / ".arch/system.arch"
+    if not law.exists():
+        return
+    keep = [
+        line for line in law.read_text().splitlines(keepends=True)
+        if not any(re.match(rf"allow\s+{a}\s*->\s*{b}\b", line) for a, b in crossing_edges())
+    ]
+    law.write_text("".join(keep))
+
+
 def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
     p = subprocess.run([real, *args], capture_output=True, text=True)
     out = p.stdout
+    if mode == "crossing" and args[:1] == ["init"] and p.returncode == 0:
+        drop_crossings_from_law(args)
     if args[:1] == ["check"] and "--json" in args and p.stdout.startswith("{"):
         rep = json.loads(out)
-        if mode == "violation":
+        if mode == "crossing":
+            edges = crossing_edges()
+            rep["violations"] = [
+                v for v in rep["violations"]
+                if not (v.get("via") == "ffi" and (v["from"], v["to"]) in edges)
+            ]
+        elif mode == "violation":
             rep["violations"].append(
                 {"from": "A", "to": "B", "file": "x.rs", "line": 1, "via": "import"}
             )
@@ -108,6 +144,8 @@ def main():
     ap.add_argument("--archctl", default=str(ROOT / "target/release/archctl"))
     ap.add_argument("--repo", default="flask")
     ap.add_argument("--rust-repo", help="phá cả phần Rust của oracle.py trên repo này (tải crate `syn`)")
+    ap.add_argument("--crossing-repo", default="pydantic-core",
+                    help="repo có cạnh liên ngôn ngữ bắt buộc, cho kiểu phá `crossing`")
     args = ap.parse_args()
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -120,6 +158,8 @@ def main():
 
         bad = 0
         runs = [("bench.py", args.repo, m, e) for m, e in [("", None), *MODES.items()]]
+        runs += [("bench.py", args.crossing_repo, m, e)
+                 for m, e in [("", None), *CROSSING_MODES.items()]]
         runs += [("oracle.py", args.repo, m, e) for m, e in [("", None), *ORACLE_MODES.items()]]
         if args.rust_repo:
             runs += [("oracle.py", args.rust_repo, m, e)

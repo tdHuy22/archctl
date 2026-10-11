@@ -34,6 +34,7 @@ Mất khoảng 190ms trên 2000 file.
 | --- | --- |
 | Gốc mã nguồn | Thư mục mà chia theo con của nó thì lộ ra **nhiều cấu trúc nhất** — xem dưới |
 | Component | Mỗi thư mục con ngay dưới gốc. File nằm thẳng trong gốc gom thành một component riêng |
+| Thư mục bên cạnh | Thư mục ngoài gốc mà một cạnh liên ngôn ngữ nối vào bên trong — xem dưới |
 | Tên | `create-order` → `CreateOrder`. Trùng thì đánh số |
 | Quan hệ | Import **thật** trong mã, chỉ giữa hai component. Thư viện ngoài bị bỏ qua |
 | Giới hạn | Tối đa 24 component; phần dư liệt kê trong chú thích cuối file |
@@ -69,6 +70,31 @@ Hai thứ không tính **khi chọn bố cục** — nhưng vẫn được kiể
   file thì gốc rơi vào `zstd-safe/zstd-sys/zstd/` và toàn bộ mã Rust nằm
   ngoài sơ đồ. Manifest nói thẳng đây là dự án gì, nên không phải đoán. Repo
   không có manifest nào, như redis và curl, thì bỏ qua bước này.
+
+### Mã native bên cạnh gốc
+
+vllm chọn gốc `vllm/`, còn kernel C++ và CUDA nằm ở `csrc/` bên cạnh. Python
+gọi chúng bằng `torch.ops._C.x`, không có câu import nào. Chia theo gốc thì
+cả tầng kernel nằm ngoài sơ đồ. pydantic-core thì ngược lại: gốc là Rust ở
+`src/`, còn gói Python ở `python/pydantic_core/` import module mà Rust định
+nghĩa.
+
+Nên một thư mục bên cạnh gốc được đưa vào khi có một
+[cạnh liên ngôn ngữ](check.md#cạnh-liên-ngôn-ngữ) nối nó với một component bên
+trong. Nó cạnh tranh suất trong 24 component theo số file như mọi thư mục khác.
+Thư mục chỉ bọc đúng một thư mục con thì đi xuống một cấp, để
+`python/pydantic_core/` thành `PydanticCore` chứ không thành `Python`.
+
+Đổi lại, phần mã mới vào sơ đồ cũng được kiểm. Với vllm, `#include
+"cutlass/…"` trong `csrc/` thành 227 cảnh báo chưa phân giải mới: CUTLASS do
+CMake tải lúc build, không có trong repo. Cảnh báo đó đúng, và báo cáo gom nó
+theo tên header.
+
+Đây không phải cách "gộp anh em của gốc" đã bị loại. Gộp mọi thư mục bên cạnh
+sẽ kéo `tests/` vào sơ đồ ở mọi repo. Ở đây chỉ thư mục có cạnh liên ngôn ngữ
+được tính, và test, ví dụ, tài liệu, vendor không bao giờ được tính, dù
+`tests/` của vllm cũng gọi `torch.ops._C`. Import thường cũng không tính: nếu
+hai thư mục cùng ngôn ngữ quan trọng thì gốc đã bao cả hai.
 
 ### Không chia nhỏ hơn ranh giới đã có cưỡng chế
 

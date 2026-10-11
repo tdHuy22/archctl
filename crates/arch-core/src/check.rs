@@ -10,7 +10,8 @@
 
 use crate::glob;
 use crate::model::*;
-use crate::resolve::{Resolved, Resolver};
+use crate::resolve::{NativeImport, Resolved, Resolver};
+use crate::scan::foreign::Crossing;
 use crate::scan::{self, Lang};
 use std::path::Path;
 
@@ -249,7 +250,10 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
     let mut symbol_scanned = 0usize;
     // Hai đầu của một cạnh liên ngôn ngữ, ghép lại sau khi quét xong: một bên
     // khai báo `extern "C" { fn x }`, bên kia định nghĩa `x`.
-    let mut ffi_calls: Vec<(String, String, crate::scan::SymbolHit)> = Vec::new();
+    let mut ffi_calls: Vec<(String, String, Crossing)> = Vec::new();
+    // Import có thể đang nạp module mở rộng; chọn cái nào được ghép sau khi
+    // thấy hết, vì cùng một tên có thể được nạp từ nhiều package.
+    let mut natives: Vec<(String, String, usize, NativeImport)> = Vec::new();
     let mut ffi_provides: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
     fn as_refs(v: &[String]) -> Vec<&str> {
@@ -286,7 +290,11 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
         let src = scan::source_view(path, &src);
         let scan = lang.scan_all(&src, &needle_set, &as_refs(&table_needles));
         for import in &scan.imports {
-            inspect(&resolver, doc, lang, path, from, import, &mut report);
+            // Module không có mã Python nào trong repo có thể là module mở
+            // rộng viết bằng Rust hay C++: một đầu của cạnh liên ngôn ngữ.
+            for native in inspect(&resolver, doc, lang, path, from, import, &mut report) {
+                natives.push((from.clone(), path.clone(), import.line, native));
+            }
         }
         inspect_hits(doc, &watched, path, from, &scan.symbols, Via::Symbol, &mut report);
         inspect_hits(doc, &tables, path, from, &scan.tables, Via::Table, &mut report);
@@ -319,7 +327,18 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
         }
     }
 
-    judge_ffi(doc, &ffi_calls, &ffi_provides, &mut report);
+    let settled = crate::resolve::settle_natives(natives.iter().map(|(_, _, _, n)| n));
+    for (from, path, line, n) in &natives {
+        if settled.contains(&(n.module.as_str(), n.at.as_str())) {
+            let crossing =
+                Crossing { symbol: format!("py:{}", n.module), shown: n.shown.clone(), line: *line };
+            ffi_calls.push((from.clone(), path.clone(), crossing));
+        }
+    }
+    let paired = judge_ffi(doc, &ffi_calls, &ffi_provides, &mut report);
+    // Import của module mở rộng không ra file nào, nhưng đã tìm thấy nơi định
+    // nghĩa nó ở phía native: nó đã được phân giải.
+    report.unresolved.retain(|u| !paired.contains(&(u.file.as_str(), u.line, u.spec.as_str())));
     judge_expectations(&expectations, &sightings, symbol_scanned, &mut report);
 
     counts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
@@ -358,21 +377,24 @@ fn unproven(
     crate::verify::stale(&names, &receipts, &crate::arch_hash(doc), changed)
 }
 
-/// Ghép hai đầu của một lời gọi qua ranh giới ngôn ngữ.
+/// Ghép hai đầu của một lời gọi qua ranh giới ngôn ngữ. Trả về những lời gọi
+/// đã ghép được, dạng `(file, dòng, cách viết)`.
 ///
 /// Tên nào không ghép được thì im lặng bỏ qua: đó là hàm của thư viện hệ
 /// thống, hoặc — khi chỉ quét một phần repo — phía cung cấp nằm ngoài tập
 /// file đang xét.
-fn judge_ffi(
+fn judge_ffi<'a>(
     doc: &Document,
-    calls: &[(String, String, crate::scan::SymbolHit)],
+    calls: &'a [(String, String, Crossing)],
     provides: &std::collections::BTreeMap<String, String>,
     report: &mut Report,
-) {
+) -> std::collections::HashSet<(&'a str, usize, &'a str)> {
+    let mut paired = std::collections::HashSet::new();
     for (from, file, call) in calls {
-        let Some(to) = provides.get(&call.symbol).filter(|owner| !owner.is_empty()) else {
+        let Some(to) = scan::foreign::provider(provides, &call.symbol) else {
             continue;
         };
+        paired.insert((file.as_str(), call.line, call.shown.as_str()));
         if to == from {
             continue;
         }
@@ -382,7 +404,7 @@ fn judge_ffi(
             to: to.clone(),
             file: file.clone(),
             line: call.line,
-            spec: call.symbol.clone(),
+            spec: call.shown.clone(),
             via: Via::Ffi,
             count: 1,
             reason,
@@ -391,6 +413,7 @@ fn judge_ffi(
             hint: hint_for(doc, from, to, reason, Via::Ffi),
         });
     }
+    paired
 }
 
 /// Một lần gặp một cái tên trong mã.
@@ -525,6 +548,10 @@ fn judge_expectations(
     report.vacuous.dedup();
 }
 
+///
+/// Trả về những module mà import này nạp nhưng repo không có mã Python nào
+/// cho chúng — ứng viên module mở rộng, xem
+/// [`Resolver::import_targets`].
 fn inspect(
     resolver: &Resolver,
     doc: &Document,
@@ -533,7 +560,9 @@ fn inspect(
     from: &str,
     import: &scan::Import,
     report: &mut Report,
-) {
+) -> Vec<NativeImport> {
+    let base = resolver.resolve(lang, path, import);
+    let (submodules, natives) = resolver.import_targets(lang, path, import, &base);
     let mut unresolved = |reason| {
         report.unresolved.push(Unresolved {
             file: path.to_string(),
@@ -544,7 +573,6 @@ fn inspect(
         });
     };
 
-    let base = resolver.resolve(lang, path, import);
     // Mỗi component đích báo một lần cho một câu import, kể cả khi module và
     // module con của nó cùng nằm ở đó.
     let mut targets: Vec<String> = Vec::new();
@@ -554,13 +582,19 @@ fn inspect(
         // khai báo mọi gói npm hay mọi header hệ thống sẽ khiến file luật dài
         // vô ích.
         Resolved::Package(pkg) => targets.extend(external_named(doc, pkg)),
-        Resolved::Alias => return unresolved(UnresolvedReason::Alias),
-        Resolved::Missing => return unresolved(UnresolvedReason::Missing),
+        Resolved::Alias => {
+            unresolved(UnresolvedReason::Alias);
+            return natives;
+        }
+        Resolved::Missing => {
+            unresolved(UnresolvedReason::Missing);
+            return natives;
+        }
         // Trỏ vào `mod` viết lồng trong file: không có file đích, không có
         // cạnh, và không có gì để báo.
-        Resolved::Internal => return,
+        Resolved::Internal => return natives,
     }
-    for sub in resolver.submodules(lang, path, import, &base) {
+    for sub in submodules {
         if let Some(name) = owners_of(doc, &sub).first()
             && !targets.contains(name)
         {
@@ -588,6 +622,7 @@ fn inspect(
             });
         }
     }
+    natives
 }
 
 /// Mỗi cặp (file, ký hiệu) báo một lần, ở lần gặp đầu tiên, kèm số lần gặp.

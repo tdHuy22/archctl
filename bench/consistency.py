@@ -32,6 +32,20 @@ ALWAYS_IGNORE = {
 }
 OUTPUT_DIRS = {"dist", "build", "out", "coverage"}
 
+# Cạnh liên ngôn ngữ mà luật sinh ra phải có, mỗi họ ghép một cạnh. Đồng nhất
+# giữa `init` và `check` không đủ: phần ghép hỏng ở cả hai phía thì vẫn ra 0
+# bất nhất, và cạnh biến mất trong im lặng.
+CROSSINGS = {
+    # cgo: `C.bpf_*` của Go ở gốc sang hàm C trong submodule `libbpf/`.
+    "libbpfgo": [("Core", "Libbpf")],
+    # PyO3: `from ._pydantic_core import` ↔ `#[pymodule] mod _pydantic_core`.
+    "pydantic-core": [("PydanticCore", "Core")],
+    # pybind11: `from matplotlib import _path` ↔ `PYBIND11_MODULE(_path, m)`.
+    "matplotlib": [("Lib", "Src")],
+    # Op PyTorch: `torch.ops._C.x` ↔ `STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops)`.
+    "vllm": [("Vllm", "Csrc")],
+}
+
 
 def _run(archctl, args, timeout=300):
     t = time.perf_counter()
@@ -115,11 +129,41 @@ def analyse(archctl: str, name: str, src: Path, work: Path, expected: int,
     for w in rep.get("lawWarnings", [])[:6]:
         out["problems"].append(f"luật sinh ra đã có cảnh báo: dòng {w['line']}: {w['msg']}")
 
+    crossings(archctl, name, law, root, out)
+
     out["check_ms"] = round(_median_ms(archctl, ["check", *root], rounds))
     one = pick_source(work)
     if one:
         out["one_file_ms"] = round(_median_ms(archctl, ["check", *root, str(one)], rounds))
     return out
+
+
+def crossings(archctl: str, name: str, law: Path, root: list, out: dict):
+    """Cạnh liên ngôn ngữ phải có ở cả hai phía: `init` sinh ra `allow` cho
+    nó, và đổi `allow` đó thành `deny` thì `check` phải báo vi phạm qua ranh
+    giới ngôn ngữ. `deny` chứ không xoá: component chỉ có đúng một `allow` mà
+    mất nó thì ra khỏi diện kiểm, và `check` im lặng vì lý do khác.
+    """
+    want = CROSSINGS.get(name, [])
+    if not want:
+        return
+    text = law.read_text()
+    edges = set(re.findall(r"^allow\s+(\w+)\s*->\s*(\w+)", text, re.M))
+    for a, b in want:
+        if (a, b) not in edges:
+            out["problems"].append(f"thiếu cạnh liên ngôn ngữ: luật sinh ra không có {a} -> {b}")
+    pattern = "|".join(rf"{a}\s*->\s*{b}\b" for a, b in want)
+    law.write_text(re.sub(rf"^allow(\s+(?:{pattern}))", r"deny\1", text, flags=re.M))
+    try:
+        p, _ = _run(archctl, ["check", "--json", *root])
+        seen = {(v["from"], v["to"]) for v in json.loads(p.stdout)["violations"] if v.get("via") == "ffi"}
+    except (json.JSONDecodeError, KeyError):
+        seen = set()
+    finally:
+        law.write_text(text)
+    for a, b in want:
+        if (a, b) not in seen:
+            out["problems"].append(f"thiếu cạnh liên ngôn ngữ: đổi allow {a} -> {b} thành deny mà check không báo")
 
 
 def pick_source(work: Path):

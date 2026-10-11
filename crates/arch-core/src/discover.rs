@@ -10,9 +10,9 @@
 //! tới khi người đọc lại và nâng lên.
 
 use crate::check;
-use crate::resolve::{Resolved, Resolver};
+use crate::resolve::{NativeImport, Resolved, Resolver, settle_natives};
 use crate::scan::Lang;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 /// Thư mục không nói gì về kiến trúc của sản phẩm. Bỏ khi **chọn bố cục**;
@@ -68,67 +68,277 @@ pub fn discover(root: &Path, ignores: &[String]) -> Discovery {
         format!("{}/", out.source_root)
     };
 
+    // Đọc mọi file có thể vào sơ đồ một lần: trong gốc mã nguồn, và ở các thư
+    // mục bên cạnh nó.
+    let scans = scan_files(root, &files, |f| {
+        group_of(f, &prefix).is_some() || beside(f, &out.source_root).is_some()
+    });
+
     // Mỗi thư mục con ngay dưới gốc mã nguồn là một component ứng viên. File
-    // nằm thẳng trong gốc gom vào một component riêng.
-    let mut ranked: Vec<(String, usize)> = groups_under(&files, &prefix).into_iter().collect();
+    // nằm thẳng trong gốc gom vào một component riêng. Thư mục bên cạnh gốc
+    // cũng vậy, nếu một cạnh liên ngôn ngữ nối nó với bên trong.
+    let mut ranked: Vec<(Group, usize)> =
+        groups_under(&files, &prefix).into_iter().map(|(dir, n)| (Group::Inside(dir), n)).collect();
+    for dir in partners(&scans, &prefix, &out.source_root) {
+        let dir = descend(&files, dir);
+        let n = files.iter().filter(|f| f.starts_with(&format!("{dir}/"))).count();
+        ranked.push((Group::Beside(dir), n));
+    }
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let (kept, dropped) = ranked.split_at(ranked.len().min(MAX_COMPONENTS));
-    out.skipped = dropped.to_vec();
+    out.skipped = dropped.iter().map(|(g, n)| (g.path(&prefix), *n)).collect();
 
     let mut names: Vec<String> = Vec::new();
-    let mut owners: BTreeMap<String, String> = BTreeMap::new();
-    for (dir, _) in kept {
-        let base = if dir == "." { root_group_name(&prefix) } else { pascal_case(dir) };
+    let mut owners = Owners { prefix: &prefix, inside: BTreeMap::new(), beside: Vec::new() };
+    for (group, _) in kept {
+        let (base, glob) = match group {
+            Group::Inside(dir) if dir == "." => (root_group_name(&prefix), root_glob(&files, &prefix)),
+            Group::Inside(dir) => (pascal_case(dir), format!("{prefix}{dir}/**")),
+            Group::Beside(dir) => {
+                (pascal_case(dir.rsplit('/').next().unwrap_or(dir)), format!("{dir}/**"))
+            }
+        };
         let name = unique_name(&base, &names);
         names.push(name.clone());
-        let glob = if dir == "." {
-            root_glob(&files, &prefix)
-        } else {
-            format!("{prefix}{dir}/**")
-        };
-        owners.insert(dir.clone(), name.clone());
+        match group {
+            Group::Inside(dir) => {
+                owners.inside.insert(dir.clone(), name.clone());
+            }
+            Group::Beside(dir) => owners.beside.push((format!("{dir}/"), name.clone())),
+        }
         out.components.push((name, glob));
     }
     out.components.sort();
 
-    out.edges = observe_edges(root, &files, &prefix, &owners);
-    out.unmapped =
-        files.iter().filter(|f| group_of(f, &prefix).is_none_or(|g| !owners.contains_key(&g))).count();
+    out.edges = observe_edges(root, &scans, &owners);
+    out.unmapped = files.iter().filter(|f| owners.of_file(f).is_none()).count();
     out
+}
+
+/// Một component ứng viên: thư mục con của gốc mã nguồn (tương đối với gốc,
+/// `.` là file nằm thẳng trong gốc), hoặc thư mục bên cạnh gốc (tương đối với
+/// gốc repo).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Group {
+    Inside(String),
+    Beside(String),
+}
+
+impl Group {
+    /// Đường dẫn tính từ gốc repo, để in ra: nhóm trong gốc và thư mục bên
+    /// cạnh lẫn trong cùng một danh sách thì phải cùng một hệ quy chiếu.
+    fn path(&self, prefix: &str) -> String {
+        match self {
+            Group::Inside(d) if d == "." => format!("{prefix}*"),
+            Group::Inside(d) => format!("{prefix}{d}"),
+            Group::Beside(d) => d.clone(),
+        }
+    }
+}
+
+/// File nào thuộc component nào trong bản nháp.
+struct Owners<'a> {
+    prefix: &'a str,
+    /// Thư mục con của gốc mã nguồn → tên component.
+    inside: BTreeMap<String, String>,
+    /// Thư mục bên cạnh gốc, có `/` cuối → tên component.
+    beside: Vec<(String, String)>,
+}
+
+impl Owners<'_> {
+    fn of_file(&self, path: &str) -> Option<&String> {
+        group_of(path, self.prefix)
+            .and_then(|g| self.inside.get(&g))
+            .or_else(|| self.beside.iter().find(|(d, _)| path.starts_with(d.as_str())).map(|(_, n)| n))
+    }
+
+    /// Như [`Self::of_file`], nhưng đích có thể là cả một thư mục — xem
+    /// [`group_of_target`].
+    fn of_target(&self, root: &Path, target: &str) -> Option<&String> {
+        group_of_target(root, target, self.prefix).and_then(|g| self.inside.get(&g)).or_else(|| {
+            self.beside
+                .iter()
+                .find(|(d, _)| target.starts_with(d.as_str()) || target == d.trim_end_matches('/'))
+                .map(|(_, n)| n)
+        })
+    }
+}
+
+/// Những gì một file nói về phụ thuộc của nó, đã phân giải: đọc một lần, dùng
+/// cho cả việc chọn component lẫn việc dựng cạnh.
+struct Scanned {
+    file: String,
+    /// File hay thư mục mà import trỏ tới: module, và những tên trong `from
+    /// pkg import a` mà chính chúng là module con.
+    targets: Vec<String>,
+    /// Khoá ghép qua ranh giới ngôn ngữ — xem `scan/foreign.rs`.
+    calls: Vec<String>,
+    provides: Vec<String>,
+    /// Import có thể đang nạp module mở rộng; cái nào thành lời gọi thì tuỳ
+    /// những file khác — xem [`crate::resolve::settle_natives`].
+    natives: Vec<NativeImport>,
+}
+
+impl Scanned {
+    /// Lời gọi qua ranh giới ngôn ngữ, gồm cả module mở rộng được ghép theo
+    /// `settled`.
+    fn crossings<'a>(&'a self, settled: &'a HashSet<(&str, &str)>) -> impl Iterator<Item = String> + 'a {
+        let natives = self
+            .natives
+            .iter()
+            .filter(|n| settled.contains(&(n.module.as_str(), n.at.as_str())))
+            .map(|n| format!("py:{}", n.module));
+        self.calls.iter().cloned().chain(natives)
+    }
+}
+
+fn scan_files(root: &Path, files: &[String], wanted: impl Fn(&str) -> bool) -> Vec<Scanned> {
+    let resolver = Resolver::new(root);
+    let mut out = Vec::new();
+    for file in files {
+        let Some(lang) = Lang::for_path(file) else { continue };
+        if !wanted(file) {
+            continue;
+        }
+        let Ok(src) = std::fs::read_to_string(root.join(file)) else { continue };
+        if src.len() as u64 > crate::check::MAX_FILE_BYTES {
+            continue;
+        }
+        let src = crate::scan::source_view(file, &src);
+        let scan = lang.scan_all(&src, &Default::default(), &[]);
+        let mut s = Scanned {
+            file: file.clone(),
+            targets: Vec::new(),
+            calls: scan.foreign.calls.into_iter().map(|c| c.symbol).collect(),
+            provides: scan.foreign.provides.into_iter().map(|c| c.symbol).collect(),
+            natives: Vec::new(),
+        };
+        for import in scan.imports {
+            // Cùng các đích như `check` thấy.
+            let base = resolver.resolve(lang, file, &import);
+            let (targets, natives) = resolver.import_targets(lang, file, &import, &base);
+            s.targets.extend(targets);
+            if let Resolved::Path(target) = base {
+                s.targets.push(target);
+            }
+            s.natives.extend(natives);
+        }
+        out.push(s);
+    }
+    out
+}
+
+/// Thư mục bên cạnh gốc mã nguồn chứa `file`: phần đường dẫn chung với gốc,
+/// cộng một cấp. `src/` của pydantic-core thì `python/`; `vllm/` thì `csrc/`.
+///
+/// `None` khi file nằm trong gốc, nằm thẳng ở chỗ rẽ nhánh, hoặc thư mục đó là
+/// test, ví dụ, tài liệu hay vendor. Đó là lý do việc này không lặp lại cách
+/// "gộp anh em của gốc" đã bị loại: nó kéo `tests/` vào sơ đồ ở mọi repo.
+fn beside(file: &str, source_root: &str) -> Option<String> {
+    if source_root.is_empty() {
+        return None;
+    }
+    let root: Vec<&str> = source_root.split('/').collect();
+    let parts: Vec<&str> = file.split('/').collect();
+    let common = root.iter().zip(&parts).take_while(|(a, b)| a == b).count();
+    if common == root.len() || parts.len() <= common + 1 || ASIDE.contains(&parts[common]) {
+        return None;
+    }
+    Some(parts[..=common].join("/"))
+}
+
+/// Thư mục bên cạnh gốc mã nguồn mà một cạnh liên ngôn ngữ nối với bên trong:
+/// Python trong `vllm/` gọi op của `csrc/`, gói Python trong `python/` import
+/// module mà Rust trong `src/` định nghĩa.
+///
+/// Chỉ cạnh liên ngôn ngữ, không phải import thường. Import thường nối hai
+/// thư mục cùng ngôn ngữ, và nếu chúng quan trọng thì gốc mã nguồn đã bao
+/// cả hai. Cạnh liên ngôn ngữ thì không có cách nào khác để thấy: không câu
+/// import nào nói rằng `torch.ops._C.x` chạy mã trong `csrc/`.
+fn partners(scans: &[Scanned], prefix: &str, source_root: &str) -> BTreeSet<String> {
+    // `true` là nhóm trong gốc, `false` là thư mục bên cạnh.
+    let unit = |file: &str| match group_of(file, prefix) {
+        Some(group) => Some((true, group)),
+        None => beside(file, source_root).map(|dir| (false, dir)),
+    };
+    // Hai đơn vị cùng cung cấp một tên thì không biết chọn bên nào, như `check`.
+    let mut provides: BTreeMap<&str, Option<(bool, String)>> = BTreeMap::new();
+    for s in scans {
+        let Some(here) = unit(&s.file) else { continue };
+        for key in &s.provides {
+            provides
+                .entry(key)
+                .and_modify(|owner| {
+                    if owner.as_ref() != Some(&here) {
+                        *owner = None;
+                    }
+                })
+                .or_insert_with(|| Some(here.clone()));
+        }
+    }
+    let settled = settle_natives(scans.iter().flat_map(|s| &s.natives));
+    let mut out = BTreeSet::new();
+    for s in scans {
+        let Some(caller) = unit(&s.file) else { continue };
+        for key in s.crossings(&settled) {
+            let Some(Some(provider)) = provides.get(key.as_str()) else { continue };
+            match (&caller, provider) {
+                ((true, _), (false, dir)) | ((false, dir), (true, _)) => {
+                    out.insert(dir.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Đi xuống khi thư mục chỉ bọc đúng một thư mục con chứa mã của nó:
+/// `python/` của pydantic-core chỉ có `pydantic_core/`, và tên đó mới nói
+/// lên component là gì. Thư mục test đứng cạnh không tính — `python/tests/`
+/// không làm `python/` thành một component tên `Python`.
+fn descend(files: &[String], mut dir: String) -> String {
+    loop {
+        let inner = format!("{dir}/");
+        let mut children = BTreeSet::new();
+        for f in files.iter().filter_map(|f| f.strip_prefix(inner.as_str())) {
+            match f.split_once('/') {
+                Some((child, _)) if ASIDE.contains(&child) => {}
+                Some((child, _)) => {
+                    children.insert(child);
+                }
+                None => return dir, // có file nằm thẳng trong đó
+            }
+        }
+        match children.into_iter().collect::<Vec<_>>().as_slice() {
+            [only] => dir = format!("{dir}/{only}"),
+            _ => return dir,
+        }
+    }
 }
 
 /// Quan hệ phụ thuộc thật trong mã. Chỉ quan hệ giữa hai component, bỏ qua
 /// thư viện bên ngoài — liệt kê mọi gói npm hay header hệ thống sẽ làm bản
 /// nháp dài tới mức không ai đọc.
-fn observe_edges(
-    root: &Path,
-    files: &[String],
-    prefix: &str,
-    owners: &BTreeMap<String, String>,
-) -> Vec<(String, String)> {
-    let resolver = Resolver::new(root);
+fn observe_edges(root: &Path, scans: &[Scanned], owners: &Owners) -> Vec<(String, String)> {
     let mut edges: Vec<(String, String)> = Vec::new();
     // Cạnh liên ngôn ngữ, ghép theo tên đúng như `check` làm. Thiếu phần này
     // thì lời gọi cgo của libbpfgo sang thư mục C khác là cạnh mà bộ kiểm thấy
     // còn luật sinh ra không có, và luật tự vi phạm chính nó.
     let mut ffi_calls: Vec<(&String, String)> = Vec::new();
     let mut ffi_provides: BTreeMap<String, String> = BTreeMap::new();
+    // Chọn module mở rộng trên đúng tập file mà `check` thấy — file thuộc một
+    // component — không thì hai bên ghép khác nhau và luật tự vi phạm.
+    let owned: Vec<&Scanned> = scans.iter().filter(|s| owners.of_file(&s.file).is_some()).collect();
+    let settled = settle_natives(owned.iter().flat_map(|s| &s.natives));
 
-    for file in files {
-        let Some(lang) = Lang::for_path(file) else { continue };
-        let Some(from) = group_of(file, prefix).and_then(|g| owners.get(&g)) else { continue };
-        let Ok(src) = std::fs::read_to_string(root.join(file)) else { continue };
-        if src.len() as u64 > crate::check::MAX_FILE_BYTES {
-            continue;
-        }
-
-        let src = crate::scan::source_view(file, &src);
-        let scan = lang.scan_all(&src, &Default::default(), &[]);
-        ffi_calls.extend(scan.foreign.calls.into_iter().map(|c| (from, c.symbol)));
-        for provided in scan.foreign.provides {
+    for s in owned {
+        let Some(from) = owners.of_file(&s.file) else { continue };
+        ffi_calls.extend(s.crossings(&settled).map(|key| (from, key)));
+        for key in &s.provides {
             // Hai component cùng cung cấp một tên thì bỏ cả hai, như `check`.
             ffi_provides
-                .entry(provided.symbol)
+                .entry(key.clone())
                 .and_modify(|owner| {
                     if owner != from {
                         owner.clear();
@@ -136,28 +346,16 @@ fn observe_edges(
                 })
                 .or_insert_with(|| from.clone());
         }
-
-        for import in scan.imports {
-            // Cùng các đích như `check` thấy: module, và những tên trong
-            // `from pkg import a` mà chính chúng là module con.
-            let base = resolver.resolve(lang, file, &import);
-            let mut targets = resolver.submodules(lang, file, &import, &base);
-            if let Resolved::Path(target) = base {
-                targets.push(target);
-            }
-            for target in targets {
-                let Some(to) = group_of_target(root, &target, prefix).and_then(|g| owners.get(&g))
-                else {
-                    continue;
-                };
-                if to != from {
-                    edges.push((from.clone(), to.clone()));
-                }
+        for target in &s.targets {
+            if let Some(to) = owners.of_target(root, target)
+                && to != from
+            {
+                edges.push((from.clone(), to.clone()));
             }
         }
     }
-    for (from, symbol) in ffi_calls {
-        if let Some(to) = ffi_provides.get(&symbol).filter(|o| !o.is_empty() && *o != from) {
+    for (from, key) in ffi_calls {
+        if let Some(to) = crate::scan::foreign::provider(&ffi_provides, &key).filter(|o| *o != from) {
             edges.push((from.clone(), to.clone()));
         }
     }
