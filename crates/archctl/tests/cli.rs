@@ -637,3 +637,30 @@ fn scan_in_import_doc_duoc_va_dich_phan_giai() {
     let human = text(&p.run(&["scan", "src/order/create.py"]));
     assert!(human.contains("src/order/create.py") && human.contains("os"), "{human}");
 }
+
+#[test]
+fn scan_in_ca_canh_lien_ngon_ngu_cua_tung_file() {
+    // Bộ đo đối chiếu cả phần này: lời gọi `torch.ops` phía Python với `ast`,
+    // module và op phía C++ với lexer thô của clang. Khoá in ra là khoá thô,
+    // trước khi `TORCH_EXTENSION_NAME` được thay bằng tên trong `setup.py`.
+    let p = Project::new("scan-crossings");
+    std::fs::create_dir_all(p.0.join("app")).unwrap();
+    std::fs::create_dir_all(p.0.join("native")).unwrap();
+    std::fs::write(p.0.join("app/k.py"), "import torch\n\ny = torch.ops.mylib.fused(x)\n").unwrap();
+    std::fs::write(
+        p.0.join("native/ops.cpp"),
+        "TORCH_LIBRARY(mylib, m) {\n  m.def(\"fused(Tensor x) -> Tensor\");\n}\n\
+         PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {}\n",
+    )
+    .unwrap();
+
+    let out = p.run(&["scan", "--json", "app/k.py", "native/ops.cpp"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""calls":[{"line":3,"key":"op:mylib.fused","shown":"torch.ops.mylib.fused"}]"#), "{s}");
+    assert!(s.contains(r#"{"line":2,"key":"op:mylib.fused","shown":"mylib::fused"}"#), "{s}");
+    assert!(s.contains(r#"{"line":4,"key":"py:@ext","shown":"@ext"}"#), "{s}");
+
+    let human = text(&p.run(&["scan", "app/k.py", "native/ops.cpp"]));
+    assert!(human.contains("torch.ops.mylib.fused") && human.contains("qua ranh giới ngôn ngữ"), "{human}");
+}

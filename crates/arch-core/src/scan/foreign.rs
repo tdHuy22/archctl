@@ -414,12 +414,35 @@ fn torch_ops(toks: &[Token], out: &mut Foreign) {
             }
             _ => continue,
         };
+        // Biến module, đối số thứ hai: `TORCH_LIBRARY(ns, m)` thì là `m`.
+        let module_var = match &toks[i + 2..close.min(toks.len())] {
+            [_, Token { tok: Tok::Punct(','), .. }, Token { tok: Tok::Word(var), .. }] => var.as_str(),
+            _ => continue,
+        };
         let end = block_end(toks, close + 1);
+        // `.def` nào là op, theo vị trí dấu chấm, để chuỗi `m.def(…).def(…)`
+        // không phải quét lại từ đầu mỗi lần.
+        let mut is_op: std::collections::HashMap<usize, bool> = std::collections::HashMap::new();
         for j in close + 2..end {
             if toks[j].tok != Tok::Punct('.')
                 || !matches!(toks.get(j + 1).map(|t| &t.tok), Some(Tok::Word(d)) if d == "def")
                 || toks.get(j + 2).map(|t| &t.tok) != Some(&Tok::Punct('('))
             {
+                continue;
+            }
+            // Chỉ `.def` gọi trên chính module là op. `m.class_<T>("T").def("push", …)`
+            // định nghĩa phương thức của một custom class.
+            let on_module = match &toks[j - 1].tok {
+                Tok::Word(w) => w == module_var,
+                Tok::Punct(')') => paren_start(toks, j - 1).is_some_and(|open| {
+                    open >= 2
+                        && matches!(&toks[open - 1].tok, Tok::Word(d) if d == "def")
+                        && is_op.get(&(open - 2)).copied().unwrap_or(false)
+                }),
+                _ => false,
+            };
+            is_op.insert(j, on_module);
+            if !on_module {
                 continue;
             }
             // Schema có thể bọc trong một macro: `m.def(TORCH_SELECTIVE_SCHEMA("..."))`.
@@ -476,6 +499,24 @@ fn is_macro_call(toks: &[Token], i: usize) -> bool {
     upper
         && matches!(toks.get(i + 2).map(|t| &t.tok), Some(Tok::Word(w)) if w != "void")
         && matches!(toks.get(i + 3).map(|t| &t.tok), Some(Tok::Punct(',' | ')')))
+}
+
+/// Vị trí dấu `(` mở dấu `)` ở `close`, đi ngược.
+fn paren_start(toks: &[Token], close: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for i in (0..=close).rev() {
+        match toks[i].tok {
+            Tok::Punct(')') => depth += 1,
+            Tok::Punct('(') => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn paren_end(toks: &[Token], open: usize) -> usize {

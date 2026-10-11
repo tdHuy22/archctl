@@ -107,8 +107,9 @@ Lệnh chung:
                                           --strict: mọi cảnh báo, kể cả
                                           của file luật, thành vi phạm.
   archctl scan [--root <dir>] [--json] [<file>...]
-                                          In import archctl đọc được và
-                                          đích phân giải của từng cái.
+                                          In import archctl đọc được, đích
+                                          phân giải của từng cái, và cạnh
+                                          qua ranh giới ngôn ngữ.
                                           Không cần .arch/.
   archctl diff [<git-ref>] [--root <dir>] So luật hiện tại với một bản trước
   archctl parse <file.arch>               Chỉ đọc và kiểm tra file luật
@@ -841,7 +842,7 @@ fn cmd_scan(args: &[String]) -> ExitCode {
             Ok(src) if src.len() as u64 <= arch_core::check::MAX_FILE_BYTES => src,
             Ok(_) => {
                 json_files.push(format!(
-                    r#"{{"file":{},"lang":{},"skipped":"oversized","imports":[]}}"#,
+                    r#"{{"file":{},"lang":{},"skipped":"oversized","imports":[],"crossings":{{"calls":[],"provides":[]}}}}"#,
                     json::string(file),
                     json::string(lang.name())
                 ));
@@ -852,7 +853,7 @@ fn cmd_scan(args: &[String]) -> ExitCode {
             }
             Err(_) => {
                 json_files.push(format!(
-                    r#"{{"file":{},"lang":{},"skipped":"unreadable","imports":[]}}"#,
+                    r#"{{"file":{},"lang":{},"skipped":"unreadable","imports":[],"crossings":{{"calls":[],"provides":[]}}}}"#,
                     json::string(file),
                     json::string(lang.name())
                 ));
@@ -863,12 +864,12 @@ fn cmd_scan(args: &[String]) -> ExitCode {
             }
         };
         let view = scan::source_view(file, arch_core::strip_bom(&src));
-        let imports = lang.imports(&view);
+        let scanned = lang.scan(&view, &[]);
         if !as_json {
             say!("{file} ({})", lang.name());
         }
         let mut items: Vec<String> = Vec::new();
-        for import in &imports {
+        for import in &scanned.imports {
             let base = resolver.resolve(lang, file, import);
             let subs = resolver.submodules(lang, file, import, &base);
             let (kind, target) = match &base {
@@ -903,12 +904,38 @@ fn cmd_scan(args: &[String]) -> ExitCode {
                 }
             }
         }
+        // Cạnh liên ngôn ngữ, khoá thô như bộ quét thấy: `TORCH_EXTENSION_NAME`
+        // còn là `@ext`, chưa thay bằng tên trong `setup.py`.
+        let foreign = &scanned.foreign;
+        if !as_json {
+            for c in &foreign.calls {
+                say!("  {:>5}  {}  → gọi qua ranh giới ngôn ngữ ({})", c.line, c.shown, c.symbol);
+            }
+            for c in &foreign.provides {
+                say!("  {:>5}  cung cấp {} cho ngôn ngữ khác", c.line, c.symbol);
+            }
+        }
         if as_json {
+            let crossings = |list: &[scan::foreign::Crossing]| {
+                list.iter()
+                    .map(|c| {
+                        format!(
+                            r#"{{"line":{},"key":{},"shown":{}}}"#,
+                            c.line,
+                            json::string(&c.symbol),
+                            json::string(&c.shown)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
             json_files.push(format!(
-                r#"{{"file":{},"lang":{},"imports":[{}]}}"#,
+                r#"{{"file":{},"lang":{},"imports":[{}],"crossings":{{"calls":[{}],"provides":[{}]}}}}"#,
                 json::string(file),
                 json::string(lang.name()),
-                items.join(",")
+                items.join(","),
+                crossings(&foreign.calls),
+                crossings(&foreign.provides)
             ));
         }
     }

@@ -69,6 +69,7 @@ request. Bảng dưới là lần đo khi bộ đo có 24 repo:
 | Go | `go/parser` của Go 1.27, chế độ `ImportsOnly` | 2 168 file, 13 921 import: khớp cả tên lẫn dòng |
 | Rust | `syn` 2.0.87, chỉ chạy trên CI | 1 509 file, 18 303 `use`/`extern crate`: khớp cả tên lẫn dòng; 548 import nằm trong thân macro (`syn` không đọc vào) không đối chiếu, 534 trong số đó ở tokio (`cfg_rt! { ... }`) |
 | Notebook (2026-10-11) | `TransformerManager` của IPython 9.17.1 cộng `ast`, chỉ chạy trên CI | 3 notebook của matplotlib, 16 import: khớp cả tên lẫn dòng. Các notebook khó trong `tests/notebook.rs` (magic trong chuỗi `"""`, `%%time`, `%%script python3`, khoá trùng, dòng trống đầu ô) cũng khớp |
+| Binding (2026-10-11) | token thô của clang cho C/C++, `ast` cho `torch.ops`, `syn` cho PyO3 | vllm 287 file, 1 470 đầu cạnh; apex 34; matplotlib 14; pydantic-core 1 (PyO3): khớp cả khoá lẫn dòng ngay lần đầu |
 
 Trước khi sửa, cũng phép đối chiếu đó cho:
 
@@ -201,6 +202,17 @@ Chỗ dễ sai là phía gọi, và luật ở đó chặt:
   import ở cấp cao nhất (`import amp_C` của apex) thành module của dự án. Trên
   apex: 42 lời gọi tới 19 module, cả 19 đối chiếu được với `setup.py` bằng
   `ast`. Tên đặt qua biến (`name=ext_name` của mmcv) thì không đọc.
+- **Bộ đo đọc lại cả hai phía bằng thước đo khác.** `bench/oracle.py` so
+  khoá binding archctl đọc được ở từng file với token thô của clang (C/C++),
+  `ast` (`torch.ops` phía Python) và `syn` (PyO3) — xem bảng ở
+  [Đối chiếu với parser chuẩn](#đối-chiếu-với-parser-chuẩn). Lần đầu chạy nó
+  bắt được chuỗi schema có `\` nối dòng (`"eig\` xuống dòng `ht(…)"`): lexer
+  từng giữ ký tự xuống dòng trong chuỗi, nên op `eight` mất. "Khớp" không có
+  nghĩa là phủ hết: cả hai phía cùng bỏ `PyInit_` nằm trong namespace hay có
+  `noexcept`, cùng tính cả hai nhánh `#if`/`#else`, cùng bỏ schema viết `u8"…"`,
+  và đuôi `.ipp`, `.tcc`, `.mm` không được quét. Ngược lại, `torch.ops` viết
+  xuống dòng hay nằm trong f-string thì `ast` thấy còn archctl không, và bộ đo
+  sẽ báo thiếu ở đó.
 - **Import của module đã ghép được không còn bị báo "chưa phân giải".** Nó
   không ra file Python nào, nhưng nơi định nghĩa nó đã tìm thấy.
 
@@ -586,6 +598,17 @@ src/flask/wrappers.py (Python)
      10  .  → src/flask/__init__.py
          .  → src/flask/json/__init__.py (module con)
      11  .globals  → src/flask/globals.py
+```
+
+Cạnh qua ranh giới ngôn ngữ cũng được in, với khoá thô như bộ quét thấy
+(`op:mylib.fused`, `py:_core`; `TORCH_EXTENSION_NAME` còn là `py:@ext`, chưa
+thay bằng tên trong `setup.py`):
+
+```
+app/k.py (Python)
+      3  torch.ops.mylib.fused  → gọi qua ranh giới ngôn ngữ (op:mylib.fused)
+native/ops.cpp (C/C++)
+      2  cung cấp op:mylib.fused cho ngôn ngữ khác
 ```
 
 Không cần `.arch/`: `--root` là gốc, không thì thư mục gần nhất có

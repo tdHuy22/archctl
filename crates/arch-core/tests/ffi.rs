@@ -609,3 +609,37 @@ fn setup_py_tro_toi_thiet_bi_khong_bi_doc_mai() {
     let _ = repo.edges();
     assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
 }
+
+#[test]
+fn def_cua_class_trong_torch_library_khong_phai_op() {
+    // `m.class_<Stack>("Stack").def("push", …)` là phương thức của custom
+    // class; chỉ `.def` gọi trên chính module (`m`, kể cả chuỗi
+    // `m.def(…).def(…)`) mới là op.
+    let repo = Repo::new("torch-class-def");
+    repo.write(
+        "native/ops.cpp",
+        "TORCH_LIBRARY(my_classes, m) {\n\
+         \x20 m.class_<Stack>(\"Stack\").def(\"push\", &Stack::push).def(\"pop\", &Stack::pop);\n\
+         \x20 m.def(\"real_op(Tensor x) -> Tensor\").def(\"chained(Tensor x) -> Tensor\");\n}\n",
+    )
+    .write(
+        "app/k.py",
+        "import torch\ntorch.ops.my_classes.push(x)\ntorch.ops.my_classes.real_op(x)\ntorch.ops.my_classes.chained(x)\n",
+    );
+    assert_eq!(
+        repo.edges(),
+        ["App -> Native qua torch.ops.my_classes.chained", "App -> Native qua torch.ops.my_classes.real_op"]
+    );
+}
+
+#[test]
+fn schema_co_dau_noi_dong_van_doc_dung_ten_op() {
+    // `\` cuối dòng trong chuỗi C++ nối dòng: trình biên dịch đọc `eight`.
+    let repo = Repo::new("torch-op-continued");
+    repo.write(
+        "native/ops.cpp",
+        "TORCH_LIBRARY(mylib, m) {\n  m.def(\"eig\\\nht(Tensor x) -> Tensor\");\n}\n",
+    )
+    .write("app/k.py", "import torch\ntorch.ops.mylib.eight(x)\n");
+    assert_eq!(repo.edges(), ["App -> Native qua torch.ops.mylib.eight"]);
+}

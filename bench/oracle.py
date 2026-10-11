@@ -40,7 +40,16 @@ Thước đo, chạy trên repo mà `bench.py` đã tải về `target/bench/rep
   tăng dần — như mọi notebook Jupyter ghi ra — và IPython không gộp dòng; còn
   lại archctl chỉ hứa gần đúng, nên chỉ so tên.
 
-Python, notebook, C/C++, Go, Rust: thiếu, thừa và lệch số dòng đều là lệch. Thiếu clang, Node hay Go
+- Binding (cạnh Python ↔ native): `scan --json` in khoá thô của từng file
+  (`py:tên`, `op:ns.tên`, `@ext` thay cho `TORCH_EXTENSION_NAME`). Phía C/C++
+  đọc lại trên token thô của clang, ngoài chỉ thị tiền xử lý:
+  `PYBIND11_MODULE`/`NB_MODULE`, định nghĩa `PyInit_x` ở mức ngoài cùng,
+  `m.def("…")` trong khối `TORCH_LIBRARY*` (chuỗi kề nhau được nối như trình
+  biên dịch). Phía Python là chuỗi thuộc tính `torch.ops.ns.op` theo `ast`.
+  PyO3 là `#[pymodule]` theo `syn`, nên chỉ khi `--require syn`. Hàm C của FFI
+  (`extern "C"`, cgo) không thuộc phép này.
+
+Python, notebook, binding, C/C++, Go, Rust: thiếu, thừa và lệch số dòng đều là lệch. Thiếu clang, Node hay Go
 thì phần đó in BỎ QUA và không tính là đạt; `--require` biến việc thiếu thành
 lỗi, và với Node thì đòi cả khả năng gỡ kiểu TS. Một thước đo không parse được
 quá nửa số file của một repo là thước đo hỏng chứ không phải mã hỏng: dừng,
@@ -170,6 +179,30 @@ struct V {
     inline: Vec<String>,
     imports: Vec<(usize, String)>,
     macros: Vec<(usize, usize)>,
+    /// Module mở rộng PyO3: `(dòng của tên, tên Python thấy)`.
+    pymodules: Vec<(usize, String)>,
+}
+
+/// `#[pymodule]` (hay `#[pyo3::pymodule]`) có trong các thuộc tính không, và
+/// `#[pyo3(name = "...")]` đổi tên thành gì.
+fn pymodule(attrs: &[syn::Attribute]) -> Option<Option<String>> {
+    let is_module = attrs.iter().any(|a| a.path().segments.last().is_some_and(|s| s.ident == "pymodule"));
+    if !is_module {
+        return None;
+    }
+    let mut rename = None;
+    for a in attrs.iter().filter(|a| a.path().is_ident("pyo3")) {
+        let _ = a.parse_nested_meta(|meta| {
+            if meta.path.is_ident("name") {
+                let lit: syn::LitStr = meta.value()?.parse()?;
+                rename = Some(lit.value());
+            } else if meta.input.peek(syn::Token![=]) {
+                let _: syn::Expr = meta.value()?.parse()?;
+            }
+            Ok(())
+        });
+    }
+    Some(rename)
 }
 
 fn join(prefix: &str, word: &str) -> String {
@@ -248,7 +281,19 @@ impl<'a> Visit<'a> for V {
         self.push(e.extern_token.span.start().line, e.ident.to_string());
     }
 
+    fn visit_item_fn(&mut self, f: &'a syn::ItemFn) {
+        if let Some(rename) = pymodule(&f.attrs) {
+            let name = rename.unwrap_or_else(|| f.sig.ident.to_string());
+            self.pymodules.push((f.sig.ident.span().start().line, name));
+        }
+        visit::visit_item_fn(self, f);
+    }
+
     fn visit_item_mod(&mut self, m: &'a syn::ItemMod) {
+        if let Some(rename) = pymodule(&m.attrs) {
+            let name = rename.unwrap_or_else(|| m.ident.to_string());
+            self.pymodules.push((m.ident.span().start().line, name));
+        }
         let inline = m.content.is_some();
         if inline {
             self.inline.push(m.ident.to_string());
@@ -288,12 +333,34 @@ fn main() {
             .map(|(l, p)| format!("[{l},\"{}\"]", p.replace('\\', "\\\\").replace('"', "\\\"")))
             .collect();
         let macros: Vec<String> = v.macros.iter().map(|(a, b)| format!("[{a},{b}]")).collect();
-        writeln!(out, "{file}\t{{\"imports\":[{}],\"macros\":[{}]}}", imports.join(","), macros.join(",")).unwrap();
+        let pymodules: Vec<String> =
+            v.pymodules.iter().map(|(l, n)| format!("[{l},\"py:{}\"]", n.replace('\\', "\\\\").replace('"', "\\\""))).collect();
+        writeln!(
+            out,
+            "{file}\t{{\"imports\":[{}],\"macros\":[{}],\"pymodules\":[{}]}}",
+            imports.join(","),
+            macros.join(","),
+            pymodules.join(",")
+        )
+        .unwrap();
     }
 }
 """
 
-CLANG_TOKEN = re.compile(r"^(\w+) '(.*)'\t( \[StartOfLine\])?.*Loc=<.*:(\d+):\d+>$")
+CLANG_TOKEN = re.compile(r"^(\w+) '(.*)'\t( \[StartOfLine\])?.*Loc=<.*:(\d+):\d+>$", re.S)
+
+
+def clang_rows(dump):
+    """Mỗi token một bản ghi. Token chứa xuống dòng (raw string, chuỗi có `\`
+    nối dòng, khoảng trắng nhiều dòng) bị clang in ra trên nhiều dòng; dòng
+    không mở đầu bằng `loại '` là phần tiếp của token trước."""
+    rows = []
+    for line in dump.split("\n"):
+        if rows and not re.match(r"^\w+ '", line):
+            rows[-1] += "\n" + line
+        else:
+            rows.append(line)
+    return rows
 INCLUDE_SPEC = re.compile(r'#\s*include\s*([<"])([^>"\n]+)[>"]')
 
 
@@ -312,50 +379,182 @@ def archctl_scan(archctl, root):
 
 
 def python_truth(path):
-    """`(dòng, spec)` theo `ast`, hoặc None nếu file không parse được."""
+    """`(import, op)` theo `ast`: Counter `(dòng, spec)` của import và
+    `(dòng, op:ns.tên)` của mọi `torch.ops.ns.tên`; None nếu không parse được."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         try:
             tree = ast.parse(path.read_bytes())
         except (SyntaxError, ValueError):
             return None
-    out = collections.Counter()
+    imports, ops = collections.Counter(), collections.Counter()
+    inner = set()  # Attribute nằm trong một chuỗi chấm dài hơn
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                out[(node.lineno, alias.name)] += 1
+                imports[(node.lineno, alias.name)] += 1
         elif isinstance(node, ast.ImportFrom):
-            out[(node.lineno, "." * node.level + (node.module or ""))] += 1
-    return out
+            imports[(node.lineno, "." * node.level + (node.module or ""))] += 1
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Attribute):
+            inner.add(id(node.value))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute) or id(node) in inner:
+            continue
+        parts, cur = [], node
+        while isinstance(cur, ast.Attribute):
+            parts.append(cur.attr)
+            cur = cur.value
+        if isinstance(cur, ast.Name):
+            parts.append(cur.id)
+            parts.reverse()
+            if len(parts) >= 4 and parts[:2] == ["torch", "ops"]:
+                ops[(node.lineno, f"op:{parts[2]}.{parts[3]}")] += 1
+    return imports, ops
 
 
-def clang_truth(path):
-    """`(dòng, spec)` của mọi `#include` thật theo lexer thô của clang."""
+# Dấu hiệu một file C/C++ có thể định nghĩa module mở rộng hay op PyTorch.
+BINDING_MARKERS = ("PYBIND11_MODULE", "NB_MODULE", "TORCH_LIBRARY", "PyInit_")
+EXTENSION_NAME = "@ext"
+
+
+def clang_tokens(path):
+    """Token thô của clang ngoài chỉ thị tiền xử lý, kèm dòng `#include`.
+
+    Trả về `(include, token)`: Counter `(dòng, spec)` và danh sách
+    `(loại, chữ, dòng)`. Đếm dòng như clang: chỉ theo `\n`; `splitlines()` tách
+    cả ở form feed (`^L` hay gặp trong mã kiểu GNU) và lệch số dòng.
+    """
     text = path.read_text(errors="replace")
-    if "include" not in text:
-        return collections.Counter()
+    if "include" not in text and not any(m in text for m in BINDING_MARKERS):
+        return collections.Counter(), []
     lang = ["-x", "c", "-std=c2x"] if path.suffix == ".c" else ["-x", "c++", "-std=c++20"]
     p = subprocess.run(["clang", "-fsyntax-only", *lang, "-Xclang", "-dump-raw-tokens", str(path)],
                        capture_output=True, text=True, errors="replace", timeout=300)
     if p.returncode != 0:
         bench.die(f"clang thoát {p.returncode} ở {path}: {p.stderr.strip()[-300:]}")
-    # Đếm dòng như clang: chỉ theo `\n`. `splitlines()` tách cả ở form feed
-    # (`^L` hay gặp trong mã kiểu GNU) và lệch số dòng.
     lines = text.split("\n")
-    out, hash_line = collections.Counter(), None
-    for row in p.stderr.splitlines():
+    includes, tokens = collections.Counter(), []
+    hash_line, in_directive = None, False
+    for row in clang_rows(p.stderr):
         m = CLANG_TOKEN.match(row)
-        if not m or m.group(1) == "unknown":
+        if not m or m.group(1) in ("unknown", "comment"):
             continue
         kind, tok, start, line = m.group(1), m.group(2), m.group(3), int(m.group(4))
+        if start:
+            in_directive = False
         if kind == "hash" and start:
-            hash_line = line
+            hash_line, in_directive = line, True
             continue
         if hash_line == line and kind == "raw_identifier" and tok == "include":
             spec = INCLUDE_SPEC.search(lines[line - 1]) if line <= len(lines) else None
             if spec:
-                out[(line, spec.group(2))] += 1
+                includes[(line, spec.group(2))] += 1
         hash_line = None
+        # Token trong `#define`, `#if`... không phải mã: `#define
+        # PYBIND11_MODULE(name, m)` không định nghĩa module nào.
+        if not in_directive:
+            tokens.append((kind, tok, line))
+    return includes, tokens
+
+
+def c_string(tok):
+    """Nội dung một string literal của C/C++: `"a\"b"`, `u8"…"`, `R"(…)"`."""
+    m = re.match(r'^(?:u8|u|U|L)?R"([^(]*)\((.*)\)\1"$', tok, re.S)
+    if m:
+        return m.group(2)
+    m = re.match(r'^(?:u8|u|U|L)?"(.*)"$', tok, re.S)
+    if not m:
+        return None
+    # `\` cuối dòng nối dòng, như trình biên dịch; rồi mới giải ký tự thoát.
+    return re.sub(r"\\(.)", r"\1", re.sub(r"\\\r?\n", "", m.group(1)))
+
+
+def is_macro_name(name):
+    return name.upper() == name and sum(c.isalpha() for c in name) >= 2
+
+
+def binding_truth(tokens):
+    """Module mở rộng và op PyTorch mà file C/C++ định nghĩa: Counter
+    `(dòng, py:tên | op:ns.tên)`, đọc trên token thô của clang."""
+    out = collections.Counter()
+    close, opener = {}, {}
+    stack = []
+    for i, (kind, _, _) in enumerate(tokens):
+        if kind in ("l_paren", "l_brace", "l_square"):
+            stack.append(i)
+        elif kind in ("r_paren", "r_brace", "r_square") and stack:
+            o = stack.pop()
+            close[o], opener[i] = i, o
+    word = lambda i: tokens[i][1] if i < len(tokens) and tokens[i][0] == "raw_identifier" else None
+    kind = lambda i: tokens[i][0] if i < len(tokens) else None
+    depth, extern_blocks = 0, set()
+    for i, (k, tok, line) in enumerate(tokens):
+        # Độ sâu ngoặc nhọn, trừ khối `extern "C" { }`.
+        if k == "l_brace":
+            if i >= 2 and word(i - 2) == "extern" and kind(i - 1) == "string_literal":
+                extern_blocks.add(i)
+            else:
+                depth += 1
+        elif k == "r_brace":
+            if opener.get(i) not in extern_blocks:
+                depth = max(depth - 1, 0)
+        if k != "raw_identifier":
+            continue
+        # PYBIND11_MODULE(tên, m) / NB_MODULE(tên, m)
+        if tok in ("PYBIND11_MODULE", "NB_MODULE") and kind(i + 1) == "l_paren" and word(i + 2) and kind(i + 3) == "comma":
+            name = word(i + 2)
+            out[(tokens[i + 2][2], "py:" + (EXTENSION_NAME if name == "TORCH_EXTENSION_NAME" else name))] += 1
+        # Định nghĩa `PyInit_tên(...) {` ở mức ngoài cùng, có kiểu trả về đứng trước.
+        elif (tok.startswith("PyInit_") and len(tok) > 7 and depth == 0 and kind(i + 1) == "l_paren"
+              and i > 0 and (kind(i - 1) == "raw_identifier" or kind(i - 1) == "star")
+              and close.get(i + 1) is not None and kind(close[i + 1] + 1) == "l_brace"):
+            out[(line, "py:" + tok[len("PyInit_"):])] += 1
+        # TORCH_LIBRARY*(ns, m) { m.def("op(...)") }, trừ *_IMPL
+        elif "TORCH_LIBRARY" in tok and "IMPL" not in tok and kind(i + 1) == "l_paren" and (i + 1) in close:
+            end_args = close[i + 1]
+            if kind(end_args + 1) != "l_brace" or (end_args + 1) not in close:
+                continue
+            if not (word(i + 2) and kind(i + 3) == "comma"):
+                continue
+            ns = word(i + 2)
+            if is_macro_name(ns):
+                if ns != "TORCH_EXTENSION_NAME":
+                    continue
+                ns = EXTENSION_NAME
+            # Biến module là đối số thứ hai; chỉ `.def` gọi trên nó (kể cả
+            # chuỗi `m.def(…).def(…)`) là op, không phải `m.class_<T>(…).def`.
+            if not (word(i + 4) and close[i + 1] == i + 5):
+                continue
+            module_var, is_op = word(i + 4), {}
+            for j in range(end_args + 2, close[end_args + 1]):
+                if not (kind(j) == "period" and word(j + 1) == "def" and kind(j + 2) == "l_paren"):
+                    continue
+                prev = j - 1
+                if word(prev) is not None:
+                    on_module = word(prev) == module_var
+                elif kind(prev) == "r_paren" and prev in opener:
+                    o = opener[prev]
+                    on_module = o >= 2 and word(o - 1) == "def" and is_op.get(o - 2, False)
+                else:
+                    on_module = False
+                is_op[j] = on_module
+                if not on_module:
+                    continue
+                s = j + 3
+                if word(s) and kind(s + 1) == "l_paren":  # TORCH_SELECTIVE_SCHEMA("…")
+                    s += 2
+                if kind(s) != "string_literal":
+                    continue
+                # Chuỗi kề nhau được nối, như trình biên dịch.
+                parts, e = [], s
+                while kind(e) == "string_literal":
+                    parts.append(c_string(tokens[e][1]) or "")
+                    e += 1
+                head = "".join(parts).split("(", 1)[0].strip()
+                op_ns, _, name = head.rpartition("::")
+                name = name.split(".", 1)[0]
+                if re.fullmatch(r"\w+", name) and (not op_ns or re.fullmatch(r"\w+", op_ns)):
+                    out[(tokens[s][2], f"op:{op_ns or ns}.{name}")] += 1
     return out
 
 
@@ -420,7 +619,8 @@ def build_syn_helper(cache):
 
 
 def syn_truth(helper, root, files):
-    """file → (Counter `(dòng, đường dẫn)`, các khoảng dòng của macro); None nếu syn không đọc được."""
+    """file → (Counter `(dòng, đường dẫn)`, các khoảng dòng của macro, Counter `(dòng, py:tên)`
+    của `#[pymodule]`); None nếu syn không đọc được."""
     feed = "".join(f"{root}\t{f}\n" for f in files)
     p = subprocess.run([helper], input=feed, capture_output=True, text=True, timeout=900)
     if p.returncode != 0:
@@ -432,7 +632,8 @@ def syn_truth(helper, root, files):
             out[file] = None
             continue
         v = json.loads(value)
-        out[file] = (collections.Counter((line, spec) for line, spec in v["imports"]), v["macros"])
+        out[file] = (collections.Counter((line, spec) for line, spec in v["imports"]), v["macros"],
+                     collections.Counter((line, key) for line, key in v.get("pymodules", [])))
     unanswered = sorted(set(files) - set(out))
     if unanswered:
         bench.die(f"trình đọc `syn` không trả lời cho {len(unanswered)} file ở {root}, ví dụ {unanswered[0]}")
@@ -525,6 +726,7 @@ def diff(want, have, check_extra=True):
 class Tally:
     def __init__(self, label):
         self.label, self.files, self.imports, self.unparsed = label, 0, 0, 0
+        self.skipped = ""  # phần nào không đo được, và vì sao
         self.bad, self.examples = 0, []
         self.in_macro = 0  # import archctl đọc được trong thân macro, parser không thấy
 
@@ -534,10 +736,13 @@ class Tally:
             self.examples.append(msg)
 
     def line(self, repo):
-        head = f"  {repo:22} {self.label:8} {self.files:5} file, {self.imports:6} import"
+        unit = "đầu cạnh" if self.label == "Binding" else "import"
+        head = f"  {repo:22} {self.label:8} {self.files:5} file, {self.imports:6} {unit}"
         tail = f", {self.unparsed} không parse được" if self.unparsed else ""
         if self.in_macro:
             tail += f", {self.in_macro} trong macro không đối chiếu"
+        if self.skipped:
+            tail += f", {self.skipped}"
         verdict = "khớp" if not self.bad else f"{self.bad} LỆCH"
         return f"{head}{tail}: {verdict}"
 
@@ -620,6 +825,15 @@ def main():
         files = archctl_scan(archctl, root)
         got = {f["file"]: collections.Counter((i["line"], i["spec"]) for i in f["imports"])
                for f in files}
+
+        def crossings(file, side):
+            """Khoá binding (`py:`, `op:`) archctl đọc được ở file đó; khoá hàm C
+            của FFI không thuộc phép đối chiếu này."""
+            f = by_file[file]
+            return collections.Counter((c["line"], c["key"]) for c in f.get("crossings", {}).get(side, [])
+                                       if c["key"].startswith(("py:", "op:")))
+        by_file = {f["file"]: f for f in files}
+        bind = Tally("Binding")
         by_lang = collections.defaultdict(list)
         for f in files:
             by_lang[f["lang"]].append(f["file"])
@@ -629,11 +843,15 @@ def main():
         for file in by_lang["Python"]:
             if not file.endswith(PY_EXTS):
                 continue  # Cython: ast không đọc được
-            want = python_truth(root / file)
-            if want is None:
+            truth = python_truth(root / file)
+            if truth is None:
                 py.unparsed += 1
                 continue
+            want, ops = truth
             check_lines(py, file, want, got[file])
+            have_ops = crossings(file, "calls")
+            if ops or have_ops:
+                check_lines(bind, file, ops, have_ops)
         tallies.append(py)
 
         notebooks = [f for f in by_lang["Python"] if f.endswith(".ipynb")]
@@ -655,9 +873,12 @@ def main():
         if have_clang and by_lang["C/C++"]:
             c = Tally("C/C++")
             with concurrent.futures.ThreadPoolExecutor(os.cpu_count() or 4) as pool:
-                truths = pool.map(lambda f: clang_truth(root / f), by_lang["C/C++"])
-                for file, want in zip(by_lang["C/C++"], truths):
+                truths = pool.map(lambda f: clang_tokens(root / f), by_lang["C/C++"])
+                for file, (want, tokens) in zip(by_lang["C/C++"], truths):
                     check_lines(c, file, want, got[file])
+                    defined, have = binding_truth(tokens), crossings(file, "provides")
+                    if defined or have:
+                        check_lines(bind, file, defined, have)
             tallies.append(c)
 
         node_files = [f for f in by_lang["TypeScript"]
@@ -690,15 +911,25 @@ def main():
                 if truth is None:
                     rs.unparsed += 1
                     continue
-                want, macros = truth
+                want, macros, modules = truth
                 have = collections.Counter(got[file])
                 for (line, spec), n in (have - want).items():
                     if any(a <= line <= b for a, b in macros):
                         have[(line, spec)] -= n
                         rs.in_macro += n
                 check_lines(rs, file, want, +have)
+                # `#[pymodule]` trong thân macro thì `syn` không thấy, như import.
+                have_modules = crossings(file, "provides")
+                for (line, key), n in (have_modules - modules).items():
+                    if any(a <= line <= b for a, b in macros):
+                        have_modules[(line, key)] -= n
+                if modules or +have_modules:
+                    check_lines(bind, file, modules, +have_modules)
             tallies.append(rs)
 
+        if by_lang["C/C++"] and not have_clang:
+            bind.skipped = "phía C/C++ BỎ QUA: không có clang"
+        tallies.append(bind)
         for t in tallies:
             sane(t, repo)
             if t.files or t.unparsed:

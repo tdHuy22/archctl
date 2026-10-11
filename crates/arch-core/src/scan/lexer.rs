@@ -606,9 +606,13 @@ impl Lexer<'_> {
                         self.i += 1;
                     }
                     if let Some(&next) = self.cs.get(self.i + 1) {
-                        value.push(next);
+                        // Cặp `\` và xuống dòng biến mất khỏi giá trị, như
+                        // trình biên dịch C, Python và JS: `"eig\⏎ht"` là
+                        // `"eight"`.
                         if next == '\n' {
                             self.line += 1;
+                        } else {
+                            value.push(next);
                         }
                     }
                     self.i += 2;

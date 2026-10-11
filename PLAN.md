@@ -9,7 +9,24 @@ Cập nhật 2026-10-11.
 
 ### Đã xong, có bằng chứng
 
-- **Mốc "Còn mở sau ML/LLM", chưa commit** (2026-10-11). `oracle.py --require
+- **Oracle đối chiếu cạnh binding** (2026-10-11, commit sau `7fd016b`; bạn chọn raw token
+  của clang). `archctl scan` in thêm cạnh liên ngôn ngữ của từng file (khoá
+  thô). `oracle.py` bảng "Binding": C/C++ trên token thô của clang, `torch.ops`
+  theo `ast`, PyO3 theo `syn`. Lần đầu chạy khớp hết: vllm 287 file 1 470 đầu
+  cạnh, apex 34, matplotlib 14, pydantic-core 1. Nó bắt được một lỗi thật:
+  lexer giữ ký tự xuống dòng của `\` nối dòng trong chuỗi, nên op có schema
+  viết qua hai dòng bị mất; đã sửa ở lexer. Review (sonnet) tìm 2 vừa, 5 nhẹ,
+  đã sửa: `.def` của `class_` trong `TORCH_LIBRARY` bị tính là op (cả archctl
+  lẫn oracle; giờ chỉ `.def` trên biến module), oracle không bỏ token
+  `comment`, token nhiều dòng; sabotage thêm `bind-drop`, `bind-extra`,
+  `bind-call`, `bind-op`: 24/24. Biên nhận trên mã cuối: test, clippy, `cargo
+  +1.88 check`, `verify` 3/3, `check --strict` 0; bộ đo 27 repo 0 bất nhất
+  945/945; oracle `--require clang,node,go,syn,ipython` khớp hết (Binding: vllm
+  288 file 1 471, gồm một `#[pymodule]` Rust chỉ thấy khi có `syn`). Đã commit
+  trước đó: `c0de687` (mốc ML/LLM), `7fd016b` (oracle notebook,
+  `TORCH_EXTENSION_NAME`).
+
+- **Mốc "Còn mở sau ML/LLM"** (2026-10-11, commit `7fd016b`). `oracle.py --require
   ipython` đối chiếu import notebook với IPython (`bench/notebook_truth.py`,
   gói ghim kèm sha256 trong `bench/ipython-requirements.txt`, chỉ wheel):
   matplotlib 3 notebook 16 import khớp cả dòng; các notebook khó của test cũng
@@ -25,7 +42,7 @@ Cập nhật 2026-10-11.
   17/17; oracle `--require clang,node,go,ipython` khớp hết. Đường hook một file
   không chậm hơn bản gốc ở repo nào.
 
-- **Mốc ML/LLM, chưa commit** (2026-10-11). `docs/ml.md` với sáu công thức luật
+- **Mốc ML/LLM** (2026-10-11, commit `c0de687`). `docs/ml.md` với sáu công thức luật
   và `examples/ml` (mỗi công thức một vi phạm cài sẵn, cộng một vi phạm trong
   notebook; test `ml.rs` đòi đủ bảy). Đọc `.ipynb` (`scan/notebook.rs`): chỉ ô
   code, số dòng là dòng trong file. Threat model 4 mục ở `.agent/threat-model.md`,
@@ -39,7 +56,7 @@ Cập nhật 2026-10-11.
   `cargo +1.88 check`, `verify` 3/3, `check --strict` 0; bộ đo 26 repo 23 519
   file 0 bất nhất 910/910; sabotage 14/14.
 
-- **Cạnh Python ↔ native, chưa commit** (2026-10-11). Ghép import Python với
+- **Cạnh Python ↔ native** (2026-10-11, commit `0d81811`). Ghép import Python với
   module mở rộng (PyO3 `#[pymodule]`, `PYBIND11_MODULE`, `NB_MODULE`,
   `PyInit_`), và `torch.ops.ns.op` với `m.def` trong `TORCH_LIBRARY*`. Chỉ
   namespace viết thẳng: đoán namespace macro từng ghép nhầm
@@ -305,10 +322,10 @@ bị loại ở curl); công thức luật ML/LLM kèm `verify` gọi công cụ
 Các ứng viên đó giờ là việc ở §1. Còn treo: có đưa tầng hạ tầng (service,
 triển khai) vào DSL không.
 
-Không có việc nào đang dở. Mốc ML/LLM và mốc "Còn mở" đều chờ bạn cho commit.
-Việc
-tiếp theo nằm ở §1 (mốc "Còn mở sau mốc ML/LLM"); quyết định còn treo: mức
-oracle C++, tầng hạ tầng trong DSL.
+Không có việc nào đang dở, mọi mốc đã commit. Việc
+tiếp theo: không còn việc nào trong §1. Quyết định còn treo: có đưa tầng hạ
+tầng (service, triển khai) vào DSL không; `.agent/threat-model.md` có vào git
+không.
 **Đã quyết (2026-10-03): giữ repo private, CI là
 lời nhắc chứ không chặn** — gói GitHub Free không có branch protection cho repo
 private, nên job đỏ không ngăn được commit vào `main`. Muốn đổi thì để repo
@@ -351,7 +368,7 @@ hàm, `ctypes` của Python và IPC thì không — xem [docs/check.md](docs/che
 - [x] Bộ khám phá đưa vào sơ đồ thư mục ở đầu kia của cạnh liên ngôn ngữ
   (`csrc/` của vllm, `python/` của pydantic-core), không kéo theo `tests/`.
 - [x] Bộ đo: số mới cho vllm và pydantic-core, thêm kiểu phá vào `sabotage.py`.
-- [ ] @ban Chọn mức oracle cho C++ rồi để `oracle.py` đối chiếu cạnh binding
+- [x] Chọn mức oracle cho C++ (bạn chọn raw token của clang) rồi để `oracle.py` đối chiếu cạnh binding
   (raw token của clang, hay tree-sitter chỉ chạy ở CI).
 - [x] Tài liệu: mục cạnh liên ngôn ngữ trong `docs/check.md`, README.
 

@@ -132,7 +132,12 @@ bộ trích, nên một lỗi trong bộ trích làm cả hai sai giống nhau m
   là một chuỗi JSON riêng, ở những dòng JSON tăng dần (như mọi notebook Jupyter
   ghi ra), và IPython không gộp dòng.
 
-Python, notebook, C/C++, Go và Rust đòi khớp cả tên lẫn số dòng: thiếu, thừa hay lệch dòng đều
+- Binding (cạnh Python ↔ native): khoá thô mà `scan --json` in cho từng file
+  được đọc lại độc lập: phía C/C++ trên token thô của clang (module pybind11,
+  nanobind, `PyInit_`, `m.def` trong `TORCH_LIBRARY*`), phía Python là
+  `torch.ops.ns.op` theo `ast`, PyO3 theo `syn` khi `--require syn`.
+
+Python, notebook, binding, C/C++, Go và Rust đòi khớp cả tên lẫn số dòng: thiếu, thừa hay lệch dòng đều
 là lệch. Thiếu clang, Node hay Go thì phần đó in `BỎ QUA`; `--require
 clang,node,go` biến việc thiếu thành mã thoát 2, và với Node thì đòi cả khả năng
 gỡ kiểu TS. Thước đo tự hỏng cũng là mã 2 chứ không phải "đạt": clang, Node hay
@@ -178,8 +183,11 @@ file, bỏ khoá
 thêm chú thích. Mỗi kiểu phải làm `bench.py` thoát 1, **và phải bị đúng phép
 kiểm dành cho nó bắt** — không chỉ đỏ vì một lý do khác. Ba kiểu nữa làm hỏng
 đầu ra `scan --json` — mất một import, lệch một dòng, thêm một import giả — và
-phải làm `oracle.py` thoát 1. `--notebook-repo matplotlib` thêm hai kiểu y vậy
-ở notebook, đối chiếu bằng IPython nên cần mạng. Kiểu `crossing` xoá cạnh liên ngôn ngữ khỏi
+phải làm `oracle.py` thoát 1. Bốn kiểu nữa phá phần cạnh binding, mỗi nhánh
+của thước đo một kiểu: module pybind11 của matplotlib (mất, thêm giả), lời gọi
+`torch.ops` của pytorch-image-models, op `TORCH_LIBRARY` của vllm. `--notebook-repo
+matplotlib` thêm hai kiểu y vậy ở notebook, đối chiếu bằng IPython nên cần
+mạng. Kiểu `crossing` xoá cạnh liên ngôn ngữ khỏi
 cả luật `init` sinh ra lẫn vi phạm `check` báo, trên pydantic-core, và chỉ
 danh sách cạnh bắt buộc ở trên bắt được nó. `--rust-repo ripgrep` thêm ba kiểu y vậy ở file
 Rust, đối chiếu bằng `syn` nên cần mạng; kiểu thêm import giả nằm ngoài macro,

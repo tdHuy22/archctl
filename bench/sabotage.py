@@ -17,6 +17,11 @@ liên ngôn ngữ khỏi cả luật `init` sinh ra lẫn vi phạm `check` báo
 ghép hỏng ở cả hai phía cùng lúc. Phép kiểm đồng nhất không thấy gì; chỉ danh
 sách cạnh bắt buộc trong `consistency.CROSSINGS` bắt được.
 
+Bốn kiểu nữa phá phần cạnh binding, mỗi nhánh của thước đo một kiểu, trên repo
+có đúng loại đó (`BINDING_ORACLE_RUNS`): module pybind11 phía C++ của
+matplotlib (mất, thêm giả), lời gọi `torch.ops` phía Python của
+pytorch-image-models, op `TORCH_LIBRARY` phía C++ của vllm. Cần clang.
+
 `--notebook-repo matplotlib` phá thêm hai kiểu ở notebook (mất import, lệch
 dòng), đối chiếu bằng IPython cài vào venv nên cần mạng; CI bật nó.
 
@@ -67,6 +72,35 @@ NOTEBOOK_ORACLE_MODES = {
     "nb-drop": "thiếu:",
     "nb-line": "lệch dòng:",
 }
+# phá phần cạnh binding của `scan --json`, mỗi nhánh của thước đo một kiểu, trên
+# repo có đúng loại đó: (kiểu, repo, dòng `oracle.py` phải in)
+BINDING_ORACLE_RUNS = [
+    ("bind-drop", "matplotlib", "thiếu:"),            # module pybind11, phía C++
+    ("bind-extra", "matplotlib", "thừa:"),
+    ("bind-call", "pytorch-image-models", "thiếu:"),  # `torch.ops` phía Python
+    ("bind-op", "vllm", "thiếu:"),                    # op trong `TORCH_LIBRARY`
+]
+BINDING_ORACLE_MODES = {mode for mode, _, _ in BINDING_ORACLE_RUNS}
+
+
+def sabotage_crossings(rep: dict, mode: str):
+    """Làm hỏng đầu cạnh binding đầu tiên đúng loại: module (`py:`) hay op
+    (`op:`) phía C/C++, lời gọi `op:` phía Python."""
+    lang, side, prefix = {
+        "bind-drop": ("C/C++", "provides", ("py:", "op:")),
+        "bind-extra": ("C/C++", "provides", ("py:", "op:")),
+        "bind-call": ("Python", "calls", ("op:",)),
+        "bind-op": ("C/C++", "provides", ("op:",)),
+    }[mode]
+    for f in rep["files"]:
+        entries = f.get("crossings", {}).get(side, [])
+        first = next((c for c in entries if c["key"].startswith(prefix)), None)
+        if f["lang"] == lang and first:
+            if mode == "bind-extra":
+                entries.append({**first, "key": "py:khong_co_that"})
+            else:
+                entries.remove(first)
+            return
 
 
 def sabotage_scan(rep: dict, mode: str):
@@ -140,6 +174,10 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
         rep = json.loads(out)
         sabotage_scan(rep, mode)
         out = json.dumps(rep)
+    elif mode in BINDING_ORACLE_MODES and args[:1] == ["scan"] and "--json" in args:
+        rep = json.loads(out)
+        sabotage_crossings(rep, mode)
+        out = json.dumps(rep)
     sys.stdout.write(out)
     sys.stderr.write(p.stderr)
     return p.returncode
@@ -176,6 +214,9 @@ def main():
         if args.rust_repo:
             runs += [("oracle.py", args.rust_repo, m, e)
                      for m, e in [("", None), *RUST_ORACLE_MODES.items()]]
+        for repo in dict.fromkeys(r for _, r, _ in BINDING_ORACLE_RUNS):
+            runs.append(("oracle.py", repo, "", None))
+            runs += [("oracle.py", repo, m, e) for m, r, e in BINDING_ORACLE_RUNS if r == repo]
         if args.notebook_repo:
             runs += [("oracle.py", args.notebook_repo, m, e)
                      for m, e in [("", None), *NOTEBOOK_ORACLE_MODES.items()]]
@@ -187,6 +228,10 @@ def main():
                 extra = ["--require", "syn"]
             if mode in NOTEBOOK_ORACLE_MODES or (script == "oracle.py" and repo == args.notebook_repo):
                 extra = ["--require", "ipython"]
+            binding_repos = {r for _, r, _ in BINDING_ORACLE_RUNS}
+            if mode in BINDING_ORACLE_MODES or (script == "oracle.py" and not mode and repo in binding_repos
+                                                and repo not in (args.notebook_repo, args.rust_repo, args.repo)):
+                extra = ["--require", "clang"]
             p = subprocess.run(
                 [sys.executable, str(HERE / script), "--archctl", str(fake),
                  "--only", repo, *extra],

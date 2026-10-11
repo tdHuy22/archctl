@@ -176,6 +176,8 @@ jobs:
       # `syn` tải từ crates.io — nên bước này cũng mở lại mạng cho cargo, như
       # bước đối chiếu. archctl đã dựng xong ở trên khi còn offline.
       # `--notebook-repo` phá phần notebook, đối chiếu bằng IPython cài qua pip.
+      # Phần cạnh binding (matplotlib, pytorch-image-models, vllm) cần clang, có
+      # sẵn trên image.
       - name: bộ đo đổ được
         env:
           CARGO_NET_OFFLINE: "false"
@@ -185,7 +187,8 @@ jobs:
       # kiểm dùng chung bộ trích, nên một lỗi trong bộ trích làm cả hai sai
       # giống nhau mà vẫn ra "0 bất nhất". Vue core từng mất 21% import tĩnh
       # như vậy. Bước này đối chiếu với parser chuẩn: `ast` của Python, lexer
-      # thô của clang, parser module của Node, `go/parser` của Go.
+      # thô của clang, parser module của Node, `go/parser` của Go — cho import,
+      # và cho cạnh Python ↔ native (module mở rộng, op PyTorch).
       #
       # Image ghim ở trên có sẵn cả bốn (Python 3.12, Clang 18, Node 22 — đủ
       # mới cho `module.stripTypeScriptTypes` —, Go). `--require` để ngày nào
