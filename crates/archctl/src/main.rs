@@ -1105,7 +1105,7 @@ fn scan_deploy(
     // định qua `shown_path`, bỏ `user:pass@` và cắt bớt (TM-10).
     let shown = |s: &str| if verbatim { s.to_string() } else { deploy::shown_path(s) };
     let quoted = |s: &str| json::string(&shown(s));
-    let maybe = |s: Option<&str>| s.map_or_else(|| "null".to_string(), &quoted);
+    let maybe = |s: Option<&str>| s.map_or_else(|| "null".to_string(), quoted);
     let list = |v: &[String]| format!("[{}]", v.iter().map(|s| quoted(s)).collect::<Vec<_>>().join(","));
     let pairs = |v: &[(String, usize)]| {
         format!("[{}]", v.iter().map(|(n, l)| format!("[{},{l}]", quoted(n))).collect::<Vec<_>>().join(","))
