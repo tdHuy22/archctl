@@ -44,6 +44,7 @@ kiến trúc c8bd3bd9 · 15 file quét (5 Rust, 4 C/C++, 4 Python, 2 Go) · 7/8 
 | `boundary ... contain` — lỗi không được lọt ra ngoài vùng | dò định danh ngoài vùng |
 | `flow`, `contract`, `invariant state` | mọi tên khai báo phải tồn tại trong mã |
 | `verify ... runs "..."` | lệnh phải chạy xong và đạt, trên đúng bản mã này |
+| `service ... runs`, `link` — triển khai và mạng | đọc docker-compose và Dockerfile: lệnh khởi chạy dẫn tới mã nào, `depends_on` và tên service trong biến môi trường |
 | trạng thái `#draft`…`#locked` | quyết định luật nào đang có hiệu lực |
 
 Bốn khai báo cuối bắt đúng chế độ hỏng hay gặp nhất khi làm việc với agent:
@@ -144,6 +145,7 @@ agent, nên mỗi dependency thêm vào là một bề mặt tấn công thêm.
 | [docs/verify.md](docs/verify.md) | Chạy thật các cách kiểm, và biên nhận tự hết hạn |
 | [docs/api.md](docs/api.md) | Hàm và từ khoá bị cấm |
 | [docs/ml.md](docs/ml.md) | Công thức luật cho dự án ML và LLM |
+| [docs/infra.md](docs/infra.md) | Service, mạng, triển khai: đối chiếu với docker-compose và Dockerfile |
 | [docs/protocol.md](docs/protocol.md) | Giao thức agent–người |
 | [docs/adopt.md](docs/adopt.md) | `init --from-code` và `baseline` |
 | [docs/serve.md](docs/serve.md) | Sơ đồ tương tác |
@@ -164,6 +166,9 @@ https://claude.ai/code/artifact/2b26df5d-d6b0-40d0-a398-7e574c7d1387
   `dlopen`, con trỏ hàm, `ctypes` của Python, op có namespace là macro và IPC
   thì không. Với C/C++ thì `#include` là điều kiện cần nhưng rất xa điều kiện
   đủ, và đó là lý do có `api`.
+- **Tầng hạ tầng mới đọc docker-compose và Dockerfile.** Manifest Kubernetes,
+  Helm, Terraform và cạnh gRPC thì chưa; cạnh mạng chỉ có lúc chạy (URL ghép
+  trong mã, service discovery) thì không thấy — xem [docs/infra.md](docs/infra.md).
 - **File trên 4 MB không được dò**, và được báo ra. Bộ dò giữ cả dãy token
   trong bộ nhớ, nên một bundle đã minify 32 MB ngốn hơn một gigabyte.
 - **Thứ tự bước trong `flow` chưa kiểm.** Bộ quét không phân biệt được lời gọi

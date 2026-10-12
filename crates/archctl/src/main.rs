@@ -106,10 +106,13 @@ Lệnh chung:
                                           Cho thẳng đường dẫn thì nhanh nhất.
                                           --strict: mọi cảnh báo, kể cả
                                           của file luật, thành vi phạm.
-  archctl scan [--root <dir>] [--json] [<file>...]
+  archctl scan [--root <dir>] [--json] [--verbatim] [<file>...]
                                           In import archctl đọc được, đích
-                                          phân giải của từng cái, và cạnh
-                                          qua ranh giới ngôn ngữ.
+                                          phân giải của từng cái, cạnh qua
+                                          ranh giới ngôn ngữ, và service đọc
+                                          từ docker-compose, Dockerfile.
+                                          --verbatim: in cả đối số của lệnh
+                                          và chỉ thị (có thể chứa secret).
                                           Không cần .arch/.
   archctl diff [<git-ref>] [--root <dir>] So luật hiện tại với một bản trước
   archctl parse <file.arch>               Chỉ đọc và kiểm tra file luật
@@ -279,6 +282,9 @@ fn cmd_check(args: &[String]) -> ExitCode {
         + report.vacuous.len()
         + report.oversized.len()
         + report.unproven.len()
+        + report.deploy_unread.len()
+        + report.entry_unknown.len()
+        + report.links_unseen.len()
         + law.len();
     let failed = fresh > 0 || (strict && unchecked > 0);
     if strict && fresh == 0 && unchecked > 0 {
@@ -347,7 +353,8 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
         report.by_lang.iter().map(|(l, n)| format!("{n} {}", l.name())).collect();
     // Quét một phần thì con số tổng vô nghĩa, nói rõ phạm vi thay vì in chúng.
     if report.partial {
-        crate::say!("kiến trúc {hash} · chỉ quét {} file vừa đổi\n", report.files_scanned);
+        let deploy = if report.deploy_checked { " · và cấu hình triển khai" } else { "" };
+        crate::say!("kiến trúc {hash} · chỉ quét {} file vừa đổi{deploy}\n", report.files_scanned);
     } else {
         crate::say!(
             "kiến trúc {hash} · {} file quét ({}) · {}/{total} component trong diện kiểm\n",
@@ -368,8 +375,16 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
             Reason::NoAllow => "không được phép",
             Reason::NotOwner => "không phải chủ sở hữu",
             Reason::Leaked => "lọt ra ngoài vùng",
+            Reason::NotLinked => "cạnh mạng không có link",
+            Reason::NotRun => "không có trong runs",
         };
-        crate::say!("✗ VI PHẠM  {} -> {}  ({what}, {})", v.from, v.to, v.status.as_str());
+        match v.reason {
+            Reason::NotRun => crate::say!(
+                "✗ VI PHẠM  {} chạy trong service {}  ({what}, {})",
+                v.to, v.from, v.status.as_str()
+            ),
+            _ => crate::say!("✗ VI PHẠM  {} -> {}  ({what}, {})", v.from, v.to, v.status.as_str()),
+        }
         match v.via {
             Via::Import => crate::say!("  {}:{}  import '{}'", v.file, v.line, v.spec),
             Via::Table if v.count > 1 => crate::say!(
@@ -385,6 +400,7 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
                 "  {}:{}  gọi `{}` qua ranh giới ngôn ngữ",
                 v.file, v.line, v.spec
             ),
+            Via::Network | Via::Entry => crate::say!("  {}:{}  {}", v.file, v.line, v.spec),
         }
         crate::say!("  luật: {}", v.rule);
         crate::say!("  → {}", v.hint);
@@ -409,6 +425,26 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
                     Reason::NoAllow | Reason::NotOwner => crate::say!(
                         "    archctl propose 'allow {} -> {}' --reason \"...\"",
                         v.from, v.to
+                    ),
+                    // Đích chưa khai: `link` tới nó không hợp lệ cho tới khi có
+                    // dòng `service`.
+                    Reason::NotLinked if arch_core::check::to_undeclared(v) => crate::say!(
+                        "    archctl propose 'service {} from compose:{}' --reason \"...\"   (rồi `link {} -> {}`)",
+                        arch_core::discover::pascal_case(&v.to),
+                        v.to,
+                        v.from,
+                        arch_core::discover::pascal_case(&v.to)
+                    ),
+                    Reason::NotLinked => crate::say!(
+                        "    archctl propose 'link {} -> {}' --reason \"...\"",
+                        v.from, v.to
+                    ),
+                    // `runs` nằm trong dòng `service`, mà đề xuất chỉ thêm
+                    // dòng mới: sửa dòng đó là việc của người.
+                    Reason::NotRun => crate::say!(
+                        "    báo người sửa `runs` của service {} trong {}",
+                        v.from,
+                        arch_core::ARCH_FILE
                     ),
                 }
             }
@@ -479,12 +515,28 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
         crate::say!("⚠ MẪU CHỒNG NHAU  {file} khớp cả {}\n", owners.join(" và "));
     }
 
+    // Tầng hạ tầng: thứ không đọc được thì nói ra, không im lặng (TM-12).
+    for u in report.deploy_unread.iter().take(MAX_LISTED) {
+        crate::say!("⚠ CHƯA ĐỌC ĐƯỢC  {} — {}\n", u.file, u.why);
+    }
+    for (service, why) in report.entry_unknown.iter().take(MAX_LISTED) {
+        crate::say!("⚠ KHÔNG RÕ ĐIỂM VÀO  service {service} — {why}");
+        crate::say!("  → `runs` của nó chỉ được kiểm theo cạnh import\n");
+    }
+    for (from, to, line) in report.links_unseen.iter().take(MAX_LISTED) {
+        crate::say!("⚠ LINK KHÔNG THẤY TRONG CẤU HÌNH  link {from} -> {to}");
+        crate::say!("  {}:{line}  — không compose nào cho thấy {from} gọi {to}\n", arch_core::ARCH_FILE);
+    }
+
     for (label, shown, total) in [
         ("khai báo lạc hậu", MAX_LISTED, report.missing.len()),
         ("kiểm không kết luận", MAX_LISTED, report.vacuous.len()),
         ("file quá lớn", MAX_LISTED, report.oversized.len()),
         ("mẫu chồng nhau", MAX_LISTED, report.ambiguous.len()),
         ("cách kiểm chưa chứng minh", MAX_LISTED, report.unproven.len()),
+        ("file triển khai chưa đọc được", MAX_LISTED, report.deploy_unread.len()),
+        ("service không rõ điểm vào", MAX_LISTED, report.entry_unknown.len()),
+        ("link không thấy trong cấu hình", MAX_LISTED, report.links_unseen.len()),
     ] {
         if let Some(rest) = total.checked_sub(shown).filter(|n| *n > 0) {
             crate::say!("⚠ … còn {rest} {label} nữa — xem `--json`\n");
@@ -499,6 +551,14 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
     }
     if report.files_unmapped > 0 && !report.partial {
         crate::say!("⚠ {} file không thuộc component nào trong sơ đồ", report.files_unmapped);
+    }
+    if !report.services_undeclared.is_empty() {
+        let names: Vec<String> = report
+            .services_undeclared
+            .iter()
+            .map(|(file, line, name)| format!("{name} ({file}:{line})"))
+            .collect();
+        crate::say!("⚠ SERVICE CHƯA KHAI  {}", names.join(", "));
     }
 
     if !split.grandfathered.is_empty() {
@@ -535,9 +595,12 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
         + report.oversized.len()
         + report.unresolved.len()
         + report.ambiguous.len()
+        + report.deploy_unread.len()
+        + report.entry_unknown.len()
+        + report.links_unseen.len()
         + usize::from(!report.unchecked.is_empty())
         + usize::from(report.files_unmapped > 0)
-;
+        + usize::from(!report.services_undeclared.is_empty());
     crate::say!("\n{} vi phạm mới, {warnings} cảnh báo", split.fresh.len());
     if !memory.pending.is_empty() {
         crate::say!("{} đề xuất đang chờ người quyết định — archctl proposals", memory.pending.len());
@@ -561,6 +624,8 @@ fn print_json(hash: &str, report: &Report, law: &[Diag]) {
                     Via::Symbol => "symbol",
                     Via::Table => "table",
                     Via::Ffi => "ffi",
+                    Via::Network => "network",
+                    Via::Entry => "entry",
                 }),
                 v.count,
                 json::string(match v.reason {
@@ -568,6 +633,8 @@ fn print_json(hash: &str, report: &Report, law: &[Diag]) {
                     Reason::NoAllow => "no_allow",
                     Reason::NotOwner => "not_owner",
                     Reason::Leaked => "leaked",
+                    Reason::NotLinked => "not_linked",
+                    Reason::NotRun => "not_run",
                 }),
                 json::string(&v.rule),
                 json::string(v.status.as_str()),
@@ -666,8 +733,33 @@ fn print_json(hash: &str, report: &Report, law: &[Diag]) {
         })
         .collect();
 
+    let deploy_unread: Vec<String> = report
+        .deploy_unread
+        .iter()
+        .map(|u| format!(r#"{{"file":{},"why":{}}}"#, json::string(&u.file), json::string(&u.why)))
+        .collect();
+    let entry_unknown: Vec<String> = report
+        .entry_unknown
+        .iter()
+        .map(|(s, why)| format!(r#"{{"service":{},"why":{}}}"#, json::string(s), json::string(why)))
+        .collect();
+    let undeclared: Vec<String> = report
+        .services_undeclared
+        .iter()
+        .map(|(file, line, name)| {
+            format!(r#"{{"file":{},"line":{line},"name":{}}}"#, json::string(file), json::string(name))
+        })
+        .collect();
+    let unseen: Vec<String> = report
+        .links_unseen
+        .iter()
+        .map(|(from, to, line)| {
+            format!(r#"{{"from":{},"to":{},"line":{line}}}"#, json::string(from), json::string(to))
+        })
+        .collect();
+
     crate::say!(
-        r#"{{"archHash":{},"filesScanned":{},"filesUnmapped":{},"checked":{},"unchecked":{},"violations":[{}],"unresolved":[{}],"missing":[{}],"vacuous":[{}],"unproven":[{}],"oversized":[{}],"ambiguous":[{}],"lawWarnings":[{}]}}"#,
+        r#"{{"archHash":{},"filesScanned":{},"filesUnmapped":{},"checked":{},"unchecked":{},"violations":[{}],"unresolved":[{}],"missing":[{}],"vacuous":[{}],"unproven":[{}],"oversized":[{}],"ambiguous":[{}],"deployUnread":[{}],"entryUnknown":[{}],"servicesUndeclared":[{}],"linksUnseen":[{}],"lawWarnings":[{}]}}"#,
         json::string(hash),
         report.files_scanned,
         report.files_unmapped,
@@ -680,6 +772,10 @@ fn print_json(hash: &str, report: &Report, law: &[Diag]) {
         unproven.join(","),
         oversized.join(","),
         ambiguous.join(","),
+        deploy_unread.join(","),
+        entry_unknown.join(","),
+        undeclared.join(","),
+        unseen.join(","),
         law_warnings.join(","),
     );
 }
@@ -801,12 +897,14 @@ fn cmd_scan(args: &[String]) -> ExitCode {
     use arch_core::scan::{self, Lang};
 
     let mut as_json = false;
+    let mut verbatim = false;
     let mut only: Vec<String> = Vec::new();
     let mut root_arg: Option<PathBuf> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--json" => as_json = true,
+            "--verbatim" => verbatim = true,
             "--root" => match args.get(i + 1) {
                 Some(p) => {
                     root_arg = Some(PathBuf::from(p));
@@ -832,6 +930,23 @@ fn cmd_scan(args: &[String]) -> ExitCode {
         arch_core::check::source_files(&root, &arch_core::read_ignores(&root))
     } else {
         relative_to(&root, &only)
+            .into_iter()
+            .filter(|f| scan::is_supported(f) || scan::deploy::touches_deploy(f))
+            .collect()
+    };
+    // Cho thẳng tên file thì đọc cả file trong thư mục test hay ví dụ: người
+    // gõ đã chọn nó.
+    let deploy_files: Vec<String> = if only.is_empty() {
+        arch_core::check::deploy_files(&root, &arch_core::read_ignores(&root))
+    } else {
+        files
+            .iter()
+            .filter(|f| {
+                let name = f.rsplit('/').next().unwrap_or(f);
+                scan::deploy::is_compose(name) || scan::deploy::is_dockerfile(name)
+            })
+            .cloned()
+            .collect()
     };
 
     let resolver = Resolver::new(&root);
@@ -939,10 +1054,261 @@ fn cmd_scan(args: &[String]) -> ExitCode {
             ));
         }
     }
+    let deploy = scan_deploy(&root, &resolver, &deploy_files, as_json, verbatim);
     if as_json {
-        say!(r#"{{"root":{},"files":[{}]}}"#, json::string(&root.to_string_lossy()), json_files.join(","));
+        say!(
+            r#"{{"root":{},"files":[{}],"deploy":{deploy}}}"#,
+            json::string(&root.to_string_lossy()),
+            json_files.join(",")
+        );
     }
     ExitCode::from(exit::OK)
+}
+
+/// Phần triển khai của `scan`: dữ kiện từng file compose và Dockerfile như bộ
+/// đọc thấy, rồi từng service đã ghép.
+///
+/// Mặc định không in thứ gì có thể mang secret (TM-10): không đối số của chỉ
+/// thị Dockerfile (`ENV OPENAI_API_KEY=…`), không argv của lệnh (`--requirepass
+/// …`), không phần `user:pass@` của đường dẫn, image hay URL (`ADD https://…`,
+/// `include:`). `--verbatim` in nguyên những thứ đó, cho bộ đo đối chiếu với bộ
+/// đọc khác. Giá trị biến môi trường của compose thì không bao giờ được in, kể
+/// cả với `--verbatim`.
+fn scan_deploy(
+    root: &Path,
+    resolver: &arch_core::resolve::Resolver,
+    files: &[String],
+    as_json: bool,
+    verbatim: bool,
+) -> String {
+    use arch_core::scan::{compose, deploy, dockerfile};
+    let opt = |v: Option<&str>| v.map_or_else(|| "null".to_string(), json::string);
+    let command = |c: &Option<(dockerfile::Command, usize)>| match c {
+        None => "null".to_string(),
+        Some((cmd, line)) => {
+            let (exec, argv) = match cmd {
+                dockerfile::Command::Exec(a) => (true, a.clone()),
+                dockerfile::Command::Shell(s) => (false, vec![s.clone()]),
+            };
+            let argv = if verbatim {
+                format!(r#","argv":{}"#, json::strings(argv.iter().map(String::as_str)))
+            } else {
+                String::new()
+            };
+            format!(r#"{{"exec":{exec},"argc":{}{argv},"line":{line}}}"#, match cmd {
+                dockerfile::Command::Exec(a) => a.len(),
+                dockerfile::Command::Shell(_) => 1,
+            })
+        }
+    };
+    // Chuỗi lấy từ cấu hình (đường dẫn, image, URL của `ADD`, `include`): mặc
+    // định qua `shown_path`, bỏ `user:pass@` và cắt bớt (TM-10).
+    let shown = |s: &str| if verbatim { s.to_string() } else { deploy::shown_path(s) };
+    let quoted = |s: &str| json::string(&shown(s));
+    let maybe = |s: Option<&str>| s.map_or_else(|| "null".to_string(), &quoted);
+    let list = |v: &[String]| format!("[{}]", v.iter().map(|s| quoted(s)).collect::<Vec<_>>().join(","));
+    let pairs = |v: &[(String, usize)]| {
+        format!("[{}]", v.iter().map(|(n, l)| format!("[{},{l}]", quoted(n))).collect::<Vec<_>>().join(","))
+    };
+
+    let mut file_json: Vec<String> = Vec::new();
+    for file in files {
+        let name = file.rsplit('/').next().unwrap_or(file);
+        let text = match deploy::read_in(root, file, deploy::MAX_DEPLOY_BYTES) {
+            Ok(t) => t,
+            Err(why) => {
+                file_json.push(format!(r#"{{"file":{},"error":{}}}"#, json::string(file), json::string(&why)));
+                continue;
+            }
+        };
+        if deploy::is_compose(name) {
+            match compose::parse(&text) {
+                Err(e) => file_json.push(format!(
+                    r#"{{"file":{},"kind":"compose","error":{}}}"#,
+                    json::string(file),
+                    json::string(&e.to_string())
+                )),
+                Ok(f) => {
+                    let services: Vec<String> = f
+                        .services
+                        .iter()
+                        .map(|s| {
+                            let build = s.build.as_ref().map_or_else(
+                                || "null".to_string(),
+                                |b| {
+                                    format!(
+                                        r#"{{"context":{},"dockerfile":{},"inline":{},"target":{},"line":{}}}"#,
+                                        quoted(&b.context),
+                                        maybe(b.dockerfile.as_deref()),
+                                        b.inline.is_some(),
+                                        maybe(b.target.as_deref()),
+                                        b.line
+                                    )
+                                },
+                            );
+                            // Chỉ khoá và dòng: tên máy rút từ giá trị có thể là
+                            // một mảnh của secret khi nó không phải tên service.
+                            let env: Vec<String> = s
+                                .env
+                                .iter()
+                                .map(|e| format!(r#"{{"key":{},"line":{}}}"#, json::string(&e.key), e.line))
+                                .collect();
+                            let binds: Vec<String> = s
+                                .binds
+                                .iter()
+                                .map(|b| format!("[{},{},{}]", quoted(&b.host), quoted(&b.container), b.line))
+                                .collect();
+                            format!(
+                                r#"{{"name":{},"line":{},"image":{},"build":{build},"command":{},"entrypoint":{},"workingDir":{},"dependsOn":{},"links":{},"env":[{}],"envFiles":{},"binds":[{}],"extends":{},"aliases":{}}}"#,
+                                quoted(&s.name),
+                                s.line,
+                                maybe(s.image.as_deref()),
+                                command(&s.command),
+                                command(&s.entrypoint),
+                                maybe(s.working_dir.as_deref()),
+                                pairs(&s.depends_on),
+                                pairs(&s.links),
+                                env.join(","),
+                                pairs(&s.env_files),
+                                binds.join(","),
+                                s.extends.as_ref().map_or_else(|| "null".to_string(), |e| quoted(&e.service)),
+                                list(&s.aliases),
+                            )
+                        })
+                        .collect();
+                    file_json.push(format!(
+                        r#"{{"file":{},"kind":"compose","services":[{}],"includes":{}}}"#,
+                        json::string(file),
+                        services.join(","),
+                        pairs(&f.includes)
+                    ));
+                }
+            }
+        } else {
+            let d = dockerfile::parse(&text);
+            let stages: Vec<String> = d
+                .stages
+                .iter()
+                .map(|st| {
+                    let copies: Vec<String> = st
+                        .copies
+                        .iter()
+                        .map(|c| {
+                            format!(
+                                r#"{{"from":{},"sources":{},"dest":{},"line":{}}}"#,
+                                maybe(c.from.as_deref()),
+                                list(&c.sources),
+                                quoted(&c.dest),
+                                c.line
+                            )
+                        })
+                        .collect();
+                    format!(
+                        r#"{{"from":{},"name":{},"line":{},"workdir":{},"copies":[{}],"cmd":{},"entrypoint":{}}}"#,
+                        quoted(&st.from),
+                        maybe(st.name.as_deref()),
+                        st.line,
+                        maybe(st.workdir.as_deref()),
+                        copies.join(","),
+                        command(&st.cmd),
+                        command(&st.entrypoint),
+                    )
+                })
+                .collect();
+            let instructions: Vec<String> = dockerfile::instructions_of(&text)
+                .iter()
+                .map(|(line, keyword, args)| {
+                    let args = if verbatim { format!(r#","args":{}"#, json::string(args)) } else { String::new() };
+                    format!(r#"{{"line":{line},"keyword":{}{args}}}"#, json::string(keyword))
+                })
+                .collect();
+            file_json.push(format!(
+                r#"{{"file":{},"kind":"dockerfile","instructions":[{}],"stages":[{}]}}"#,
+                json::string(file),
+                instructions.join(","),
+                stages.join(",")
+            ));
+        }
+    }
+
+    let loaded = deploy::load(root, files);
+    let mut services: Vec<String> = Vec::new();
+    for svc in &loaded.services {
+        let key = match &svc.key {
+            deploy::Key::Compose { dir, name } => format!("compose:{}{name}", if dir.is_empty() { String::new() } else { format!("{dir}/") }),
+            deploy::Key::Dockerfile(p) => format!("dockerfile:{p}"),
+        };
+        let starts: Vec<(String, Vec<String>)> = svc
+            .starts
+            .iter()
+            .map(|st| (format!("{}:{} {}", st.file, st.line, st.shown), arch_core::check::entry_files(root, resolver, &st.entries)))
+            .collect();
+        if !as_json {
+            say!("triển khai {key} ({}:{})", svc.file, svc.line);
+            for ((shown, entry), st) in starts.iter().zip(&svc.starts) {
+                say!("  khởi chạy {shown} → {}", if entry.is_empty() { "không tìm thấy mã trong repo".to_string() } else { entry.join(", ") });
+                if !st.unresolved.is_empty() && !entry.is_empty() {
+                    say!("  ? không lần ra mã của `{}`", st.unresolved.join("`, `"));
+                }
+                if !st.cut.is_empty() {
+                    say!("  ? không đọc hết: {}", st.cut.join("; "));
+                }
+            }
+            for e in &svc.edges {
+                say!("  mạng → {}  ({}:{} {})", e.to, e.file, e.line, e.shown);
+            }
+            if let Some(why) = &svc.unknown {
+                say!("  ? {why}");
+            }
+        }
+        let edges: Vec<String> = svc
+            .edges
+            .iter()
+            .map(|e| {
+                format!(
+                    r#"{{"to":{},"file":{},"line":{},"shown":{}}}"#,
+                    json::string(&e.to),
+                    json::string(&e.file),
+                    e.line,
+                    json::string(&e.shown)
+                )
+            })
+            .collect();
+        let starts_json: Vec<String> = starts
+            .iter()
+            .zip(&svc.starts)
+            .map(|((shown, entry), st)| {
+                format!(
+                    r#"{{"shown":{},"entries":{},"unresolved":{},"cut":{}}}"#,
+                    json::string(shown),
+                    json::strings(entry.iter().map(String::as_str)),
+                    json::strings(st.unresolved.iter().map(String::as_str)),
+                    json::strings(st.cut.iter().map(String::as_str))
+                )
+            })
+            .collect();
+        services.push(format!(
+            r#"{{"key":{},"file":{},"line":{},"code":{},"edges":[{}],"starts":[{}],"unknown":{}}}"#,
+            json::string(&key),
+            json::string(&svc.file),
+            svc.line,
+            svc.code,
+            edges.join(","),
+            starts_json.join(","),
+            opt(svc.unknown.as_deref()),
+        ));
+    }
+    if !as_json {
+        for u in &loaded.unread {
+            say!("chưa đọc được {} — {}", u.file, u.why);
+        }
+    }
+    let unread: Vec<String> = loaded
+        .unread
+        .iter()
+        .map(|u| format!(r#"{{"file":{},"why":{}}}"#, json::string(&u.file), json::string(&u.why)))
+        .collect();
+    format!(r#"{{"files":[{}],"services":[{}],"unread":[{}]}}"#, file_json.join(","), services.join(","), unread.join(","))
 }
 
 /// Đưa đường dẫn người dùng gõ về dạng tương đối so với gốc dự án, và bỏ
@@ -959,7 +1325,10 @@ fn relative_to(root: &Path, paths: &[String]) -> Vec<String> {
                 .or_else(|_| base.join(p).canonicalize())
                 .ok()?;
             let rel = full.strip_prefix(&base).ok()?.to_string_lossy().replace('\\', "/");
-            arch_core::scan::is_supported(&rel).then_some(rel)
+            // Giữ mọi file, không chỉ file mã: `env_file`, script không đuôi
+            // là thứ cấu hình triển khai trỏ tới, và `check` tự chọn có đọc lại
+            // cấu hình hay không (`may_touch_deploy`).
+            full.is_file().then_some(rel)
         })
         .collect()
 }
@@ -1030,9 +1399,7 @@ fn changed_files(root: &Path) -> Option<Vec<String>> {
         if path.ends_with(".arch/system.arch") {
             return None;
         }
-        if !arch_core::scan::is_supported(path) {
-            continue;
-        }
+        // Mọi file, không chỉ file mã: xem `relative_to`.
         if root.join(path).is_file() {
             files.push(path.to_string());
         } else if code[0] != b'D' && code[1] != b'D' {

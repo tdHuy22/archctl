@@ -50,6 +50,25 @@ CROSSINGS = {
 }
 
 
+# Tầng hạ tầng phải có ở cả hai phía như cạnh liên ngôn ngữ: `init` sinh ra
+# `link` và `runs` cho nó, và gỡ đi thì `check` phải báo. Tên là tên mà `init`
+# đặt: service theo tên trong compose, component theo thư mục.
+DEPLOY = {
+    # `depends_on` của compose, và tên service trong biến môi trường.
+    "example-voting-app": {
+        "links": [("Vote", "Redis"), ("Result", "Db"), ("Worker", "Db"), ("Worker", "Redis")],
+        # `vote/Dockerfile` stage `dev`: `python app.py` trong `vote/`.
+        "runs": [("Vote", "Vote")],
+    },
+    "open-webui": {
+        # `OLLAMA_BASE_URL=http://ollama:11434` và `depends_on: ollama`.
+        "links": [("OpenWebui", "Ollama")],
+        # `CMD ["bash", "start.sh"]` → `uvicorn open_webui.main:app`.
+        "runs": [("OpenWebui", "Routers")],
+    },
+}
+
+
 def _run(archctl, args, timeout=300):
     t = time.perf_counter()
     p = subprocess.run([archctl, *args], capture_output=True, text=True, timeout=timeout)
@@ -119,7 +138,10 @@ def analyse(archctl: str, name: str, src: Path, work: Path, expected: int,
         out["problems"].append(
             f"số file lệch: archctl quét {out['scanned']}, git có {out['files']} file nguồn"
         )
-    if out["checked"] == 0:
+    # Repo mà các phần không import lẫn nhau (voting app: ba ứng dụng riêng)
+    # vẫn có cái để kiểm ở tầng triển khai: `runs` và `link`.
+    deploy_rules = re.search(r"^service\s+\w+\s+from\s+\S+\s+runs\s", text, re.M)
+    if out["checked"] == 0 and not deploy_rules:
         out["problems"].append("không component nào vào diện kiểm, 0 vi phạm là vô nghĩa")
     if "lawWarnings" not in rep:
         out["problems"].append("JSON thiếu khoá `lawWarnings`")
@@ -133,6 +155,7 @@ def analyse(archctl: str, name: str, src: Path, work: Path, expected: int,
         out["problems"].append(f"luật sinh ra đã có cảnh báo: dòng {w['line']}: {w['msg']}")
 
     crossings(archctl, name, law, root, out)
+    deploy(archctl, name, law, root, rep, out)
 
     out["check_ms"] = round(_median_ms(archctl, ["check", *root], rounds))
     one = pick_source(work)
@@ -167,6 +190,72 @@ def crossings(archctl: str, name: str, law: Path, root: list, out: dict):
     for a, b in want:
         if (a, b) not in seen:
             out["problems"].append(f"thiếu cạnh liên ngôn ngữ: đổi allow {a} -> {b} thành deny mà check không báo")
+
+
+def deploy(archctl: str, name: str, law: Path, root: list, rep: dict, out: dict):
+    """Tầng hạ tầng của luật sinh ra phải tự nhất quán, và cạnh bắt buộc của
+    repo phải có ở cả hai phía."""
+    text = law.read_text()
+    out["services"] = len(re.findall(r"^service ", text, re.M))
+    out["links"] = sum(len(t.split(",")) for t in re.findall(r"^link\s+\w+\s*->\s*([^@\n]+)", text, re.M))
+    for key, what, shown in [
+        ("deployUnread", "không đọc được file triển khai", lambda x: f"{x['file']}: {x['why']}"),
+        ("entryUnknown", "service có runs mà không rõ điểm vào", lambda x: f"{x['service']}: {x['why']}"),
+        ("linksUnseen", "link sinh ra mà không thấy trong cấu hình", lambda x: f"{x['from']} -> {x['to']}"),
+        ("servicesUndeclared", "service compose không được sinh", lambda x: f"{x['name']} ({x['file']}:{x['line']})"),
+    ]:
+        for item in rep.get(key, [])[:4]:
+            out["problems"].append(f"{what}: {shown(item)}")
+    for m in rep.get("missing", []):
+        if m["source"].startswith("service "):
+            out["problems"].append(f"{m['source']} `{m['name']}`: {m['hint']}")
+
+    want = DEPLOY.get(name)
+    if not want:
+        return
+    links = {(a, b.strip()) for a, bs in re.findall(r"^link\s+(\w+)\s*->\s*([^@\n]+)", text, re.M)
+             for b in bs.split(",")}
+    runs = {(s, c.strip()) for s, cs in re.findall(r"^service\s+(\w+)\s+from\s+\S+\s+runs\s+([^@\n]+)", text, re.M)
+            for c in cs.split(",")}
+    checks = []
+    for a, b in want.get("links", []):
+        if (a, b) not in links:
+            out["problems"].append(f"thiếu cạnh mạng: luật sinh ra không có link {a} -> {b}")
+        else:
+            checks.append(("network", a, b))
+    for s, c in want.get("runs", []):
+        if (s, c) not in runs:
+            out["problems"].append(f"thiếu runs: luật sinh ra không có {c} trong runs của service {s}")
+        else:
+            checks.append(("runs", s, c))
+    # Gỡ từng cái đi thì `check` phải báo đúng loại vi phạm đó.
+    for kind, a, b in checks:
+        if kind == "network":
+            pattern = rf"^(link\s+{a}\s*->\s*)([^@\n]+)"
+            broken = re.sub(pattern, lambda m: m.group(1) + ", ".join(
+                x.strip() for x in m.group(2).split(",") if x.strip() != b) + " ", text, flags=re.M)
+            broken = re.sub(rf"^link\s+{a}\s*->\s*@", "#", broken, flags=re.M)
+        else:
+            pattern = rf"^(service\s+{a}\s+from\s+\S+\s+runs\s+)([^@\n]+)"
+            # Gỡ hết thì service mất `runs` và không còn gì để kiểm: khi đó thay
+            # bằng một component khác để `runs` vẫn có hiệu lực.
+            others = [c for c in re.findall(r"^component\s+(\w+)", text, re.M) if c != b]
+            def drop(m):
+                rest = [x.strip() for x in m.group(2).split(",") if x.strip() != b] or others[:1]
+                return m.group(1) + ", ".join(rest) + " "
+            broken = re.sub(pattern, drop, text, flags=re.M)
+        law.write_text(broken)
+        try:
+            p, _ = _run(archctl, ["check", "--json", *root])
+            seen = {(v["from"], v["to"], v.get("reason")) for v in json.loads(p.stdout)["violations"]}
+        except (json.JSONDecodeError, KeyError):
+            seen = set()
+        finally:
+            law.write_text(text)
+        reason = "not_linked" if kind == "network" else "not_run"
+        if (a, b, reason) not in seen:
+            what = f"link {a} -> {b}" if kind == "network" else f"{b} khỏi runs của {a}"
+            out["problems"].append(f"gỡ {what} mà check không báo {reason}")
 
 
 def pick_source(work: Path):

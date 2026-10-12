@@ -94,7 +94,7 @@ impl Delta {
 /// đổi ngữ nghĩa.
 fn class_of(element_kind: &str) -> Class {
     match element_kind {
-        "component" | "external" | "store" | "rule" => Class::Topology,
+        "component" | "external" | "store" | "rule" | "service" | "link" => Class::Topology,
         _ => Class::Semantic,
     }
 }

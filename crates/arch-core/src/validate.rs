@@ -17,7 +17,85 @@ pub fn validate(doc: &Document) -> Vec<Diag> {
     check_flows(doc, &mut diags);
     check_verify_targets(doc, &mut diags);
     check_verifiability(doc, &mut diags);
+    check_services(doc, &mut diags);
     diags
+}
+
+/// Service có không gian tên riêng, tách khỏi component: `component Api` và
+/// `service Api` là chuyện bình thường ở repo mỗi service một thư mục.
+fn check_services(doc: &Document, diags: &mut Vec<Diag>) {
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    let mut sources: HashMap<String, usize> = HashMap::new();
+    for s in &doc.services {
+        if let Some(first) = seen.insert(s.name.as_str(), s.meta.line) {
+            diags.push(Diag::error(
+                s.meta.line,
+                format!("service `{}` trùng tên đã khai báo ở dòng {first}", s.name),
+            ));
+        }
+        if let Some(source) = &s.source
+            && let Some(first) = sources.insert(source.text(), s.meta.line)
+        {
+            diags.push(
+                Diag::error(
+                    s.meta.line,
+                    format!("`from {}` đã dùng cho service khai báo ở dòng {first}", source.text()),
+                )
+                .with_hint("mỗi service trong compose ứng với đúng một `service`"),
+            );
+        }
+        for name in &s.runs {
+            match doc.component(name) {
+                None => diags.push(
+                    Diag::error(
+                        s.meta.line,
+                        format!("service `{}` chạy component `{name}` chưa khai báo", s.name),
+                    )
+                    .with_hint("`runs` liệt kê component, không phải service"),
+                ),
+                Some(c) if c.external => diags.push(
+                    Diag::error(
+                        s.meta.line,
+                        format!("`runs {name}`: `{name}` là external, không có mã nào để chạy"),
+                    )
+                    .with_hint("thư viện ngoài đi theo component dùng nó, không cần liệt kê"),
+                ),
+                Some(_) => {}
+            }
+        }
+    }
+
+    for link in &doc.links {
+        for name in std::iter::once(&link.from).chain(&link.to) {
+            if doc.service(name).is_none() {
+                diags.push(
+                    Diag::error(link.meta.line, format!("`link` trỏ tới service `{name}` chưa khai báo"))
+                        .with_hint("`link` nối hai service; quan hệ giữa component thì dùng `allow`"),
+                );
+            }
+        }
+        if link.to.contains(&link.from) {
+            diags.push(Diag::warning(
+                link.meta.line,
+                format!("`{}` nối tới chính nó, luật này vô nghĩa", link.from),
+            ));
+        }
+        // Cạnh mạng chỉ thấy được trong cấu hình. Service không có `from` thì
+        // không có cấu hình nào để đối chiếu, và `link` từ nó không bao giờ
+        // kiểm được.
+        if let Some(s) = doc.service(&link.from)
+            && s.source.is_none()
+            && link.meta.status.is_enforced()
+        {
+            diags.push(
+                Diag::warning(
+                    link.meta.line,
+                    format!("service `{}` không có `from`, cạnh mạng của nó không kiểm được", s.name),
+                )
+                .with_hint(format!("thêm `from compose:<tên>` cho service {}", s.name)),
+            );
+        }
+    }
 }
 
 /// Nhất quán bên trong `flow` và `boundary`. Những lỗi này bắt được ngay khi

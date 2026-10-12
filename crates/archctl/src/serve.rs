@@ -10,7 +10,7 @@
 
 use crate::exit;
 use crate::proto::parse_args;
-use arch_core::check::{Report, Via};
+use arch_core::check::{Reason, Report, Via};
 use arch_core::layout::{self, Point};
 use arch_core::model::{Owner, Status};
 use arch_core::protocol::{self, PROPOSALS_FILE};
@@ -376,6 +376,16 @@ fn model_json(root: &Path) -> String {
     for a in &doc.apis {
         nodes.push(node_json(&a.name, "api", &a.symbols.join(", "), &a.meta, &places));
     }
+    let svc = |name: &str| format!("{}{name}", layout::SERVICE_PREFIX);
+    for s in &doc.services {
+        let from = s.source.as_ref().map(|src| src.text()).unwrap_or_default();
+        let sub = match (from.is_empty(), s.runs.is_empty()) {
+            (_, false) if from.is_empty() => s.runs.join(", "),
+            (_, false) => format!("{from} · {}", s.runs.join(", ")),
+            _ => from,
+        };
+        nodes.push(node_json(&svc(&s.name), "service", &sub, &s.meta, &places));
+    }
 
     let edges: Vec<String> = doc
         .rules
@@ -395,6 +405,32 @@ fn model_json(root: &Path) -> String {
                 )
             })
         })
+        .chain(doc.links.iter().flat_map(|l| {
+            let status = l.meta.status.as_str();
+            let line = l.meta.line;
+            let from = svc(&l.from);
+            l.to.iter().map(move |t| {
+                format!(
+                    r#"{{"from":{},"to":{},"kind":"link","status":{},"line":{line}}}"#,
+                    json::string(&from),
+                    json::string(&svc(t)),
+                    json::string(status),
+                )
+            })
+        }))
+        .chain(doc.services.iter().flat_map(|s| {
+            let status = s.meta.status.as_str();
+            let line = s.meta.line;
+            let from = svc(&s.name);
+            s.runs.iter().map(move |c| {
+                format!(
+                    r#"{{"from":{},"to":{},"kind":"runs","status":{},"line":{line}}}"#,
+                    json::string(&from),
+                    json::string(c),
+                    json::string(status),
+                )
+            })
+        }))
         .collect();
 
     let boundaries: Vec<String> = doc
@@ -415,8 +451,15 @@ fn model_json(root: &Path) -> String {
         .map(|v| {
             format!(
                 r#"{{"from":{},"to":{},"file":{},"line":{},"spec":{},"via":{},"count":{},"rule":{},"hint":{},"baselined":{}}}"#,
-                json::string(&v.from),
-                json::string(&v.to),
+                // Vi phạm của tầng hạ tầng xuất phát từ node service.
+                json::string(&match v.reason {
+                    Reason::NotLinked | Reason::NotRun => svc(&v.from),
+                    _ => v.from.clone(),
+                }),
+                json::string(&match v.reason {
+                    Reason::NotLinked => svc(&v.to),
+                    _ => v.to.clone(),
+                }),
                 json::string(&v.file),
                 v.line,
                 json::string(&v.spec),
@@ -425,6 +468,8 @@ fn model_json(root: &Path) -> String {
                     Via::Symbol => "symbol",
                     Via::Table => "table",
                     Via::Ffi => "ffi",
+                    Via::Network => "network",
+                    Via::Entry => "entry",
                 }),
                 v.count,
                 json::string(&v.rule),
@@ -432,6 +477,25 @@ fn model_json(root: &Path) -> String {
                 baseline.contains(&arch_core::baseline::key(v)),
             )
         })
+        .collect();
+
+    // Cảnh báo của tầng hạ tầng, viết sẵn thành câu: giao diện chỉ việc hiện.
+    let card = |title: String, detail: String| {
+        format!(r#"{{"title":{},"detail":{}}}"#, json::string(&title), json::string(&detail))
+    };
+    let deploy: Vec<String> = report
+        .deploy_unread
+        .iter()
+        .map(|u| card(format!("chưa đọc được {}", u.file), u.why.clone()))
+        .chain(report.entry_unknown.iter().map(|(s, why)| {
+            card(format!("không rõ điểm vào của service {s}"), format!("{why} — `runs` chỉ được kiểm theo cạnh import"))
+        }))
+        .chain(report.links_unseen.iter().map(|(from, to, line)| {
+            card(format!("link {from} -> {to}"), format!("system.arch:{line} — không compose nào cho thấy cạnh này"))
+        }))
+        .chain(report.services_undeclared.iter().map(|(file, line, name)| {
+            card(format!("service {name} chưa khai"), format!("{file}:{line} — thêm `service ... from compose:{name}`"))
+        }))
         .collect();
 
     let missing: Vec<String> = report
@@ -495,7 +559,7 @@ fn model_json(root: &Path) -> String {
         .collect();
 
     format!(
-        r#"{{"archHash":{},"nodes":[{}],"edges":[{}],"boundaries":[{}],"violations":[{}],"missing":[{}],"vacuous":[{}],"unproven":[{}],"proposals":[{}],"stats":{{"files":{},"checked":{},"unchecked":{}}}}}"#,
+        r#"{{"archHash":{},"nodes":[{}],"edges":[{}],"boundaries":[{}],"violations":[{}],"missing":[{}],"vacuous":[{}],"unproven":[{}],"deploy":[{}],"proposals":[{}],"stats":{{"files":{},"checked":{},"unchecked":{}}}}}"#,
         json::string(&hash),
         nodes.join(","),
         edges.join(","),
@@ -504,6 +568,7 @@ fn model_json(root: &Path) -> String {
         missing.join(","),
         vacuous.join(","),
         unproven.join(","),
+        deploy.join(","),
         pending.join(","),
         report.files_scanned,
         json::strings(report.checked.iter().map(String::as_str)),
@@ -567,10 +632,16 @@ fn set_status(root: &Path, body: &str) -> Result<(), String> {
     let path = root.join(ARCH_FILE);
     let src = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let (doc, _) = arch_core::load(&src);
+    // `svc:Api` là service Api; tên trần không bao giờ là service, kể cả khi
+    // có `component Api` trùng tên.
+    let (service, key) = match name.strip_prefix(layout::SERVICE_PREFIX) {
+        Some(k) => (true, k),
+        None => (false, name.as_str()),
+    };
     let element = doc
         .elements()
         .into_iter()
-        .find(|e| e.key == name)
+        .find(|e| e.key == key && (e.kind == "service") == service)
         .ok_or_else(|| format!("không có phần tử nào tên `{name}`"))?;
 
     let mut lines: Vec<String> = src.lines().map(str::to_string).collect();

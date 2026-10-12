@@ -4,7 +4,7 @@
 python3 bench/bench.py
 ```
 
-Một lệnh: dựng archctl bản release, tải hai mươi bảy repo ở đúng commit đã ghim
+Một lệnh: dựng archctl bản release, tải hai mươi chín repo ở đúng commit đã ghim
 trong [repos.tsv](repos.tsv), rồi chạy hai phép thử trên từng repo. Chỉ cần
 Python 3 và git, không gói Python nào ngoài thư viện chuẩn.
 
@@ -22,6 +22,7 @@ chỗ mà luật `allow`/`deny` giữa component có nghĩa nhất.
 | C++ | leveldb (storage engine, CMake) |
 | Rust | tokio, ripgrep, rusqlite, pydantic-core (với Python), zstd-rs (với C qua submodule) |
 | Go | hugo (đồ thị dày), etcd (mười bốn `go.mod` trong một repo), kubernetes (phần scheduler, tải sparse; module staging có `go.mod` riêng) |
+| docker-compose | example-voting-app (năm service, stage Dockerfile thừa hưởng `WORKDIR`, bind mount, file compose ghi đè), open-webui (ứng dụng LLM tự host: `build: .`, `COPY --from=build`, điểm vào qua `start.sh`, mã Python trong `backend/` khai bằng `sources` của hatch) |
 
 Lần thêm tám repo cuối (etcd, excalidraw, langchain, leveldb, netbox, nginx,
 scikit-learn, vllm) bắt được bốn chỗ archctl không thấy cạnh nào mà cũng
@@ -82,6 +83,19 @@ cạnh (`CROSSINGS` trong [consistency.py](consistency.py)):
 ngữ. Tự nhất quán không bắt được chỗ này: phần ghép hỏng ở cả `init` lẫn
 `check` thì hai bên vẫn khớp nhau, và cạnh biến mất trong im lặng.
 
+Tầng hạ tầng ([docs/infra.md](../docs/infra.md)) theo cùng cách. Luật sinh ra
+không được có file triển khai nào không đọc được, service có `runs` mà không rõ
+điểm vào, `link` không cấu hình nào cho thấy, hay service compose nào bị bỏ
+sót. Và phải có các cạnh đã biết (`DEPLOY` trong [consistency.py](consistency.py)):
+
+| Repo | Phải có | Gỡ đi thì `check` phải báo |
+| --- | --- | --- |
+| example-voting-app | `link Vote -> Redis`, `Result -> Db`, `Worker -> Db, Redis`; `Vote` trong `runs` của service Vote | `not_linked`, `not_run` |
+| open-webui | `link OpenWebui -> Ollama`; `Routers` trong `runs` của OpenWebui | `not_linked`, `not_run` |
+
+Repo mà các phần không import lẫn nhau (ba ứng dụng riêng của voting app) không
+có component nào vào diện kiểm; nó vẫn đạt vì tầng hạ tầng có cái để kiểm.
+
 **Luồng lệnh** ([flows.py](flows.py)). Mọi lệnh — `init`, `check` theo bốn
 đường, `parse`, `export`, `baseline`, `propose`/`accept`/`block`/`reject`,
 `diff`, `serve` — trên mã người khác viết. Test trong `crates/*/tests/` dựng dự
@@ -136,8 +150,16 @@ bộ trích, nên một lỗi trong bộ trích làm cả hai sai giống nhau m
   được đọc lại độc lập: phía C/C++ trên token thô của clang (module pybind11,
   nanobind, `PyInit_`, `m.def` trong `TORCH_LIBRARY*`), phía Python là
   `torch.ops.ns.op` theo `ast`, PyO3 theo `syn` khi `--require syn`.
+- Hạ tầng: dữ kiện mà `scan --json` đọc từ mọi file compose và Dockerfile git
+  theo dõi (kể cả trong thư mục test, ví dụ) được đọc lại bằng PyYAML (`<<` trải
+  bằng `flatten_mapping`, lệnh dạng chuỗi tách bằng `shlex`) và dockerfile-parse
+  ở mức chỉ thị ([deploy_truth.py](deploy_truth.py)), ghim kèm hash trong
+  [deploy-requirements.txt](deploy-requirements.txt), chỉ khi `--require deploy`
+  (CI bật). dockerfile-parse không hiểu heredoc của BuildKit, nên file có heredoc
+  in `BỎ QUA`; nó cắt lệnh ở dòng trống giữa dòng nối còn BuildKit thì không, nên
+  thước đo thay dòng trống đó bằng chú thích trước khi đưa vào.
 
-Python, notebook, binding, C/C++, Go và Rust đòi khớp cả tên lẫn số dòng: thiếu, thừa hay lệch dòng đều
+Python, notebook, binding, hạ tầng, C/C++, Go và Rust đòi khớp cả tên lẫn số dòng: thiếu, thừa hay lệch dòng đều
 là lệch. Thiếu clang, Node hay Go thì phần đó in `BỎ QUA`; `--require
 clang,node,go` biến việc thiếu thành mã thoát 2, và với Node thì đòi cả khả năng
 gỡ kiểu TS. Thước đo tự hỏng cũng là mã 2 chứ không phải "đạt": clang, Node hay
@@ -191,8 +213,16 @@ mạng. Kiểu `crossing` xoá cạnh liên ngôn ngữ khỏi
 cả luật `init` sinh ra lẫn vi phạm `check` báo, trên pydantic-core, và chỉ
 danh sách cạnh bắt buộc ở trên bắt được nó. `--rust-repo ripgrep` thêm ba kiểu y vậy ở file
 Rust, đối chiếu bằng `syn` nên cần mạng; kiểu thêm import giả nằm ngoài macro,
-nên nó cũng giữ cho phép miễn trừ import trong thân macro không rộng ra. CI
-chạy bước này sau bộ đo, với `--rust-repo ripgrep --notebook-repo matplotlib`.
+nên nó cũng giữ cho phép miễn trừ import trong thân macro không rộng ra.
+
+Bốn kiểu phá tầng hạ tầng của bộ đo, trên example-voting-app: `init` mất mọi
+`link`, `check` giấu vi phạm cạnh mạng, `check` giấu vi phạm `runs`, `check`
+báo thêm một file triển khai không đọc được. `--deploy-repo example-voting-app`
+thêm bốn kiểu ở dữ kiện compose và Dockerfile của `scan --json` (mất một
+`depends_on`, lệch dòng một biến môi trường, thêm một tên máy giả, sửa một chỉ
+thị Dockerfile), đối chiếu bằng PyYAML nên cần mạng. CI chạy bước này sau bộ
+đo, với `--rust-repo ripgrep --notebook-repo matplotlib --deploy-repo
+example-voting-app`: hai mươi tám kiểu phá.
 
 Nó có mặt vì bộ đo này từng nằm ngoài git, và lúc đưa vào, đọc lại thì bốn
 phép kiểm không kiểm gì: một cái chỉ xét file có tồn tại vì vế sau của `or`

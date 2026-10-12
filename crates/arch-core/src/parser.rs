@@ -64,6 +64,14 @@ pub fn parse(src: &str) -> (Document, Vec<Diag>) {
                 parse_verify(rest, meta, line.no, &mut doc, &mut diags);
                 i += 1;
             }
+            "service" => {
+                parse_service(rest, meta, line.no, &mut doc, &mut diags);
+                i += 1;
+            }
+            "link" => {
+                parse_link(rest, meta, line.no, &mut doc, &mut diags);
+                i += 1;
+            }
             "invariant" => {
                 parse_invariant(rest, meta, line.no, &mut doc, &mut diags);
                 i += 1;
@@ -88,7 +96,8 @@ pub fn parse(src: &str) -> (Document, Vec<Diag>) {
                 diags.push(
                     Diag::error(line.no, format!("từ khoá không nhận ra: `{other}`")).with_hint(
                         "từ khoá hợp lệ: component, external, store, allow, deny, \
-                         flow, contract, boundary, invariant, view, api",
+                         flow, contract, boundary, invariant, view, api, verify, \
+                         service, link",
                     ),
                 );
                 i += 1;
@@ -428,6 +437,118 @@ fn parse_target(s: &str, no: usize, diags: &mut Vec<Diag>) -> Option<Target> {
         return None;
     }
     Some(Target::Named(s.to_string()))
+}
+
+/// `service Api from compose:api runs Serve, Rag`
+///
+/// `from` trước `runs`, cả hai đều tuỳ chọn. Thứ tự cố định để một dòng chỉ
+/// có một cách đọc.
+fn parse_service(rest: &str, meta: Meta, no: usize, doc: &mut Document, diags: &mut Vec<Diag>) {
+    let (head, runs) = match rest.split_once(" runs ") {
+        Some((h, r)) => (h, split_list(r)),
+        None => (rest, Vec::new()),
+    };
+    let (name, from) = match head.split_once(" from ") {
+        Some((n, f)) => (n.trim(), Some(f.trim())),
+        None => (head.trim(), None),
+    };
+    if name.contains(" runs") || from.is_some_and(|f| f.contains(' ')) {
+        diags.push(
+            Diag::error(no, "`service` viết sai thứ tự hay thừa chữ")
+                .with_hint("dạng đúng: service <Tên> [from compose:<tên>] [runs <Component>, ...]"),
+        );
+        return;
+    }
+    if !check_ident(name, "tên service", no, diags) {
+        return;
+    }
+    for c in &runs {
+        if !check_ident(c, "tên component trong runs", no, diags) {
+            return;
+        }
+    }
+    let source = match from {
+        None => None,
+        Some(text) => match parse_source(text) {
+            Ok(s) => Some(s),
+            Err(why) => {
+                diags.push(Diag::error(no, format!("`from {text}`: {why}")).with_hint(
+                    "dạng đúng: from compose:<service>, from compose:<thư mục>/<service>, \
+                     from dockerfile:<đường dẫn>",
+                ));
+                return;
+            }
+        },
+    };
+    doc.services.push(Service { name: name.to_string(), source, runs, meta });
+}
+
+/// Đường dẫn trong `from` là tương đối với gốc dự án và không được ra khỏi đó:
+/// file luật là thứ agent đề xuất được, và một `from dockerfile:../../x` là
+/// cách nhờ archctl đọc hộ một file nằm ngoài repo.
+fn parse_source(text: &str) -> Result<Source, String> {
+    let relative = |path: &str| {
+        !path.is_empty()
+            && !path.starts_with('/')
+            && !path.contains('\\')
+            && path.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+    };
+    if let Some(rest) = text.strip_prefix("compose:") {
+        let (dir, name) = match rest.rsplit_once('/') {
+            Some((d, n)) => (Some(d), n),
+            None => (None, rest),
+        };
+        if !is_compose_name(name) {
+            return Err(format!("tên service compose không hợp lệ: `{name}`"));
+        }
+        // `compose:./api` là service `api` trong compose ở gốc dự án.
+        let dir = match dir {
+            Some(".") => Some(""),
+            Some(d) if !relative(d) => {
+                return Err(format!("thư mục `{d}` phải là đường dẫn tương đối nằm trong dự án"));
+            }
+            d => d,
+        };
+        return Ok(Source::Compose { dir: dir.map(str::to_string), name: name.to_string() });
+    }
+    if let Some(path) = text.strip_prefix("dockerfile:") {
+        if !relative(path) {
+            return Err(format!("`{path}` phải là đường dẫn tương đối nằm trong dự án"));
+        }
+        return Ok(Source::Dockerfile(path.to_string()));
+    }
+    Err("không nhận ra nguồn cấu hình".into())
+}
+
+/// Tên service mà compose chấp nhận.
+fn is_compose_name(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
+/// `link Api -> Qdrant, Db`
+fn parse_link(rest: &str, meta: Meta, no: usize, doc: &mut Document, diags: &mut Vec<Diag>) {
+    let Some((from, to)) = rest.split_once("->") else {
+        diags.push(
+            Diag::error(no, "`link` thiếu `->`")
+                .with_hint("dạng đúng: link <Service> -> <Service>[, <Service>...]"),
+        );
+        return;
+    };
+    let from = from.trim();
+    let to = split_list(to);
+    if to.is_empty() {
+        diags.push(Diag::error(no, "`link` không có đích nào"));
+        return;
+    }
+    if !check_ident(from, "tên service trong link", no, diags) {
+        return;
+    }
+    for t in &to {
+        if !check_ident(t, "tên service trong link", no, diags) {
+            return;
+        }
+    }
+    doc.links.push(Link { from: from.to_string(), to, meta });
 }
 
 fn parse_view(rest: &str, meta: Meta, no: usize, doc: &mut Document, diags: &mut Vec<Diag>) {

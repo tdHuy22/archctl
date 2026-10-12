@@ -51,6 +51,20 @@ pub struct Discovery {
     /// là điều người đọc cần biết ngay, chứ không phải tự suy ra từ số
     /// component.
     pub unmapped: usize,
+    /// Service đọc từ docker-compose.
+    pub services: Vec<FoundService>,
+    /// Cạnh mạng giữa các service, theo tên trong file luật.
+    pub links: Vec<(String, Vec<String>)>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FoundService {
+    pub name: String,
+    /// `compose:<tên>` hay `compose:<thư mục>/<tên>`.
+    pub source: String,
+    pub runs: Vec<String>,
+    /// Vì sao không có `runs`: không rõ điểm vào.
+    pub note: Option<String>,
 }
 
 pub fn discover(root: &Path, ignores: &[String]) -> Discovery {
@@ -112,7 +126,122 @@ pub fn discover(root: &Path, ignores: &[String]) -> Discovery {
 
     out.edges = observe_edges(root, &scans, &owners);
     out.unmapped = files.iter().filter(|f| owners.of_file(f).is_none()).count();
+    let deploy_files = check::deploy_files(root, ignores);
+    if !deploy_files.is_empty() {
+        discover_services(root, &deploy_files, &owners, &mut out);
+    }
     out
+}
+
+/// Service, `runs` và `link` từ docker-compose.
+///
+/// `runs` là mọi component mà điểm vào chạm tới theo các cạnh đã quan sát, tính
+/// từ component chứa file điểm vào (hay, khi file đó không thuộc component nào,
+/// từ những component nó import trực tiếp). Đúng điều mà `check` đòi, nên bản
+/// nháp nâng lên `#accepted` thì không tự vi phạm.
+fn discover_services(root: &Path, deploy_files: &[String], owners: &Owners, out: &mut Discovery) {
+    use crate::scan::deploy::{self, Key};
+    let dep = deploy::load(root, deploy_files);
+    let resolver = Resolver::new(root);
+    let compose: Vec<(&str, &str, &deploy::Svc)> = dep
+        .services
+        .iter()
+        .filter_map(|s| match &s.key {
+            Key::Compose { dir, name } => Some((dir.as_str(), name.as_str(), s)),
+            Key::Dockerfile(_) => None,
+        })
+        .collect();
+    let mut names: BTreeMap<(&str, &str), String> = BTreeMap::new();
+    let mut taken: Vec<String> = Vec::new();
+    for (dir, name, _) in &compose {
+        let dsl = unique_name(&pascal_case(name), &taken);
+        taken.push(dsl.clone());
+        names.insert((dir, name), dsl);
+    }
+    let mut links: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut count: BTreeMap<&str, usize> = BTreeMap::new();
+    for (_, name, _) in &compose {
+        *count.entry(name).or_default() += 1;
+    }
+    for (dir, name, svc) in &compose {
+        let dsl = names[&(*dir, *name)].clone();
+        let ambiguous = count[name] > 1;
+        // Tên trùng ở nhiều thư mục thì ghi rõ thư mục; `./` là gốc repo.
+        let source = match (ambiguous, dir.is_empty()) {
+            (false, _) => format!("compose:{name}"),
+            (true, true) => format!("compose:./{name}"),
+            (true, false) => format!("compose:{dir}/{name}"),
+        };
+        let mut seeds: BTreeSet<String> = BTreeSet::new();
+        // Lệnh nào không lần ra mã thì `check` báo không rõ điểm vào; sinh
+        // `runs` cho service đó là sinh ra một luật tự cảnh báo.
+        let lost = svc.starts.iter().find_map(|st| {
+            if let Some(why) = st.cut.first() {
+                return Some(format!("không đọc hết lệnh khởi chạy: {why}"));
+            }
+            let missing = st.unresolved.first().cloned().or_else(|| {
+                st.entries
+                    .iter()
+                    .find(|e| {
+                        let files = check::entry_files(root, &resolver, std::slice::from_ref(e));
+                        // File không biết ngôn ngữ và không thuộc component nào:
+                        // `check` báo không rõ điểm vào.
+                        files.is_empty()
+                            || files.iter().any(|f| {
+                                Lang::for_path(f).is_none()
+                                    || (owners.of_file(f).is_none() && check::direct_targets(root, &resolver, f).is_err())
+                            })
+                    })
+                    .map(|_| st.shown.clone())
+            });
+            missing.map(|m| format!("không tìm thấy trong repo mã mà `{m}` nạp"))
+        });
+        for st in svc.starts.iter().filter(|_| lost.is_none()) {
+            for file in check::entry_files(root, &resolver, &st.entries) {
+                match owners.of_file(&file) {
+                    Some(c) => {
+                        seeds.insert(c.clone());
+                    }
+                    None => {
+                        for (target, _, _) in check::direct_targets(root, &resolver, &file).unwrap_or_default() {
+                            if let Some(c) = owners.of_target(root, &target) {
+                                seeds.insert(c.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let runs = closure(&seeds, &out.edges);
+        let note = (runs.is_empty() && svc.code).then(|| {
+            lost.clone()
+                .or_else(|| svc.unknown.clone())
+                .unwrap_or_else(|| "điểm vào không thuộc component nào".into())
+        });
+        out.services.push(FoundService { name: dsl.clone(), source, runs, note });
+        for e in &svc.edges {
+            if let Some(to) = names.get(&(*dir, e.to.as_str()))
+                && *to != dsl
+            {
+                links.entry(dsl.clone()).or_default().insert(to.clone());
+            }
+        }
+    }
+    out.links = links.into_iter().map(|(from, to)| (from, to.into_iter().collect())).collect();
+}
+
+/// Mọi component đi tới được từ `seeds` theo `edges`, kể cả chính chúng.
+fn closure(seeds: &BTreeSet<String>, edges: &[(String, String)]) -> Vec<String> {
+    let mut seen: BTreeSet<String> = seeds.clone();
+    let mut stack: Vec<String> = seeds.iter().cloned().collect();
+    while let Some(c) = stack.pop() {
+        for (from, to) in edges {
+            if *from == c && seen.insert(to.clone()) {
+                stack.push(to.clone());
+            }
+        }
+    }
+    seen.into_iter().collect()
 }
 
 /// Một component ứng viên: thư mục con của gốc mã nguồn (tương đối với gốc,
@@ -631,7 +760,7 @@ fn tally(langs: impl Iterator<Item = Lang>) -> Vec<(Lang, usize)> {
 
 /// `create-order` → `CreateOrder`. Ký tự không hợp lệ bị bỏ, vì tên component
 /// phải là định danh.
-fn pascal_case(s: &str) -> String {
+pub fn pascal_case(s: &str) -> String {
     let mut out = String::new();
     let mut upper = true;
     for c in s.chars() {
@@ -692,6 +821,29 @@ pub fn render(d: &Discovery, date: &str) -> String {
         let width = d.edges.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
         for (from, to) in &d.edges {
             let _ = writeln!(out, "allow {from:<width$} -> {to}   @ai #draft");
+        }
+    }
+    if !d.services.is_empty() {
+        out.push_str(
+            "\n# Triển khai, đọc từ docker-compose. `runs` là component mà lệnh khởi\n\
+             # chạy chạm tới theo các quan hệ ở trên. Service không phải của sản phẩm\n\
+             # (công cụ dev, bản thử) thì xoá.\n",
+        );
+        let width = d.services.iter().map(|s| s.name.len()).max().unwrap_or(0);
+        let swidth = d.services.iter().map(|s| s.source.len()).max().unwrap_or(0);
+        for s in &d.services {
+            if let Some(note) = &s.note {
+                let _ = writeln!(out, "# {}: không có `runs` — {note}", s.name);
+            }
+            let runs = if s.runs.is_empty() { String::new() } else { format!(" runs {}", s.runs.join(", ")) };
+            let _ = writeln!(out, "service {:<width$} from {:<swidth$}{runs}   @ai #draft", s.name, s.source);
+        }
+    }
+    if !d.links.is_empty() {
+        out.push_str("\n# Cạnh mạng thấy trong compose: depends_on, links, tên service trong biến môi trường.\n");
+        let width = d.links.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
+        for (from, to) in &d.links {
+            let _ = writeln!(out, "link {from:<width$} -> {}   @ai #draft", to.join(", "));
         }
     }
     if !d.skipped.is_empty() {

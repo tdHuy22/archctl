@@ -25,6 +25,16 @@ pytorch-image-models, op `TORCH_LIBRARY` phía C++ của vllm. Cần clang.
 `--notebook-repo matplotlib` phá thêm hai kiểu ở notebook (mất import, lệch
 dòng), đối chiếu bằng IPython cài vào venv nên cần mạng; CI bật nó.
 
+Bốn kiểu phá tầng hạ tầng chạy trên `--deploy-bench-repo` (mặc định
+example-voting-app), mỗi kiểu nhắm một phép kiểm trong `consistency.deploy`:
+`init` mất mọi `link`; `check` giấu vi phạm cạnh mạng; `check` giấu vi phạm
+`runs`; `check` báo thêm một file triển khai không đọc được.
+
+`--deploy-repo example-voting-app` phá thêm bốn kiểu ở dữ kiện compose và
+Dockerfile mà `scan --json` in ra (mất một `depends_on`, lệch dòng một biến
+môi trường, thêm một tên máy giả, sửa một chỉ thị Dockerfile), đối chiếu bằng
+PyYAML và dockerfile-parse cài vào venv nên cần mạng; CI bật nó.
+
 `--rust-repo ripgrep` phá thêm ba kiểu như vậy ở file Rust, đối chiếu bằng
 `oracle.py --require syn` — tức là tải crate, nên chỉ CI bật. Phần Rust miễn
 trừ import nằm trong thân macro; kiểu `rust-extra` đặt import giả ở ngoài macro
@@ -81,6 +91,45 @@ BINDING_ORACLE_RUNS = [
     ("bind-op", "vllm", "thiếu:"),                    # op trong `TORCH_LIBRARY`
 ]
 BINDING_ORACLE_MODES = {mode for mode, _, _ in BINDING_ORACLE_RUNS}
+# phá tầng hạ tầng ở bộ đo → phép kiểm phải bắt được nó
+DEPLOY_MODES = {
+    "deploy-gen": "thiếu cạnh mạng",
+    "deploy-link": "mà check không báo not_linked",
+    "deploy-runs": "mà check không báo not_run",
+    "deploy-warn": "không đọc được file triển khai",
+}
+# phá dữ kiện hạ tầng trong `scan --json` → dòng `oracle.py` phải in ra
+DEPLOY_ORACLE_MODES = {
+    "dep-drop": "thiếu:",
+    "dep-line": "lệch dòng:",
+    "dep-extra": "thừa:",
+    "dep-docker": "thiếu:",
+}
+
+
+def sabotage_deploy(rep: dict, mode: str):
+    """Làm hỏng dữ kiện hạ tầng đầu tiên đúng loại trong `scan --json`."""
+    files = rep.get("deploy", {}).get("files", [])
+    if mode == "dep-docker":
+        for f in files:
+            ins = f.get("instructions") if f.get("kind") == "dockerfile" else None
+            # `scan` chỉ in đối số với `--verbatim` (TM-10), và đó là lần gọi mà
+            # oracle đối chiếu; lần gọi khác không có gì để phá.
+            if ins and "args" in ins[0]:
+                ins[0]["args"] += " khong_co_that"
+                return
+        return
+    for f in files:
+        for s in f.get("services", []) if f.get("kind") == "compose" else []:
+            if mode == "dep-drop" and s["dependsOn"]:
+                s["dependsOn"].pop(0)
+                return
+            if mode in ("dep-line", "dep-extra") and s["env"]:
+                if mode == "dep-line":
+                    s["env"][0]["line"] += 1
+                else:
+                    s["env"].append({**s["env"][0], "key": "KHONG_CO_THAT_HOST"})
+                return
 
 
 def sabotage_crossings(rep: dict, mode: str):
@@ -144,6 +193,12 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
     out = p.stdout
     if mode == "crossing" and args[:1] == ["init"] and p.returncode == 0:
         drop_crossings_from_law(args)
+    if mode == "deploy-gen" and args[:1] == ["init"] and p.returncode == 0:
+        root = Path(args[args.index("--root") + 1]) if "--root" in args else Path.cwd()
+        law = root / ".arch/system.arch"
+        if law.exists():
+            law.write_text("".join(l for l in law.read_text().splitlines(keepends=True)
+                                   if not l.startswith("link ")))
     if args[:1] == ["check"] and "--json" in args and p.stdout.startswith("{"):
         rep = json.loads(out)
         if mode == "crossing":
@@ -166,6 +221,12 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
             rep.pop("lawWarnings", None)
         elif mode == "hash":
             rep["archHash"] = "deadbeef"
+        elif mode == "deploy-link":
+            rep["violations"] = [v for v in rep["violations"] if v.get("reason") != "not_linked"]
+        elif mode == "deploy-runs":
+            rep["violations"] = [v for v in rep["violations"] if v.get("reason") != "not_run"]
+        elif mode == "deploy-warn":
+            rep.setdefault("deployUnread", []).append({"file": "docker-compose.yml", "why": "giả"})
         out = json.dumps(rep)
     elif mode == "diff" and args[:1] == ["diff"]:
         out = "kiến trúc a → b\n"
@@ -177,6 +238,10 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
     elif mode in BINDING_ORACLE_MODES and args[:1] == ["scan"] and "--json" in args:
         rep = json.loads(out)
         sabotage_crossings(rep, mode)
+        out = json.dumps(rep)
+    elif mode in DEPLOY_ORACLE_MODES and args[:1] == ["scan"] and "--json" in args:
+        rep = json.loads(out)
+        sabotage_deploy(rep, mode)
         out = json.dumps(rep)
     sys.stdout.write(out)
     sys.stderr.write(p.stderr)
@@ -196,6 +261,10 @@ def main():
                     help="phá cả phần notebook của oracle.py trên repo này (cài IPython vào venv)")
     ap.add_argument("--crossing-repo", default="pydantic-core",
                     help="repo có cạnh liên ngôn ngữ bắt buộc, cho kiểu phá `crossing`")
+    ap.add_argument("--deploy-bench-repo", default="example-voting-app",
+                    help="repo có compose và `runs`, `link` bắt buộc, cho các kiểu phá `deploy-*`")
+    ap.add_argument("--deploy-repo",
+                    help="phá cả phần hạ tầng của oracle.py trên repo này (cài PyYAML vào venv)")
     args = ap.parse_args()
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -210,7 +279,12 @@ def main():
         runs = [("bench.py", args.repo, m, e) for m, e in [("", None), *MODES.items()]]
         runs += [("bench.py", args.crossing_repo, m, e)
                  for m, e in [("", None), *CROSSING_MODES.items()]]
+        runs += [("bench.py", args.deploy_bench_repo, m, e)
+                 for m, e in [("", None), *DEPLOY_MODES.items()]]
         runs += [("oracle.py", args.repo, m, e) for m, e in [("", None), *ORACLE_MODES.items()]]
+        if args.deploy_repo:
+            runs += [("oracle.py", args.deploy_repo, m, e)
+                     for m, e in [("", None), *DEPLOY_ORACLE_MODES.items()]]
         if args.rust_repo:
             runs += [("oracle.py", args.rust_repo, m, e)
                      for m, e in [("", None), *RUST_ORACLE_MODES.items()]]
@@ -228,6 +302,8 @@ def main():
                 extra = ["--require", "syn"]
             if mode in NOTEBOOK_ORACLE_MODES or (script == "oracle.py" and repo == args.notebook_repo):
                 extra = ["--require", "ipython"]
+            if mode in DEPLOY_ORACLE_MODES or (script == "oracle.py" and repo == args.deploy_repo and not mode):
+                extra = ["--require", "deploy"]
             binding_repos = {r for _, r, _ in BINDING_ORACLE_RUNS}
             if mode in BINDING_ORACLE_MODES or (script == "oracle.py" and not mode and repo in binding_repos
                                                 and repo not in (args.notebook_repo, args.rust_repo, args.repo)):

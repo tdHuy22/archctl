@@ -648,31 +648,134 @@ def ipython_version():
     return m.group(1) if m else "?"
 
 
-def build_ipython_helper(cache):
-    """Venv có IPython dưới `cache/ipython-oracle`; lần sau dùng lại nếu bản ghim không đổi.
+def build_venv(cache, name, requirements, label):
+    """Venv dưới `cache/<name>`; lần sau dùng lại nếu bản ghim không đổi.
 
     Cài đúng file đã ghim kèm hash, chỉ wheel: gói bị chiếm quyền trên PyPI hay
     bị tráo trên đường đi thì pip từ chối, và không `setup.py` nào chạy lúc cài.
     """
-    home = Path(cache) / "ipython-oracle"
+    home = Path(cache) / name
     venv, installed = home / "venv", home / "installed.txt"
     python = venv / "bin" / "python"
-    wanted = IPYTHON_REQUIREMENTS.read_text()
+    wanted = requirements.read_text()
     if not (python.exists() and installed.exists() and installed.read_text() == wanted):
         shutil.rmtree(venv, ignore_errors=True)
         home.mkdir(parents=True, exist_ok=True)
         for cmd in ([sys.executable, "-m", "venv", str(venv)],
                     [str(python), "-m", "pip", "install", "--quiet", "--disable-pip-version-check",
                      "--no-deps", "--only-binary", ":all:", "--require-hashes",
-                     "--requirement", str(IPYTHON_REQUIREMENTS)]):
+                     "--requirement", str(requirements)]):
             try:
                 p = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
             except subprocess.TimeoutExpired:
-                bench.die(f"dựng thước đo IPython: `{cmd[2]}` quá 600 giây")
+                bench.die(f"dựng thước đo {label}: `{cmd[2]}` quá 600 giây")
             if p.returncode != 0:
-                bench.die(f"dựng thước đo IPython hỏng: {(p.stderr or p.stdout).strip()[-400:]}")
+                bench.die(f"dựng thước đo {label} hỏng: {(p.stderr or p.stdout).strip()[-400:]}")
         installed.write_text(wanted)
     return str(python)
+
+
+def build_ipython_helper(cache):
+    return build_venv(cache, "ipython-oracle", IPYTHON_REQUIREMENTS, "IPython")
+
+
+DEPLOY_REQUIREMENTS = HERE / "deploy-requirements.txt"
+
+
+def deploy_version():
+    text = DEPLOY_REQUIREMENTS.read_text()
+    found = [re.search(rf"^{n}==(\S+)", text, re.M) for n in ("pyyaml", "dockerfile-parse")]
+    return " + ".join(f"{n} {m.group(1)}" for n, m in zip(("PyYAML", "dockerfile-parse"), found) if m)
+
+
+def is_deploy_name(name):
+    """Tên file compose hay Dockerfile, theo đúng luật của `scan/deploy.rs`."""
+    lower = name.lower()
+    stem = lower[len("docker-"):] if lower.startswith("docker-") else lower
+    compose = (lower.endswith((".yml", ".yaml")) and stem.startswith("compose") and stem[7:8] in (".", "-", "_")
+               and not any(p in ("test", "tests", "e2e", "ci") for p in re.split(r"[.\-_]", stem)))
+    docker = (name in ("Dockerfile", "Containerfile") or name.startswith(("Dockerfile.", "Containerfile."))
+              or name.endswith((".Dockerfile", ".dockerfile")))
+    return compose or docker
+
+
+def deploy_files(root):
+    """File compose và Dockerfile mà git theo dõi, kể cả trong thư mục test hay
+    ví dụ: càng nhiều file càng thử được nhiều bộ đọc."""
+    p = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True, text=True)
+    # Repo tải sparse: git vẫn liệt kê file ngoài vùng đã tải.
+    return sorted(f for f in p.stdout.split("\0")
+                  if f and is_deploy_name(f.rsplit("/", 1)[-1]) and (root / f).is_file() and not (root / f).is_symlink())
+
+
+def archctl_deploy(archctl, root, files):
+    """`{file: Counter (dòng, dữ kiện)}` theo `archctl scan`, hay chuỗi lỗi."""
+    # `--verbatim`: để so được đối số và argv. Đây là repo công khai của bộ đo.
+    p = subprocess.run([archctl, "scan", "--json", "--verbatim", "--root", str(root), *files],
+                       capture_output=True, text=True, timeout=600)
+    if p.returncode != 0:
+        bench.die(f"archctl scan hỏng ở {root.name}: {p.stderr.strip()[-300:]}")
+    out = {}
+    for f in json.loads(p.stdout)["deploy"]["files"]:
+        if "error" in f:
+            out[f["file"]] = f"ERR {f['error']}"
+            continue
+        facts = []
+        if f["kind"] == "dockerfile":
+            for i in f["instructions"]:
+                facts.append((i["line"], f"{i['keyword']} {' '.join(i['args'].split())}".rstrip()))
+        else:
+            for path, line in f["includes"]:
+                facts.append((line, f"include {path}"))
+            for s in f["services"]:
+                name, at = s["name"], s["line"]
+                facts.append((at, f"service {name}"))
+                if s["image"] is not None:
+                    facts.append((at, f"{name}.image={s['image']}"))
+                if s["workingDir"] is not None:
+                    facts.append((at, f"{name}.working_dir={s['workingDir']}"))
+                b = s["build"]
+                if b is not None:
+                    facts.append((b["line"], f"{name}.build context={b['context']} dockerfile={b['dockerfile']} "
+                                             f"target={b['target']} inline={b['inline']}"))
+                for key in ("command", "entrypoint"):
+                    c = s[key]
+                    if c is not None:
+                        facts.append((c["line"], f"{name}.{key}={json.dumps(c['argv'], ensure_ascii=False)}"))
+                for e in s["env"]:
+                    facts.append((e["line"], f"{name}.env {e['key']}"))
+                for path, line in s["envFiles"]:
+                    facts.append((line, f"{name}.env_file {path}"))
+                for dep, line in s["dependsOn"]:
+                    facts.append((line, f"{name}.depends_on {dep}"))
+                for dep, line in s["links"]:
+                    facts.append((line, f"{name}.links {dep}"))
+                for host, container, line in s["binds"]:
+                    facts.append((line, f"{name}.bind {host}:{container}"))
+                if s["extends"] is not None:
+                    facts.append((at, f"{name}.extends {s['extends']}"))
+                for a in s["aliases"]:
+                    facts.append((at, f"{name}.alias {a}"))
+        out[f["file"]] = collections.Counter(facts)
+    return out
+
+
+def deploy_truth(python, root, files):
+    """`{file: Counter (dòng, dữ kiện)}` theo PyYAML và dockerfile-parse; chuỗi
+    `ERR …` hay `SKIP …` khi không đo được."""
+    p = subprocess.run([python, "-I", str(HERE / "deploy_truth.py")],
+                       input="".join(f"{root}\t{f}\n" for f in files),
+                       capture_output=True, text=True, timeout=900)
+    if p.returncode != 0:
+        bench.die(f"thước đo hạ tầng hỏng: {p.stderr.strip()[-400:]}")
+    out = {}
+    for line in p.stdout.splitlines():
+        file, res = line.split("\t", 1)
+        if res.startswith(("ERR", "SKIP")):
+            out[file] = res
+        else:
+            out[file] = collections.Counter((l, s) for l, s in json.loads(res)["facts"])
+    return out
 
 
 def notebook_truth(python, root, files):
@@ -736,7 +839,7 @@ class Tally:
             self.examples.append(msg)
 
     def line(self, repo):
-        unit = "đầu cạnh" if self.label == "Binding" else "import"
+        unit = {"Binding": "đầu cạnh", "Hạ tầng": "dữ kiện"}.get(self.label, "import")
         head = f"  {repo:22} {self.label:8} {self.files:5} file, {self.imports:6} {unit}"
         tail = f", {self.unparsed} không parse được" if self.unparsed else ""
         if self.in_macro:
@@ -772,7 +875,7 @@ def main():
     ap.add_argument("--archctl", default=str(ROOT / "target/release/archctl"))
     ap.add_argument("--only", help="tên repo, cách nhau bằng dấu phẩy")
     ap.add_argument("--require", default="",
-                    help="công cụ bắt buộc phải có: clang, node, go, syn (tải crate), ipython (tải gói)")
+                    help="công cụ bắt buộc phải có: clang, node, go, syn (tải crate), ipython, deploy (tải gói)")
     ap.add_argument("--cache", default=str(ROOT / "target/bench"))
     args = ap.parse_args()
 
@@ -790,7 +893,7 @@ def main():
     have_go = shutil.which("go") is not None
     strip_ts = have_node and node_can_strip_types()
     required = args.require.split(",")
-    unknown = set(filter(None, required)) - {"clang", "node", "go", "syn", "ipython"}
+    unknown = set(filter(None, required)) - {"clang", "node", "go", "syn", "ipython", "deploy"}
     if unknown:
         bench.die(f"`--require` không biết: {', '.join(sorted(unknown))}")
     for tool, ok in [("clang", have_clang), ("node", have_node), ("go", have_go)]:
@@ -806,8 +909,10 @@ def main():
     syn_v = "2.0.87" if use_syn else "BỎ QUA: cần tải crate, bật bằng --require syn"
     use_ipython = "ipython" in required
     ipy_v = ipython_version() if use_ipython else "BỎ QUA: cần tải gói, bật bằng --require ipython"
+    use_deploy = "deploy" in required
+    dep_v = deploy_version() if use_deploy else "BỎ QUA: cần tải gói, bật bằng --require deploy"
     print(f"python {sys.version.split()[0]} · clang: {clang_v} · node: {node_v} · go: {go_v} · syn: {syn_v}"
-          f" · ipython: {ipy_v}"
+          f" · ipython: {ipy_v} · hạ tầng: {dep_v}"
           + ("" if strip_ts or not have_node else " (không gỡ được kiểu TS: BỎ QUA .ts)"))
 
     missing_repos = [r for r in repos if not (Path(args.cache) / "repos" / r).is_dir()]
@@ -818,6 +923,7 @@ def main():
     go_helper = build_go_helper(workdir.name) if have_go else None
     syn_helper = build_syn_helper(args.cache) if use_syn else None
     nb_python = build_ipython_helper(args.cache) if use_ipython else None
+    dep_python = build_venv(args.cache, "deploy-oracle", DEPLOY_REQUIREMENTS, "hạ tầng") if use_deploy else None
 
     bad = 0
     for repo in repos:
@@ -930,9 +1036,33 @@ def main():
         if by_lang["C/C++"] and not have_clang:
             bind.skipped = "phía C/C++ BỎ QUA: không có clang"
         tallies.append(bind)
+
+        deploy = deploy_files(root) if dep_python else []
+        if deploy:
+            dep = Tally("Hạ tầng")
+            have_all = archctl_deploy(archctl, root, deploy)
+            skipped = 0
+            for file, want in deploy_truth(dep_python, root, deploy).items():
+                have = have_all.get(file, "ERR archctl không in file này")
+                if isinstance(want, str) and want.startswith("SKIP"):
+                    skipped += 1
+                    continue
+                if isinstance(want, str):
+                    # Bộ đọc chuẩn cũng không đọc được: không phải chỗ để so.
+                    dep.unparsed += 1
+                    continue
+                if isinstance(have, str):
+                    dep.files += 1
+                    dep.note(f"{file}: archctl không đọc được mà PyYAML đọc được — {have[4:120]}")
+                    continue
+                dep.imports += sum(want.values())
+                check_lines(dep, file, want, have)
+            if skipped:
+                dep.skipped = f"{skipped} Dockerfile có heredoc BỎ QUA"
+            tallies.append(dep)
         for t in tallies:
             sane(t, repo)
-            if t.files or t.unparsed:
+            if t.files or t.unparsed or t.skipped:
                 print(t.line(repo))
                 for e in t.examples:
                     print(f"      {e}")

@@ -9,7 +9,7 @@
     --accent: #2f6f4f; --accent-soft: #e8f1ec;
     --bad: #b3261e; --bad-soft: #fdecea;
     --warn: #8a6100; --warn-soft: #fdf3e0;
-    --store: #5b4b8a; --api: #8a5a1f; --ext: #4a6b8a;
+    --store: #5b4b8a; --api: #8a5a1f; --ext: #4a6b8a; --svc: #1f6f8a;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -17,7 +17,7 @@
       --accent: #74b48f; --accent-soft: #23302a;
       --bad: #f0877e; --bad-soft: #352422;
       --warn: #d9ad5b; --warn-soft: #332b1c;
-      --store: #a695d8; --api: #d9a86a; --ext: #8fb0d0;
+      --store: #a695d8; --api: #d9a86a; --ext: #8fb0d0; --svc: #6cc0d8;
     }
   }
   * { box-sizing: border-box; }
@@ -90,6 +90,7 @@
   .lg-store::before { background: var(--store); }
   .lg-api::before { background: var(--api); }
   .lg-ext::before { background: var(--ext); }
+  .lg-svc::before { background: var(--svc); border-radius: 6px; }
   .lg-bad::before { background: var(--bad); }
   #fault { padding: 24px; color: var(--bad); white-space: pre-wrap; }
   .node { cursor: pointer; }
@@ -128,6 +129,7 @@
   <span class="lg-store">kho dữ liệu</span>
   <span class="lg-api">nhóm api</span>
   <span class="lg-ext">bên ngoài</span>
+  <span class="lg-svc">service (nét chấm: chạy mã nào)</span>
   <span class="lg-bad">vi phạm</span>
   <span>nét đứt = chưa có hiệu lực</span>
   <span>viền đậm = đã khoá</span>
@@ -135,7 +137,10 @@
 
 <script>
 const NODE_W = 180, NODE_H = 56, SVG_NS = "http://www.w3.org/2000/svg";
-const KIND_COLOR = { component: "--accent", store: "--store", api: "--api", external: "--ext" };
+const KIND_COLOR = { component: "--accent", store: "--store", api: "--api", external: "--ext", service: "--svc" };
+// Service có không gian tên riêng nên node của nó mang tiền tố; nhãn thì không.
+const SVC = "svc:";
+const label = (name) => String(name ?? "").startsWith(SVC) ? String(name).slice(SVC.length) : String(name ?? "");
 const STATUS_ORDER = ["#draft", "#proposed", "#accepted", "#locked"];
 
 const canvas = document.getElementById("canvas");
@@ -219,11 +224,12 @@ function summarize() {
   toggle("waiting", model.proposals.length, `${model.proposals.length} chờ duyệt`);
   // Hai vấn đề khác nhau của cùng một thứ: khai báo không còn khớp mã, và
   // khai báo mà kiểm xong vẫn không biết gì. Cái thứ hai dễ bị bỏ qua hơn.
-  const declareIssues = model.missing.length + model.vacuous.length + model.unproven.length;
+  const declareIssues = model.missing.length + model.vacuous.length + model.unproven.length + (model.deploy || []).length;
   const parts = [];
   if (model.missing.length) parts.push(`${model.missing.length} lạc hậu`);
   if (model.vacuous.length) parts.push(`${model.vacuous.length} không kết luận`);
   if (model.unproven.length) parts.push(`${model.unproven.length} chưa chứng minh`);
+  if ((model.deploy || []).length) parts.push(`${model.deploy.length} hạ tầng`);
   toggle("stale", declareIssues, parts.join(" · "));
 }
 const toggle = (id, count, text) => {
@@ -330,14 +336,17 @@ function drawEdge(root, e, broken) {
   const { d, mid } = edgePath(from, to);
   const violation = e.kind === "violation";
   const draft = e.status && e.status !== "#accepted" && e.status !== "#locked";
+  // `runs` không phải phụ thuộc mà là "chạy ở đâu": vẽ mờ để không lẫn với luật.
+  const runs = e.kind === "runs";
 
   root.append(el("path", {
     d, fill: "none",
-    stroke: violation ? "var(--bad)" : e.kind === "deny" ? "var(--warn)" : "var(--muted)",
-    "stroke-width": violation ? 2.5 : 1.4,
-    "stroke-dasharray": draft ? "5 4" : e.kind === "deny" ? "2 3" : "",
-    "marker-end": `url(#arrow-${violation ? "bad" : "a"})`,
-    opacity: violation ? 1 : draft ? 0.6 : 0.85,
+    stroke: violation ? "var(--bad)" : e.kind === "deny" ? "var(--warn)"
+      : e.kind === "link" || runs ? "var(--svc)" : "var(--muted)",
+    "stroke-width": violation ? 2.5 : e.kind === "link" ? 1.8 : 1.4,
+    "stroke-dasharray": runs ? "1 4" : draft ? "5 4" : e.kind === "deny" ? "2 3" : "",
+    "marker-end": runs ? "" : `url(#arrow-${violation ? "bad" : "a"})`,
+    opacity: violation ? 1 : runs ? 0.45 : draft ? 0.6 : 0.85,
   }));
 
   const label = view.k < 0.45 ? ""
@@ -365,6 +374,7 @@ function nodeShape(n) {
   const { x, y } = n, w = NODE_W, h = NODE_H;
   if (n.kind === "store") return el("path", { d: `M${x} ${y + 9} a${w / 2} 9 0 0 1 ${w} 0 v${h - 18} a${w / 2} 9 0 0 1 ${-w} 0 z` });
   if (n.kind === "api") return el("path", { d: `M${x + 13} ${y} H${x + w} L${x + w - 13} ${y + h} H${x} z` });
+  if (n.kind === "service") return el("rect", { x, y, width: w, height: h, rx: h / 2 });
   return el("rect", { x, y, width: w, height: h, rx: 9 });
 }
 
@@ -390,7 +400,7 @@ function drawNode(root, n, broken) {
     g.append(el("text", {
       x: cx, y: n.y + (n.sub && showSub ? 24 : 32), "text-anchor": "middle", "font-size": 13,
       "font-weight": 600, fill: faulty ? "var(--bad)" : "var(--ink)",
-    }, n.name.length > 20 ? n.name.slice(0, 19) + "…" : n.name));
+    }, label(n.name).length > 20 ? label(n.name).slice(0, 19) + "…" : label(n.name)));
   }
   if (n.sub && showSub) {
     const short = n.sub.length > 26 ? n.sub.slice(0, 25) + "…" : n.sub;
@@ -524,7 +534,14 @@ function renderStale() {
       <h4>cách kiểm <span class="mono">${esc(u.name)}</span></h4>
       <p class="hint">${esc(u.why)} → <span class="mono">archctl verify ${esc(u.name)}</span></p>
     </div>`).join("");
-  box.innerHTML = stale + vague + unproven
+  // Tầng hạ tầng: cấu hình không đọc được, điểm vào không rõ, `link` không
+  // thấy đâu. Không phải vi phạm, nhưng là chỗ đang không kiểm được.
+  const deploy = (model.deploy || []).map((d) => `
+    <div class="card">
+      <h4>${esc(d.title)}</h4>
+      <p class="hint">${esc(d.detail)}</p>
+    </div>`).join("");
+  box.innerHTML = stale + vague + unproven + deploy
     || `<p class="empty">Mọi tên trong khai báo đều có trong mã, đều đủ cụ thể để kiểm, và mọi cách kiểm đều đã chạy.</p>`;
 }
 
@@ -536,9 +553,9 @@ function renderDetail() {
     return;
   }
   const mine = model.violations.filter((v) => v.from === n.name && !v.baselined);
-  const kinds = { component: "component", store: "kho dữ liệu", api: "nhóm api", external: "bên ngoài" };
+  const kinds = { component: "component", store: "kho dữ liệu", api: "nhóm api", external: "bên ngoài", service: "service" };
   box.innerHTML = `
-    <h3 style="margin:0 0 10px">${esc(n.name)}</h3>
+    <h3 style="margin:0 0 10px">${esc(label(n.name))}</h3>
     <dl>
       <dt>loại</dt><dd>${kinds[n.kind]}</dd>
       <dt>phạm vi</dt><dd class="mono">${esc(n.sub) || "—"}</dd>
@@ -557,11 +574,18 @@ function renderDetail() {
     }));
 }
 
+const VIA = {
+  import: (s) => `import '${s}'`,
+  table: (s) => `bảng '${s}'`,
+  ffi: (s) => `gọi '${s}' qua ranh giới ngôn ngữ`,
+  network: (s) => s,
+  entry: (s) => s,
+};
 const violationCard = (v) => `
   <div class="card bad">
-    <h4>${esc(v.from)} → ${esc(v.to)}</h4>
+    <h4>${esc(label(v.from))} → ${esc(label(v.to))}</h4>
     <p class="where mono">${esc(v.file)}:${v.line}${v.count > 1 ? ` · ${v.count} lần` : ""}</p>
-    <p class="mono">${esc(v.via === "import" ? `import '${v.spec}'` : v.via === "table" ? `bảng '${v.spec}'` : v.via === "ffi" ? `gọi '${v.spec}' qua ranh giới ngôn ngữ` : `dùng '${v.spec}'`)}</p>
+    <p class="mono">${esc((VIA[v.via] || ((s) => `dùng '${s}'`))(v.spec))}</p>
     <p class="muted">${esc(v.rule)}</p>
     <p class="hint">→ ${esc(v.hint)}</p>
   </div>`;

@@ -11,8 +11,10 @@
 use crate::glob;
 use crate::model::*;
 use crate::resolve::{NativeImport, Resolved, Resolver};
+use crate::scan::deploy::{self, Deploy, Key, Svc};
 use crate::scan::foreign::Crossing;
 use crate::scan::{self, Lang};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// Thư mục không bao giờ quét. Không cấu hình được, vì quét chúng chỉ tốn thời
@@ -49,6 +51,10 @@ pub enum Reason {
     NotOwner,
     /// Tên lẽ ra chỉ nằm trong một vùng nhưng lọt ra ngoài.
     Leaked,
+    /// Cạnh mạng giữa hai service mà không có `link` nào cho phép.
+    NotLinked,
+    /// Mã của một component chạy trong service không khai nó trong `runs`.
+    NotRun,
 }
 
 /// Phụ thuộc được phát hiện bằng cách nào.
@@ -64,6 +70,11 @@ pub enum Via {
     /// ghép với định nghĩa cùng tên ở phía C; import Python của module mở
     /// rộng và `torch.ops.ns.op`, ghép với phía native định nghĩa chúng.
     Ffi,
+    /// Cấu hình triển khai: `depends_on`, `links`, tên service trong biến môi
+    /// trường.
+    Network,
+    /// Lệnh khởi chạy của service: `command`, `CMD`, `ENTRYPOINT`.
+    Entry,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +186,18 @@ pub struct Report {
     /// Cách kiểm đã khai báo nhưng chưa có biên nhận còn hiệu lực. Nói cách
     /// khác: lời hứa chưa được chứng minh.
     pub unproven: Vec<(String, crate::verify::Stale)>,
+    /// File triển khai không đọc được: hỏng, quá lớn, trỏ ra ngoài dự án.
+    pub deploy_unread: Vec<deploy::Unread>,
+    /// Service có `runs` mà không biết nó khởi chạy mã nào: `runs` khi đó chỉ
+    /// được kiểm theo cạnh import, không theo điểm vào.
+    pub entry_unknown: Vec<(String, String)>,
+    /// Service trong compose chưa có `service` nào khai: `(file, dòng, tên)`.
+    pub services_undeclared: Vec<(String, usize, String)>,
+    /// `link` có hiệu lực mà không cấu hình nào cho thấy cạnh đó:
+    /// `(nguồn, đích, dòng trong file luật)`.
+    pub links_unseen: Vec<(String, String, usize)>,
+    /// Đã đọc cấu hình triển khai của repo trong lần kiểm này.
+    pub deploy_checked: bool,
 }
 
 impl Report {
@@ -203,15 +226,52 @@ pub fn source_files(root: &Path, extra_ignores: &[String]) -> Vec<String> {
 }
 
 pub fn check(root: &Path, doc: &Document, extra_ignores: &[String]) -> Report {
-    check_files(root, doc, &source_files(root, extra_ignores), false)
+    let deploy = (!doc.services.is_empty()).then(|| deploy_files(root, extra_ignores));
+    check_with(root, doc, &source_files(root, extra_ignores), false, deploy)
 }
 
 /// Kiểm một tập file cho trước. `partial` đánh dấu rằng đây không phải toàn
 /// repo, để báo cáo không in ra những con số tổng gây hiểu nhầm.
 ///
 /// Chia nhỏ được vì luật phụ thuộc và luật `api` đều xét **từng file một**:
-/// import của một file không phụ thuộc vào file nào khác.
+/// import của một file không phụ thuộc vào file nào khác. `runs` của service
+/// cũng vậy. Phần còn lại của tầng hạ tầng (điểm vào, cạnh mạng) đọc cấu hình
+/// của cả repo, nên chỉ chạy khi một file trong tập có thể là thứ cấu hình trỏ
+/// tới ([`may_touch_deploy`]).
 pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool) -> Report {
+    let wanted = !doc.services.is_empty() && (!partial || files.iter().any(|f| may_touch_deploy(doc, f)));
+    let deploy = wanted.then(|| deploy_files(root, &crate::read_ignores(root)));
+    check_with(root, doc, files, partial, deploy)
+}
+
+/// Đổi file này thì phần hạ tầng phải đọc lại cấu hình: chính file cấu hình
+/// (compose, Dockerfile, `.env`, script); file không phải mã mà cấu hình có
+/// thể trỏ tới (`env_file: config/api.env`, script không đuôi,
+/// `dockerfile: Dockerfile-api`); file mã không thuộc component nào, vì đó là
+/// chỗ của điểm vào (`main.py` ở gốc); và file khai gói Python, vì nó đổi chỗ
+/// tìm module. Tài liệu và ảnh thì không.
+pub fn may_touch_deploy(doc: &Document, path: &str) -> bool {
+    const INERT: &[&str] = &["md", "rst", "adoc", "png", "jpg", "jpeg", "gif", "svg", "ico", "webp", "pdf"];
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    if deploy::touches_deploy(path) || matches!(name, "pyproject.toml" | "setup.cfg" | "setup.py") {
+        return true;
+    }
+    if !scan::is_supported(path) {
+        return !ext.is_some_and(|e| INERT.contains(&e.as_str()));
+    }
+    owners_of(doc, path).is_empty()
+}
+
+/// File cấu hình triển khai của sản phẩm trong repo.
+pub fn deploy_files(root: &Path, extra_ignores: &[String]) -> Vec<String> {
+    let mut files = Vec::new();
+    walk(root, "", extra_ignores, &mut files);
+    files.retain(|f| deploy::is_deploy_file(f));
+    files
+}
+
+fn check_with(root: &Path, doc: &Document, files: &[String], partial: bool, deploy: Option<Vec<String>>) -> Report {
     let mut report = Report { partial, ..Report::default() };
 
     for (name, _) in classify(doc) {
@@ -343,6 +403,10 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
     // nghĩa nó ở phía native: nó đã được phân giải.
     report.unresolved.retain(|u| !paired.contains(&(u.file.as_str(), u.line, u.spec.as_str())));
     judge_expectations(&expectations, &sightings, symbol_scanned, &mut report);
+    if let Some(deploy_files) = deploy {
+        report.deploy_checked = true;
+        judge_deploy(root, doc, &resolver, &deploy::load(root, &deploy_files), &mut report);
+    }
 
     counts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     report.by_lang = counts;
@@ -401,6 +465,7 @@ fn judge_ffi<'a>(
         if to == from {
             continue;
         }
+        pulled_in(doc, from, to, file, call.line, &call.shown, Via::Ffi, report);
         let Some((reason, rule, status)) = judge(doc, from, to) else { continue };
         report.violations.push(Violation {
             from: from.clone(),
@@ -609,6 +674,7 @@ fn inspect(
         if to == from {
             continue;
         }
+        pulled_in(doc, from, &to, path, import.line, &import.spec, Via::Import, report);
         if let Some((reason, rule, status)) = judge(doc, from, &to) {
             report.violations.push(Violation {
                 from: from.to_string(),
@@ -747,13 +813,19 @@ fn hint_for(doc: &Document, from: &str, to: &str, reason: Reason, via: Via) -> S
     {
         return match via {
             Via::Import => format!("gọi {only} thay vì truy cập thẳng {to}"),
-            Via::Symbol | Via::Table | Via::Ffi => format!("chỉ {only} được dùng {to}"),
+            Via::Symbol | Via::Table | Via::Ffi | Via::Network | Via::Entry => format!("chỉ {only} được dùng {to}"),
         };
     }
     if reason == Reason::NotOwner
         && let Some(store) = doc.store(to)
     {
         return format!("gọi {} thay vì chạm thẳng vào dữ liệu của nó", store.owned_by);
+    }
+    if reason == Reason::NotLinked {
+        return format!("thêm `link {from} -> {to}`, hoặc bỏ cạnh này khỏi cấu hình");
+    }
+    if reason == Reason::NotRun {
+        return format!("thêm {to} vào `runs` của service {from}, hoặc bỏ phụ thuộc này");
     }
     if via != Via::Import {
         return format!("{from} chưa được phép dùng {to}");
@@ -868,6 +940,370 @@ fn describe(rule: &Rule) -> String {
         out.push_str(&format!(" except {}", rule.except.join(", ")));
     }
     out
+}
+
+/// Service có hiệu lực mà component `from` chạy trong đó, còn `to` thì không:
+/// cạnh `from -> to` kéo mã của `to` vào những service đó.
+///
+/// Đơn vị là component, như mọi luật khác: component chạy trong service thì
+/// mọi thứ nó phụ thuộc cũng chạy ở đó, kể cả khi chỉ một file của nó dùng tới.
+/// Nhờ vậy `runs` kiểm được từng file một, trong hook.
+#[allow(clippy::too_many_arguments)]
+fn pulled_in(doc: &Document, from: &str, to: &str, file: &str, line: usize, spec: &str, via: Via, report: &mut Report) {
+    if doc.services.is_empty() || !doc.component(to).is_some_and(|c| !c.external) {
+        return;
+    }
+    for s in doc.services.iter().filter(|s| s.meta.status.is_enforced()) {
+        if s.runs.iter().any(|r| r == from) && !s.runs.iter().any(|r| r == to) {
+            report.violations.push(Violation {
+                from: s.name.clone(),
+                to: to.to_string(),
+                file: file.to_string(),
+                line,
+                spec: spec.to_string(),
+                via,
+                count: 1,
+                reason: Reason::NotRun,
+                rule: format!("service {} runs {}", s.name, s.runs.join(", ")),
+                status: s.meta.status,
+                hint: hint_for(doc, &s.name, to, Reason::NotRun, via),
+            });
+        }
+    }
+}
+
+/// Cấu hình nào ứng với `service`: service compose cùng tên (cùng thư mục nếu
+/// có ghi), hay Dockerfile đã nạp.
+fn matches_source(source: &Source, key: &Key) -> bool {
+    match (source, key) {
+        (Source::Compose { dir, name }, Key::Compose { dir: d, name: n }) => {
+            n == name && dir.as_ref().is_none_or(|x| x == d)
+        }
+        (Source::Dockerfile(p), Key::Dockerfile(q)) => p == q,
+        _ => false,
+    }
+}
+
+/// Đối chiếu cấu hình triển khai với `service` và `link`.
+/// Đầu câu `rule` của vi phạm cạnh mạng tới service compose chưa khai.
+const UNDECLARED: &str = "service compose ";
+
+/// Cạnh mạng tới một service compose chưa khai trong file luật: `to` là tên
+/// trong compose, và phải khai `service` cho nó trước khi có `link` được.
+pub fn to_undeclared(v: &Violation) -> bool {
+    v.reason == Reason::NotLinked && v.rule.starts_with(UNDECLARED)
+}
+
+fn judge_deploy(root: &Path, doc: &Document, resolver: &Resolver, dep: &Deploy, report: &mut Report) {
+    let mut svcs: Vec<Svc> = dep.services.clone();
+    report.deploy_unread.extend(dep.unread.iter().cloned());
+    for s in &doc.services {
+        if let Some(Source::Dockerfile(path)) = &s.source
+            && !svcs.iter().any(|v| v.key == Key::Dockerfile(path.clone()))
+        {
+            match deploy::load_dockerfile(root, path) {
+                Ok(v) => svcs.push(v),
+                Err(u) if u.why == "không có" => {}
+                Err(u) => report.deploy_unread.push(u),
+            }
+        }
+    }
+
+    // `service` của file luật → các cấu hình ứng với nó.
+    let mut matched: Vec<(&Service, Vec<&Svc>)> = Vec::new();
+    for s in &doc.services {
+        let Some(source) = &s.source else { continue };
+        let found: Vec<&Svc> = svcs.iter().filter(|v| matches_source(source, &v.key)).collect();
+        let dirs: std::collections::BTreeSet<&str> = found
+            .iter()
+            .filter_map(|v| match &v.key {
+                Key::Compose { dir, .. } => Some(dir.as_str()),
+                Key::Dockerfile(_) => None,
+            })
+            .collect();
+        if s.meta.status.is_enforced() {
+            if found.is_empty() {
+                report.missing.push(Missing {
+                    name: source.text(),
+                    source: format!("service {}", s.name),
+                    line: s.meta.line,
+                    hint: match source {
+                        Source::Compose { name, .. } => format!("không có service `{name}` trong file compose nào"),
+                        Source::Dockerfile(p) => format!("không có Dockerfile `{p}`"),
+                    },
+                });
+            } else if dirs.len() > 1 {
+                report.missing.push(Missing {
+                    name: source.text(),
+                    source: format!("service {}", s.name),
+                    line: s.meta.line,
+                    hint: format!(
+                        "khớp service compose ở nhiều thư mục ({}) — viết `compose:<thư mục>/<tên>`",
+                        dirs.iter().map(|d| if d.is_empty() { "." } else { d }).collect::<Vec<_>>().join(", ")
+                    ),
+                });
+            }
+        }
+        matched.push((s, found));
+    }
+
+    // Service compose → `service` của file luật, để gọi tên đích của cạnh mạng.
+    let declared = |key: &Key| doc.services.iter().find(|s| s.source.as_ref().is_some_and(|src| matches_source(src, key)));
+
+    let mut seen: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
+    // Import của từng file điểm vào, đọc một lần dù hàng nghìn service cùng
+    // chạy nó (TM-8).
+    let mut targets: HashMap<String, Targets> = HashMap::new();
+    for (s, found) in &matched {
+        if !s.meta.status.is_enforced() {
+            continue;
+        }
+        for v in found {
+            // Cạnh mạng.
+            for e in &v.edges {
+                let target = match &v.key {
+                    Key::Compose { dir, .. } => Key::Compose { dir: dir.clone(), name: e.to.clone() },
+                    Key::Dockerfile(_) => continue,
+                };
+                // Cạnh tới service compose chưa khai: không có `link` nào cho nó
+                // được, nên đó là cạnh mạng không ai cho phép — không bỏ qua.
+                let Some(t) = declared(&target) else {
+                    report.violations.push(Violation {
+                        from: s.name.clone(),
+                        to: e.to.clone(),
+                        file: e.file.clone(),
+                        line: e.line,
+                        spec: e.shown.clone(),
+                        via: Via::Network,
+                        count: 1,
+                        reason: Reason::NotLinked,
+                        rule: format!("{UNDECLARED}`{}` chưa khai, nên không có link nào cho {} tới nó", e.to, s.name),
+                        status: Status::Accepted,
+                        hint: format!("khai `service ... from compose:{}` rồi thêm `link {} -> ...`", e.to, s.name),
+                    });
+                    continue;
+                };
+                if t.name == s.name {
+                    continue;
+                }
+                seen.insert((s.name.clone(), t.name.clone()));
+                let linked = doc.links.iter().any(|l| {
+                    l.meta.status.is_enforced() && l.from == s.name && l.to.contains(&t.name)
+                });
+                if !linked {
+                    report.violations.push(Violation {
+                        from: s.name.clone(),
+                        to: t.name.clone(),
+                        file: e.file.clone(),
+                        line: e.line,
+                        spec: e.shown.clone(),
+                        via: Via::Network,
+                        count: 1,
+                        reason: Reason::NotLinked,
+                        rule: format!("không có link nào cho {} -> {}", s.name, t.name),
+                        status: Status::Accepted,
+                        hint: hint_for(doc, &s.name, &t.name, Reason::NotLinked, Via::Network),
+                    });
+                }
+            }
+            // Điểm vào.
+            if s.runs.is_empty() {
+                continue;
+            }
+            if v.starts.is_empty() {
+                let why = v.unknown.clone().unwrap_or_else(|| "không xác định được lệnh khởi chạy".into());
+                report.entry_unknown.push((s.name.clone(), why));
+                continue;
+            }
+            // Từng thứ lệnh chạy phải lần ra được mã: một cái không ra thì có
+            // thể nó đang chạy mã ngoài `runs` mà không ai thấy (TM-12).
+            let mut found: HashSet<(String, String, usize)> = HashSet::new();
+            for st in &v.starts {
+                let mut lost: Vec<String> = st.unresolved.clone();
+                let mut unread: Vec<String> = Vec::new();
+                for e in &st.entries {
+                    let files = entry_files(root, resolver, std::slice::from_ref(e));
+                    if files.is_empty() {
+                        lost.push(match e {
+                            deploy::Entry::Module { name, .. } => name.clone(),
+                            deploy::Entry::File(f) | deploy::Entry::Dir(f) => f.clone(),
+                        });
+                    }
+                    for file in files {
+                        // Không biết ngôn ngữ (`./entrypoint` viết bằng Python,
+                        // không đuôi): import của nó không được quét, kể cả khi
+                        // nó thuộc một component, nên không biết nó nạp gì.
+                        if Lang::for_path(&file).is_none() {
+                            unread.push(file.clone());
+                        }
+                        entry_runs(root, doc, resolver, s, st, &file, &mut targets, &mut found, report);
+                    }
+                }
+                if !lost.is_empty() {
+                    lost.dedup();
+                    report.entry_unknown.push((
+                        s.name.clone(),
+                        format!("{}:{} không tìm thấy trong repo mã mà `{}` nạp", st.file, st.line, lost.join("`, `")),
+                    ));
+                }
+                if !unread.is_empty() {
+                    report.entry_unknown.push((
+                        s.name.clone(),
+                        format!(
+                            "{}:{} không biết ngôn ngữ của `{}`, nên không biết nó nạp mã nào",
+                            st.file,
+                            st.line,
+                            unread.join("`, `")
+                        ),
+                    ));
+                }
+                if !st.cut.is_empty() {
+                    report.entry_unknown.push((
+                        s.name.clone(),
+                        format!("{}:{} không đọc hết lệnh khởi chạy: {}", st.file, st.line, st.cut.join("; ")),
+                    ));
+                }
+            }
+        }
+    }
+
+    for l in doc.links.iter().filter(|l| l.meta.status.is_enforced()) {
+        let has_config = |name: &str| matched.iter().any(|(s, f)| s.name == name && !f.is_empty());
+        if !has_config(&l.from) {
+            continue;
+        }
+        for t in &l.to {
+            if has_config(t) && !seen.contains(&(l.from.clone(), t.clone())) {
+                report.links_unseen.push((l.from.clone(), t.clone(), l.meta.line));
+            }
+        }
+    }
+
+    // Đã mô tả triển khai thì mọi service trong compose phải có mặt.
+    if doc.services.iter().any(|s| matches!(s.source, Some(Source::Compose { .. }))) {
+        for v in &svcs {
+            if let Key::Compose { name, .. } = &v.key
+                && declared(&v.key).is_none()
+            {
+                report.services_undeclared.push((v.file.clone(), v.line, name.clone()));
+            }
+        }
+    }
+    report.services_undeclared.sort();
+    report.services_undeclared.dedup();
+    report.entry_unknown.sort();
+    report.entry_unknown.dedup();
+}
+
+/// File mà các điểm vào nạp. Module không có ở thư mục làm việc trong
+/// container thì tra theo các gói của dự án, như một gói đã `pip install`.
+pub fn entry_files(root: &Path, resolver: &Resolver, entries: &[deploy::Entry]) -> Vec<String> {
+    let mut out = Vec::new();
+    for e in entries {
+        match deploy::entry_files(root, e) {
+            Ok(files) => out.extend(files),
+            Err(module) => {
+                let import = scan::Import { spec: module, line: 0, system: false, names: Vec::new() };
+                if let Resolved::Path(p) = resolver.resolve(Lang::Python, "", &import) {
+                    let main = matches!(e, deploy::Entry::Module { main: true, .. });
+                    if main && let Some(dir) = p.strip_suffix("/__init__.py") {
+                        let m = format!("{dir}/__main__.py");
+                        if root.join(&m).is_file() {
+                            out.push(m);
+                        }
+                    }
+                    if root.join(&p).is_file() {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Component mà một điểm vào chạy phải nằm trong `runs`. File điểm vào không
+/// thuộc component nào (`manage.py` ở gốc repo) thì xét các component mà nó
+/// import trực tiếp.
+#[allow(clippy::too_many_arguments)]
+fn entry_runs(
+    root: &Path,
+    doc: &Document,
+    resolver: &Resolver,
+    s: &Service,
+    st: &deploy::Start,
+    file: &str,
+    targets: &mut HashMap<String, Targets>,
+    found: &mut HashSet<(String, String, usize)>,
+    report: &mut Report,
+) {
+    let outside = |c: &str| doc.component(c).is_some_and(|c| !c.external) && !s.runs.iter().any(|r| r == c);
+    let violation = |to: &str, file: &str, line: usize, spec: String, via: Via| Violation {
+        from: s.name.clone(),
+        to: to.to_string(),
+        file: file.to_string(),
+        line,
+        spec,
+        via,
+        count: 1,
+        reason: Reason::NotRun,
+        rule: format!("service {} runs {}", s.name, s.runs.join(", ")),
+        status: s.meta.status,
+        hint: hint_for(doc, &s.name, to, Reason::NotRun, via),
+    };
+    // Một vi phạm cho mỗi (component, chỗ): `from pkg import x` phân giải ra
+    // cả `pkg/__init__.py` lẫn `pkg/x.py`, cùng một component.
+    if let Some(owner) = owners_of(doc, file).first() {
+        if outside(owner) && found.insert((owner.clone(), st.file.clone(), st.line)) {
+            report.violations.push(violation(owner, &st.file, st.line, format!("khởi chạy {}", st.shown), Via::Entry));
+        }
+        return;
+    }
+    let direct = targets.entry(file.to_string()).or_insert_with(|| direct_targets(root, resolver, file));
+    let direct = match direct {
+        Ok(d) => d,
+        // Đọc không được thì không biết nó nạp gì (TM-12).
+        Err(why) => {
+            report.entry_unknown.push((s.name.clone(), format!("{}:{} điểm vào `{file}`: {why}", st.file, st.line)));
+            return;
+        }
+    };
+    for (target, line, spec) in direct.iter() {
+        if let Some(owner) = owners_of(doc, target).first()
+            && outside(owner)
+            && found.insert((owner.clone(), file.to_string(), *line))
+        {
+            report.violations.push(violation(owner, file, *line, spec.clone(), Via::Import));
+        }
+    }
+}
+
+/// Đích trực tiếp của các import trong một file: `(đích, dòng, import)`, hay
+/// lý do không đọc được.
+pub(crate) type Targets = Result<Vec<(String, usize, String)>, String>;
+
+/// Đích trực tiếp của các import trong một file.
+///
+/// File do cấu hình triển khai chỉ tới, nên đọc như [`deploy::read_in`]:
+/// không qua symlink, chỉ file thường, có trần ([`MAX_FILE_BYTES`]). Không
+/// biết ngôn ngữ thì không có import nào; đọc không được thì trả lý do.
+pub(crate) fn direct_targets(root: &Path, resolver: &Resolver, file: &str) -> Targets {
+    let Some(lang) = Lang::for_path(file) else { return Ok(Vec::new()) };
+    let src = deploy::read_in(root, file, MAX_FILE_BYTES)?;
+    let src = scan::source_view(file, &src);
+    let scanned = lang.scan_all(&src, &Default::default(), &[]);
+    let mut out = Vec::new();
+    for import in &scanned.imports {
+        let base = resolver.resolve(lang, file, import);
+        let (subs, _) = resolver.import_targets(lang, file, import, &base);
+        if let Resolved::Path(p) = base {
+            out.push((p, import.line, import.spec.clone()));
+        }
+        out.extend(subs.into_iter().map(|p| (p, import.line, import.spec.clone())));
+    }
+    Ok(out)
 }
 
 fn walk(root: &Path, prefix: &str, extra_ignores: &[String], out: &mut Vec<String>) {

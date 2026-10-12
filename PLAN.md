@@ -5,9 +5,29 @@ Mô tả sản phẩm ở [README.md](README.md); file này chỉ ghi trạng th
 
 ## §0 Đang ở đâu, việc tiếp theo
 
-Cập nhật 2026-10-11.
+Cập nhật 2026-10-12.
 
 ### Đã xong, có bằng chứng
+
+- **Tầng hạ tầng, đợt 1** (2026-10-12, commit "Tầng hạ tầng đợt 1…"; bạn chốt "theo khuyên hết").
+  DSL `service <Tên> [from compose:…|dockerfile:…] [runs …]` và `link A -> B`
+  (không gian tên riêng); bộ đọc YAML tập con (khớp PyYAML 793/804 file YAML của
+  bộ đo), Dockerfile, lệnh khởi chạy, compose; ba phép kiểm trong `check` (cạnh
+  mạng thiếu `link` — kể cả tới service chưa khai —, mã chạy ngoài `runs`, khai
+  báo lệch), hook đọc lại cấu hình khi file đổi có thể là thứ cấu hình trỏ tới;
+  `init --from-code` sinh `service`/`runs`/`link`; `export`, `serve`, `scan`
+  (mặc định che đối số và `user:pass@`, `--verbatim` để xem đủ); `docs/infra.md`.
+  Bộ đo thêm example-voting-app, open-webui (29 repo), oracle `--require deploy`
+  (PyYAML, dockerfile-parse ghim hash), 8 kiểu phá mới. Threat model TM-8 tới
+  TM-12 đã có, kèm `file:dòng` và test. Review ba vòng (differential-review, agent
+  đối kháng, reviewer opus hai lượt): tìm 6 + 11 + 14 + 4 (cộng F12 của phiên
+  chính), sửa hết, mỗi mục tái hiện trên thư mục tấn công trước và sau; mọi ca
+  DoS dưới 0,4 s (trước tới >60 s, 4,6 GB); báo cáo ở scratchpad
+  `review/DIFFERENTIAL_REVIEW_REPORT.md`. Biên nhận trên mã cuối: `cargo test`
+  (528), clippy, `cargo +1.88 check`, bộ đo 29 repo 24 129 file 0 bất nhất
+  1015/1015, oracle `--require clang,node,go,syn,ipython,deploy` khớp hết (hạ tầng
+  12 repo, 49 file, 4 792 dữ kiện), sabotage 38/38, `verify` 3/3, `check --strict`
+  0. Chưa kiểm: nhánh hằng `O_NOFOLLOW` của Linux chỉ biên dịch trên CI.
 
 - **Oracle đối chiếu cạnh binding** (2026-10-11, commit `3167cc9`; bạn chọn raw token
   của clang). `archctl scan` in thêm cạnh liên ngôn ngữ của từng file (khoá
@@ -352,8 +372,17 @@ x86_64-manylinux_2_28`. Bước pip thật trên runner Linux chưa chạy (cầ
 `.agent/threat-model.md` vào git, thêm TM-7. Review (opus): 0 cao, 0 vừa, 3 nhẹ,
 đã sửa cả 3 (`.venv/` vào `.gitignore`, số dòng trong threat model, §0 này).
 
-**4.2: thiết kế chờ bạn chốt.** Bạn chọn đưa tầng service, mạng, triển khai
-vào DSL. Trang so sánh hai phương án và năm câu cần chốt:
+**4.2: bạn chốt "theo khuyên hết, làm đợt 1" (2026-10-12).** Đợt 1 xong, đã
+commit (xem "Đã xong" ở trên). Thiết kế đã chốt: tầng riêng `service` và
+`link` (không gian tên riêng, nên `component Api` và `service Api` cùng tồn tại
+được); đợt đầu đọc Dockerfile và compose; mã chạy trong service tính từ lệnh
+khởi chạy theo đồ thị import, đơn vị là component như mọi luật khác (`runs`
+phải khép kín theo cạnh import: component chạy trong service thì mọi thứ nó
+import cũng phải chạy trong đó), nên kiểm được từng file trong hook; Helm,
+Kustomize, Terraform không render; gRPC đợt hai. Mã mới đặt vào component có
+sẵn (bộ đọc thuần vào `scan/`, đối chiếu vào `check.rs`, dựng nháp vào
+`discover.rs`), nên không phải đổi `.arch/system.arch`. Trước đó: bạn chọn đưa
+tầng service, mạng, triển khai vào DSL. Trang so sánh hai phương án và năm câu cần chốt:
 https://claude.ai/artifact/VVd2dz5WrcsyoKJBkvetPm. Khuyên: tầng riêng `service`
 và `link`; đợt đầu đọc Dockerfile và compose; mã chạy trong service xác định từ
 điểm vào theo đồ thị import; Helm, Kustomize, Terraform không render trong lõi;
@@ -427,8 +456,31 @@ hàm, `ctypes` của Python và IPC thì không — xem [docs/check.md](docs/che
 
 - [x] Cài torch bản CPU để chạy thật `verify model_arch`
   (sinh `examples/ml/tests/model_arch.txt`, CI chạy nó ở job `kiến trúc mô hình`).
-- [ ] @ban Chốt năm câu thiết kế tầng service, mạng, triển khai trong DSL
-  (bạn đã chọn đưa vào DSL; trang phương án: https://claude.ai/artifact/VVd2dz5WrcsyoKJBkvetPm).
+- [x] Chốt năm câu thiết kế tầng service, mạng, triển khai trong DSL
+  (bạn chọn theo khuyên hết; trang phương án: https://claude.ai/artifact/VVd2dz5WrcsyoKJBkvetPm).
 - [x] `.agent/threat-model.md` vào git (bạn đồng ý), thêm TM-7.
 - [ ] @ban Push lên nhánh thử rồi chạy CI bằng `workflow_dispatch`
   (job `kiến trúc mô hình` chưa chạy trên runner Linux lần nào).
+
+### Tầng hạ tầng, đợt 1
+
+- [x] Threat model cho bộ đọc compose, Dockerfile (TM-8 trở đi).
+- [x] DSL: `service <Tên> [from compose:<tên>|dockerfile:<đường dẫn>] [runs <Component>, ...]`
+  và `link <Service> -> <Service>, ...`; parser, validate, diff, hash.
+- [x] Bộ đọc YAML tập con (anchor, alias, `<<`, flow, block scalar), giới hạn độ sâu,
+  ngân sách gộp, trần dung lượng.
+- [x] Bộ đọc Dockerfile (stage, WORKDIR, COPY, CMD, ENTRYPOINT, `go build`) và
+  bộ đọc lệnh khởi chạy (python, `-m`, uvicorn, gunicorn, celery, script `.py`, node, `sh -c`).
+- [x] Đọc compose: build, image, command, entrypoint, depends_on, links,
+  environment (chỉ giữ host, không in giá trị), env_file, volumes, extends, include.
+- [x] Ba phép kiểm trong `check`: mã chạy ngoài `runs`, cạnh mạng thiếu `link`,
+  khai báo không còn khớp; JSON, `--strict`, hook.
+- [x] `init --from-code` sinh `service`, `runs`, `link`.
+- [x] `export` và `serve` vẽ tầng service; `scan` in thông tin triển khai.
+- [x] Bộ đo: repo thật có compose, oracle so với PyYAML và dockerfile-parse ghim hash,
+  sabotage cho từng phép kiểm; tài liệu.
+
+### Tầng hạ tầng, đợt 2
+
+- [ ] Cạnh gRPC: đọc `.proto` (service, rpc) và stub sinh ra, ghép client với server.
+- [ ] Manifest Kubernetes (Deployment, Service) vào `service`/`link`; không render Helm.

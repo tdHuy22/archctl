@@ -12,6 +12,9 @@ use crate::model::{Document, RuleKind, Target};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const NODE_W: f64 = 180.0;
+/// Tên node của một service trên sơ đồ. Service có không gian tên riêng, nên
+/// `service Api` và `component Api` phải là hai node khác nhau.
+pub const SERVICE_PREFIX: &str = "svc:";
 pub const NODE_H: f64 = 56.0;
 const GAP_X: f64 = 84.0;
 const GAP_Y: f64 = 28.0;
@@ -52,6 +55,7 @@ fn node_names(doc: &Document) -> Vec<String> {
         .map(|c| c.name.clone())
         .chain(doc.stores.iter().map(|s| s.name.clone()))
         .chain(doc.apis.iter().map(|a| a.name.clone()))
+        .chain(doc.services.iter().map(|s| format!("{SERVICE_PREFIX}{}", s.name)))
         .collect();
     names.sort();
     names.dedup();
@@ -74,6 +78,18 @@ fn edge_list(doc: &Document, nodes: &[String]) -> Vec<(String, String)> {
     for store in &doc.stores {
         if known.contains(store.owned_by.as_str()) {
             edges.insert((store.owned_by.clone(), store.name.clone()));
+        }
+    }
+    // Service đứng trước mã mà nó chạy, và trước service mà nó gọi.
+    for s in &doc.services {
+        let from = format!("{SERVICE_PREFIX}{}", s.name);
+        for c in s.runs.iter().filter(|c| known.contains(c.as_str())) {
+            edges.insert((from.clone(), c.clone()));
+        }
+    }
+    for l in &doc.links {
+        for to in l.to.iter().filter(|t| **t != l.from) {
+            edges.insert((format!("{SERVICE_PREFIX}{}", l.from), format!("{SERVICE_PREFIX}{to}")));
         }
     }
     edges.into_iter().collect()

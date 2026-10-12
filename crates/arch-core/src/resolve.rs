@@ -1234,7 +1234,17 @@ fn find_py_roots(root: &Path, projects: &[String]) -> PyRoots {
     let mut out: PyRoots = HashMap::new();
     for project in projects {
         let p = if project.is_empty() { String::new() } else { format!("{project}/") };
-        for base in [p.clone(), format!("{p}src/"), format!("{p}lib/")] {
+        let mut bases = vec![p.clone(), format!("{p}src/"), format!("{p}lib/")];
+        let declared = read_bounded(&root.join(format!("{p}pyproject.toml")), 1 << 20)
+            .map(|text| pyproject_bases(&text))
+            .unwrap_or_default();
+        for d in declared {
+            let base = format!("{p}{d}/");
+            if !bases.contains(&base) {
+                bases.push(base);
+            }
+        }
+        for base in bases {
             let Ok(entries) = std::fs::read_dir(root.join(&base)) else { continue };
             let mut names: Vec<String> = entries
                 .flatten()
@@ -1252,6 +1262,87 @@ fn find_py_roots(root: &Path, projects: &[String]) -> PyRoots {
             names.dedup();
             for name in names {
                 out.entry(name).or_default().push((project.clone(), base.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// Thư mục chứa gói mà `pyproject.toml` khai, tương đối với project: mã không
+/// nằm ở gốc, `src/` hay `lib/` thì cấu hình build nói nó ở đâu.
+///
+/// - hatch: `[tool.hatch.build.targets.wheel]` `sources = ["backend"]`, hay
+///   `packages = ["backend/pkg"]` (thư mục cha của gói);
+/// - setuptools: `[tool.setuptools.packages.find]` `where = ["backend"]`, và
+///   `package-dir = {"" = "backend"}`;
+/// - poetry: `packages = [{ include = "pkg", from = "backend" }]`.
+///
+/// Đọc theo dòng, đủ cho cách viết thường gặp; không phải bộ đọc TOML. Đường
+/// dẫn ra khỏi project hay tuyệt đối thì bỏ.
+fn pyproject_bases(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut section = String::new();
+    let strings = |s: &str| -> Vec<String> {
+        let mut v = Vec::new();
+        let mut rest = s;
+        while let Some(a) = rest.find(['"', '\'']) {
+            let q = rest.as_bytes()[a] as char;
+            let Some(b) = rest[a + 1..].find(q) else { break };
+            v.push(rest[a + 1..a + 1 + b].to_string());
+            rest = &rest[a + 1 + b + 1..];
+        }
+        v
+    };
+    for raw in text.lines() {
+        let line = raw.split(" #").next().unwrap_or(raw).trim();
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            section = name.trim_matches(['[', ']']).trim().to_string();
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let key = key.trim();
+        let found: Vec<String> = match (section.as_str(), key) {
+            ("tool.hatch.build.targets.wheel" | "tool.hatch.build", "sources") => {
+                // `sources = ["backend"]`, hay bảng `{"src/x" = "x"}`: lấy vế trái.
+                let items = strings(value);
+                if value.trim_start().starts_with('{') { items.into_iter().step_by(2).collect() } else { items }
+            }
+            ("tool.hatch.build.targets.wheel", "packages") => {
+                strings(value).iter().filter_map(|p| p.rsplit_once('/').map(|(d, _)| d.to_string())).collect()
+            }
+            ("tool.setuptools.packages.find", "where") => strings(value),
+            ("tool.setuptools", "package-dir") | ("tool.setuptools.package-dir", "\"\"") => {
+                let items = strings(value);
+                match key {
+                    "package-dir" => items.chunks(2).filter(|c| c[0].is_empty()).filter_map(|c| c.get(1).cloned()).collect(),
+                    _ => items,
+                }
+            }
+            ("tool.poetry", "packages") => {
+                let mut v = Vec::new();
+                let mut rest = value;
+                while let Some(at) = rest.find("from") {
+                    let tail = &rest[at + 4..];
+                    if let Some(s) = tail.trim_start().strip_prefix('=').and_then(|t| strings(t).into_iter().next()) {
+                        v.push(s);
+                    }
+                    rest = tail;
+                }
+                v
+            }
+            _ => continue,
+        };
+        for d in found {
+            // Kiểm đường dẫn tuyệt đối trước khi bỏ `/` cuối: `/etc` không
+            // được thành `etc`.
+            let absolute = d.starts_with('/');
+            let d = d.trim_end_matches('/').to_string();
+            let safe = !absolute
+                && !d.is_empty()
+                && !d.contains('\\')
+                && d.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..");
+            if safe && !out.contains(&d) {
+                out.push(d);
             }
         }
     }
@@ -1616,6 +1707,23 @@ fn npm_package(spec: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn goc_goi_khai_trong_pyproject() {
+        let hatch = "[project]\nname = \"x\"\n[tool.hatch.build.targets.wheel]\nsources = [\"backend\"]\n";
+        assert_eq!(pyproject_bases(hatch), ["backend"]);
+        let hatch_pkgs = "[tool.hatch.build.targets.wheel]\npackages = [\"python/pkg\", \"python/other\"]\n";
+        assert_eq!(pyproject_bases(hatch_pkgs), ["python"]);
+        let find = "[tool.setuptools.packages.find]\nwhere = [\"py\"]  # comment\n";
+        assert_eq!(pyproject_bases(find), ["py"]);
+        let dir = "[tool.setuptools]\npackage-dir = {\"\" = \"code\"}\n";
+        assert_eq!(pyproject_bases(dir), ["code"]);
+        let poetry = "[tool.poetry]\npackages = [{ include = \"app\", from = \"service\" }]\n";
+        assert_eq!(pyproject_bases(poetry), ["service"]);
+        let escape = "[tool.hatch.build.targets.wheel]\nsources = [\"../outside\", \"/etc\", \"ok/./x\"]\n";
+        assert!(pyproject_bases(escape).is_empty(), "đường dẫn ra ngoài project bị bỏ");
+        assert!(pyproject_bases("[tool.other]\nsources = [\"x\"]\n").is_empty());
+    }
 
     #[test]
     fn goi_npm_thuong_va_co_pham_vi() {

@@ -189,6 +189,60 @@ pub struct Api {
     pub meta: Meta,
 }
 
+/// Một đơn vị triển khai: container, tiến trình chạy riêng, hay dịch vụ do
+/// người khác vận hành.
+///
+/// Mã và triển khai là hai trục khác nhau. Một component có thể chạy trong
+/// nhiều service (thư viện dùng chung), và một service chạy nhiều component.
+/// Vì vậy service có không gian tên riêng: `component Api` và `service Api`
+/// cùng tồn tại được, và `allow`, `deny` không bao giờ trỏ tới service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Service {
+    pub name: String,
+    /// Nơi đọc cấu hình của service. Không có thì service chỉ là một cái tên
+    /// trên sơ đồ — một cơ sở dữ liệu do bên khác vận hành chẳng hạn.
+    pub source: Option<Source>,
+    /// Component được phép chạy trong service. Rỗng nghĩa là không có mã của
+    /// dự án này: image dựng sẵn như `postgres`.
+    pub runs: Vec<String>,
+    pub meta: Meta,
+}
+
+/// Cấu hình nói service này chạy cái gì.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    /// Service tên `name` trong file compose. `dir` là thư mục chứa file
+    /// compose, khi nhiều thư mục cùng có service tên đó.
+    Compose { dir: Option<String>, name: String },
+    /// Dockerfile dựng service này, khi không có compose.
+    Dockerfile(String),
+}
+
+impl Source {
+    pub fn text(&self) -> String {
+        match self {
+            Source::Compose { dir: Some(dir), name } if dir.is_empty() => format!("compose:./{name}"),
+            Source::Compose { dir: Some(dir), name } => format!("compose:{dir}/{name}"),
+            Source::Compose { dir: None, name } => format!("compose:{name}"),
+            Source::Dockerfile(path) => format!("dockerfile:{path}"),
+        }
+    }
+}
+
+/// Cạnh mạng được phép giữa hai service. Như `allow`: không có `link` là cấm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    pub from: String,
+    pub to: Vec<String>,
+    pub meta: Meta,
+}
+
+impl Link {
+    pub fn one_line(&self) -> String {
+        format!("link {} -> {}", self.from, self.to.join(", "))
+    }
+}
+
 /// Lát cắt để app hiển thị riêng từng phần. Thuần trình bày, không phải luật.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct View {
@@ -222,7 +276,7 @@ impl Element {
     /// Luật và invariant không có tên, nên thay đổi của chúng hiện thành một
     /// cặp thêm/bớt — rõ ràng hơn là đoán xem luật nào tương ứng luật nào.
     pub fn is_named(&self) -> bool {
-        !matches!(self.kind, "rule" | "invariant")
+        !matches!(self.kind, "rule" | "invariant" | "link")
     }
 }
 
@@ -269,11 +323,17 @@ pub struct Document {
     pub views: Vec<View>,
     pub apis: Vec<Api>,
     pub verifies: Vec<Verify>,
+    pub services: Vec<Service>,
+    pub links: Vec<Link>,
 }
 
 impl Document {
     pub fn component(&self, name: &str) -> Option<&Component> {
         self.components.iter().find(|c| c.name == name)
+    }
+
+    pub fn service(&self, name: &str) -> Option<&Service> {
+        self.services.iter().find(|s| s.name == name)
     }
 
     pub fn verify(&self, name: &str) -> Option<&Verify> {
@@ -548,6 +608,21 @@ impl Document {
         }
         for a in &self.apis {
             out.push(Element::new("api", a.name.clone(), list(&a.symbols), &a.meta));
+        }
+        for s in &self.services {
+            let from = s.source.as_ref().map_or("-".to_string(), Source::text);
+            out.push(Element::new(
+                "service",
+                s.name.clone(),
+                format!("from {from} runs {}", list(&s.runs)),
+                &s.meta,
+            ));
+        }
+        for l in &self.links {
+            let mut to = l.to.clone();
+            to.sort();
+            let text = format!("link {} -> {}", l.from, to.join(", "));
+            out.push(Element::new("link", text.clone(), text, &l.meta));
         }
 
         out.sort_by(|a, b| (a.kind, &a.key).cmp(&(b.kind, &b.key)));

@@ -70,6 +70,7 @@ request. Bảng dưới là lần đo khi bộ đo có 24 repo:
 | Rust | `syn` 2.0.87, chỉ chạy trên CI | 1 509 file, 18 303 `use`/`extern crate`: khớp cả tên lẫn dòng; 548 import nằm trong thân macro (`syn` không đọc vào) không đối chiếu, 534 trong số đó ở tokio (`cfg_rt! { ... }`) |
 | Notebook (2026-10-11) | `TransformerManager` của IPython 9.17.1 cộng `ast`, chỉ chạy trên CI | 3 notebook của matplotlib, 16 import: khớp cả tên lẫn dòng. Các notebook khó trong `tests/notebook.rs` (magic trong chuỗi `"""`, `%%time`, `%%script python3`, khoá trùng, dòng trống đầu ô) cũng khớp |
 | Binding (2026-10-11) | token thô của clang cho C/C++, `ast` cho `torch.ops`, `syn` cho PyO3 | vllm 287 file, 1 470 đầu cạnh; apex 34; matplotlib 14; pydantic-core 1 (PyO3): khớp cả khoá lẫn dòng ngay lần đầu |
+| Hạ tầng (2026-10-12) | PyYAML 6.0.3 (`compose` giữ số dòng, `<<` trải bằng `flatten_mapping`) cho compose, dockerfile-parse 2.0.1 cho Dockerfile, cài vào venv nên cần mạng; CI bật | 12 repo, 49 file compose và Dockerfile, 4 792 dữ kiện (service, build, lệnh, khoá env, `depends_on`, bind mount, alias, chỉ thị Dockerfile): khớp cả giá trị lẫn dòng; vllm chiếm 3 830. Hai Dockerfile có heredoc của BuildKit (hugo, vllm) bị bỏ qua vì dockerfile-parse không đọc heredoc. Bộ đọc YAML còn được so riêng với PyYAML trên 804 file YAML của bộ đo: 793 khớp, phần lệch là template Helm và anchor trùng tên, không phải compose |
 
 Trước khi sửa, cũng phép đối chiếu đó cho:
 
@@ -431,8 +432,11 @@ cùng một loại, nên `--strict` không đối xử như nhau.
 
 **Đã thử kiểm và không kiểm được** — `--strict` chặn. Tên không phân giải
 được, file quá 4 MB, khai báo lạc hậu, `allow` không bao giờ áp được vào đâu,
-mẫu `at` chồng nhau, biên nhận hết hạn. Mỗi cái là một chỗ báo cáo đang im
-lặng mà không phải vì sạch.
+mẫu `at` chồng nhau, biên nhận hết hạn; ở tầng hạ tầng: file compose hay
+Dockerfile không đọc được, service có `runs` mà không rõ điểm vào (kể cả khi
+bộ đọc thôi đọc lệnh khởi chạy giữa chừng), `link` không cấu hình nào cho thấy
+([infra.md](infra.md)). Mỗi cái là một chỗ báo cáo đang
+im lặng mà không phải vì sạch.
 
 **Luật không ai kiểm được** — `--strict` chặn. `contract` không có verify,
 `invariant` chỉ là ghi chú, component không có `at`. Nhóm này đáng chặn hơn
@@ -441,7 +445,8 @@ nhóm trên: một import không phân giải được chỉ là một chỗ t�
 luật đang được áp — ai xem sơ đồ cũng tưởng nó đang được giữ.
 
 **Chưa khai báo** — `--strict` **không** chặn. Component chưa có `allow` nào,
-file không thuộc component nào. Áp dần là cách dùng được thiết kế: `init
+file không thuộc component nào, service trong compose chưa có `service` nào
+khai. Áp dần là cách dùng được thiết kế: `init
 --from-code` sinh ra toàn `#draft`, và một repo đang chạy thì luôn có phần
 chưa vào sơ đồ. Chặn nhóm này nghĩa là không ai áp được `--strict` cho tới khi
 đã mô tả xong cả repo, và chẳng ai làm thế. Xem [adopt.md](adopt.md).
@@ -480,6 +485,12 @@ mọi thư mục có `pyproject.toml`, `setup.py`, `setup.cfg` (một package) h
 Thứ tự: các gốc **chứa file gọi** trước, sâu nhất trước — `tests` của
 `libs/core` là `tests` của nó, không phải của package bên cạnh. Rồi tới các gốc
 còn lại, và ở đó tên phải duy nhất: hai package cùng có `shared` thì không đoán.
+
+Thư mục mà `pyproject.toml` khai cũng là gốc: `[tool.hatch.build.targets.wheel]`
+`sources` hay `packages`, `[tool.setuptools.packages.find]` `where`,
+`package-dir`, và `from` trong `packages` của poetry. open-webui để mã trong
+`backend/` với `sources = ["backend"]`: thiếu dòng đó thì 11 component của nó ra
+0 cạnh. Đường dẫn khai ra ngoài project hay tuyệt đối thì bỏ.
 
 Trước đây chỉ gốc repo, `src/` và `lib/` được thử. netbox (mã trong `netbox/`,
 chạy từ đó) và langchain (mỗi package một thư mục trong `libs/`) ra 0 cạnh, 0
@@ -584,7 +595,7 @@ Thêm mẫu glob vào `.arch/.archignore` để bỏ qua thêm.
 ## `archctl scan`: archctl đọc được gì
 
 ```
-archctl scan [--root <dir>] [--json] [<file>...]
+archctl scan [--root <dir>] [--json] [--verbatim] [<file>...]
 ```
 
 In từng import archctl đọc được trong file, ở dòng nào, và phân giải ra đâu —
@@ -611,7 +622,23 @@ native/ops.cpp (C/C++)
       2  cung cấp op:mylib.fused cho ngôn ngữ khác
 ```
 
+File compose và Dockerfile cũng được in: mỗi service một khối, lệnh khởi chạy
+dẫn tới file nào, cạnh mạng thấy ở đâu. Giá trị biến môi trường của compose
+không bao giờ được in, chỉ tên máy trong đó. Đối số của lệnh (`command`,
+`RUN`, `ENV`, `ARG`) mặc định cũng không, vì hay chở token: chỉ tên chương
+trình, số đối số, từ khoá và dòng; đường dẫn và URL bỏ phần `user:mật khẩu@`.
+`--verbatim` in đủ, cho lúc bạn tự xem ([infra.md](infra.md)):
+
+```
+triển khai compose:api (docker-compose.yml:2)
+  khởi chạy docker-compose.yml:4 mlapp.serve.api → mlapp/serve/api.py
+  mạng → qdrant  (docker-compose.yml:6 QDRANT_URL → qdrant:6333)
+  mạng → db  (docker-compose.yml:7 DATABASE_URL → db:5432)
+```
+
 Không cần `.arch/`: `--root` là gốc, không thì thư mục gần nhất có
 `.arch/system.arch`, không nữa thì thư mục hiện tại. `--json` là dạng
-[bench/oracle.py](../bench/oracle.py) đọc để đối chiếu với parser chuẩn.
+[bench/oracle.py](../bench/oracle.py) đọc để đối chiếu với parser chuẩn; phần
+triển khai nằm ở khoá `deploy`. Cho thẳng tên file compose hay Dockerfile thì
+nó được đọc kể cả trong thư mục test hay ví dụ.
 

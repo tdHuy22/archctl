@@ -13,6 +13,11 @@ mod notebook;
 mod python;
 mod rustlang;
 mod ts;
+pub mod yaml;
+pub mod dockerfile;
+pub mod command;
+pub mod compose;
+pub mod deploy;
 
 use lexer::{Backtick, CharLit, LexConfig, Tok, Token};
 use std::collections::HashSet;

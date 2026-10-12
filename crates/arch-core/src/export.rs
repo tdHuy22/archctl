@@ -9,7 +9,7 @@
 //! là thấy chỗ mã đi chệch khỏi thiết kế — đúng việc mà con người cần sơ đồ
 //! để làm.
 
-use crate::check::Violation;
+use crate::check::{Reason, Violation};
 use crate::model::{Document, RuleKind, Status, Target};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -51,9 +51,60 @@ pub fn mermaid(doc: &Document, opts: &Options) -> String {
         }
     }
 
+    // Tầng triển khai: chỉ khi vẽ cả sơ đồ. `view` là lát cắt của mã.
+    let deploy = opts.view.is_none() && !doc.services.is_empty();
+    if deploy {
+        out.push_str("  subgraph svc__[\"Triển khai\"]\n");
+        for s in &doc.services {
+            let runs = if s.runs.is_empty() { String::new() } else { format!("<br/>{}", s.runs.join(" · ")) };
+            let _ = writeln!(out, "    {}([\"{}{runs}\"])", svc_id(&s.name), s.name);
+        }
+        out.push_str("  end\n");
+    }
+
     out.push_str(&edges(doc, &scope, opts.violations));
-    out.push_str(&styles(doc, &scope, opts.violations));
+    if deploy {
+        out.push_str(&deploy_edges(doc, &scope, opts.violations));
+    }
+    out.push_str(&styles(doc, &scope, opts.violations, deploy));
     out
+}
+
+/// `link` giữa các service, và vi phạm của tầng hạ tầng.
+fn deploy_edges(doc: &Document, scope: &BTreeSet<String>, violations: &[Violation]) -> String {
+    let mut out = String::new();
+    let mut drawn: BTreeSet<(String, String)> = BTreeSet::new();
+    for l in &doc.links {
+        for to in &l.to {
+            if doc.service(to).is_none() || !drawn.insert((l.from.clone(), to.clone())) {
+                continue;
+            }
+            let arrow = if l.meta.status.is_enforced() { "-->" } else { "-.->" };
+            let _ = writeln!(out, "  {} {arrow}|\"mạng\"| {}", svc_id(&l.from), svc_id(to));
+        }
+    }
+    let mut broken: BTreeMap<(String, String, bool), usize> = BTreeMap::new();
+    for v in violations {
+        match v.reason {
+            Reason::NotLinked => *broken.entry((v.from.clone(), v.to.clone(), true)).or_default() += 1,
+            Reason::NotRun if scope.contains(&v.to) => {
+                *broken.entry((v.from.clone(), v.to.clone(), false)).or_default() += 1
+            }
+            _ => {}
+        }
+    }
+    for ((from, to, network), count) in broken {
+        let what = if network { "vi phạm" } else { "chạy ngoài runs" };
+        let label = if count > 1 { format!("{count} {what}") } else { what.to_string() };
+        let target = if network { svc_id(&to) } else { id(&to) };
+        let _ = writeln!(out, "  {} ==>|\"{label}\"| {target}", svc_id(&from));
+    }
+    out
+}
+
+/// Định danh Mermaid của một service: không trùng component cùng tên.
+fn svc_id(name: &str) -> String {
+    format!("svc_{}", id(name))
 }
 
 /// Bọc trong khối mã markdown để render được trên GitHub và trong mô tả pull
@@ -138,7 +189,7 @@ fn edges(doc: &Document, scope: &BTreeSet<String>, violations: &[Violation]) -> 
     out
 }
 
-fn styles(doc: &Document, scope: &BTreeSet<String>, violations: &[Violation]) -> String {
+fn styles(doc: &Document, scope: &BTreeSet<String>, violations: &[Violation], deploy: bool) -> String {
     let mut out = String::from(
         "\n  classDef draft stroke-dasharray:5 3,opacity:0.55\n\
            \u{20} classDef locked stroke-width:3px\n\
@@ -161,8 +212,18 @@ fn styles(doc: &Document, scope: &BTreeSet<String>, violations: &[Violation]) ->
         }
     }
     for v in violations {
-        if scope.contains(&v.from) {
-            by_class.entry("broken").or_default().push(id(&v.from));
+        match v.reason {
+            Reason::NotLinked | Reason::NotRun if deploy => by_class.entry("broken").or_default().push(svc_id(&v.from)),
+            Reason::NotLinked | Reason::NotRun => {}
+            _ if scope.contains(&v.from) => by_class.entry("broken").or_default().push(id(&v.from)),
+            _ => {}
+        }
+    }
+    for s in doc.services.iter().filter(|_| deploy) {
+        match s.meta.status {
+            Status::Draft | Status::Proposed => by_class.entry("draft").or_default().push(svc_id(&s.name)),
+            Status::Locked => by_class.entry("locked").or_default().push(svc_id(&s.name)),
+            _ => {}
         }
     }
 
@@ -253,6 +314,21 @@ mod tests {
         let d = doc("component web-ui at w/**");
         let out = mermaid(&d, &Options::default());
         assert!(out.contains(r#"web_ui["web-ui"]"#), "nhãn giữ tên gốc: {out}");
+    }
+
+    #[test]
+    fn service_va_link_thanh_tang_trien_khai() {
+        let d = doc(
+            "component Api at api/**\ncomponent Lib at lib/**\n\
+             service Api from compose:api runs Api, Lib\nservice Db from compose:db #draft\nlink Api -> Db",
+        );
+        let out = mermaid(&d, &Options::default());
+        assert!(out.contains("subgraph svc__[\"Triển khai\"]"), "{out}");
+        assert!(out.contains(r#"svc_Api(["Api<br/>Api · Lib"])"#), "service không trùng định danh với component: {out}");
+        assert!(out.contains(r#"svc_Api -->|"mạng"| svc_Db"#), "{out}");
+        assert!(out.contains("class svc_Db draft"), "{out}");
+        let only_code = mermaid(&d, &Options { view: Some("x"), ..Options::default() });
+        assert!(!only_code.contains("svc_"), "view là lát cắt của mã: {only_code}");
     }
 
     #[test]

@@ -664,3 +664,98 @@ fn scan_in_ca_canh_lien_ngon_ngu_cua_tung_file() {
     let human = text(&p.run(&["scan", "app/k.py", "native/ops.cpp"]));
     assert!(human.contains("torch.ops.mylib.fused") && human.contains("qua ranh giới ngôn ngữ"), "{human}");
 }
+
+#[test]
+fn scan_in_dich_vu_tu_compose_khong_in_gia_tri_env() {
+    // Bộ đo đối chiếu phần `deploy` với PyYAML. Giá trị biến môi trường không
+    // bao giờ được in, chỉ tên máy trong đó.
+    let p = Project::new("scan-deploy");
+    std::fs::create_dir_all(p.0.join("app")).unwrap();
+    std::fs::write(p.0.join("app/main.py"), "x = 1\n").unwrap();
+    std::fs::write(p.0.join("Dockerfile"), "FROM python:3.12\nWORKDIR /srv\nCOPY app ./app\nCMD [\"python\", \"-m\", \"app.main\"]\n").unwrap();
+    std::fs::write(
+        p.0.join("docker-compose.yml"),
+        "services:\n  api:\n    build: .\n    environment:\n      DATABASE_URL: postgres://u:hunter2@db:5432/x\n    depends_on: [db]\n  db:\n    image: postgres:16\n",
+    )
+    .unwrap();
+
+    let out = p.run(&["scan", "--json", "docker-compose.yml", "Dockerfile"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""env":[{"key":"DATABASE_URL","line":5}]"#), "{s}");
+    assert!(s.contains(r#""dependsOn":[["db",6]]"#), "{s}");
+    assert!(s.contains(r#"{"line":4,"keyword":"CMD"}"#), "mặc định không in đối số: {s}");
+    assert!(s.contains(r#""entries":["app/main.py"]"#), "lệnh khởi chạy dẫn tới file: {s}");
+    assert!(!s.contains("hunter2"), "{s}");
+    let verbatim = p.run(&["scan", "--json", "--verbatim", "Dockerfile"]);
+    let v = String::from_utf8_lossy(&verbatim.stdout);
+    assert!(v.contains(r#""keyword":"CMD","args":"[\"python\", \"-m\", \"app.main\"]""#), "{v}");
+
+    let human = text(&p.run(&["scan", "docker-compose.yml"]));
+    assert!(human.contains("mạng → db") && !human.contains("hunter2"), "{human}");
+}
+
+#[test]
+fn check_bao_canh_mang_thieu_link_va_strict_tinh_canh_bao_ha_tang() {
+    let p = Project::new("check-deploy");
+    std::fs::write(
+        p.0.join("docker-compose.yml"),
+        "services:\n  api:\n    image: x\n    environment:\n      REDIS_URL: redis://:secret@cache:6379/0\n  cache:\n    image: redis:7\n",
+    )
+    .unwrap();
+    std::fs::write(
+        p.0.join(".arch/system.arch"),
+        format!("{ARCH}\nservice Api from compose:api\nservice Cache from compose:cache\nservice Db from compose:db\nlink Api -> Db\n"),
+    )
+    .unwrap();
+
+    let out = p.run(&["check", "--json"]);
+    assert_eq!(code(&out), 1, "{}", text(&out));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(r#""from":"Api","to":"Cache""#) && s.contains(r#""via":"network""#), "{s}");
+    assert!(s.contains(r#""reason":"not_linked""#) && s.contains(r#""spec":"REDIS_URL → cache:6379""#), "{s}");
+    assert!(s.contains(r#""missing":[{"name":"compose:db""#), "{s}");
+    for key in ["\"deployUnread\":[", "\"entryUnknown\":[", "\"servicesUndeclared\":[", "\"linksUnseen\":["] {
+        assert!(s.contains(key), "thiếu `{key}`: {s}");
+    }
+    assert!(!s.contains("secret"), "{s}");
+
+    let human = text(&p.run(&["check"]));
+    assert!(human.contains("✗ VI PHẠM  Api -> Cache  (cạnh mạng không có link"), "{human}");
+    assert!(human.contains("archctl propose 'link Api -> Cache'") || !human.contains("đã gặp lại"), "{human}");
+}
+
+/// TM-10: `scan` mặc định không in thứ gì có thể là secret. Các chuỗi đánh dấu
+/// là những chỗ từng lọt ra: `ENV` của Dockerfile, argv của lệnh, URL build
+/// context có token, giá trị của khoá trông như tên máy.
+#[test]
+fn scan_mac_dinh_khong_in_secret() {
+    let p = Project::new("scan-secret");
+    std::fs::write(
+        p.0.join("Dockerfile"),
+        "FROM python\nENV OPENAI_API_KEY=sk-danhdau1\nARG TOKEN=danhdau2\nRUN curl -H 'Authorization: Bearer danhdau3' x\n\
+         ADD https://deploy:danhdau8@git.example.com/x.tar.gz /opt/\n\
+         COPY <<EOF /app/settings.py\nSTRIPE_KEY=\"danhdau9\"\nEOF\n\
+         CMD [\"python\", \"app.py\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        p.0.join("docker-compose.yml"),
+        "include:\n  - https://user:danhdauA@example.com/c.yml\nservices:\n  cache:\n    image: redis\n    command: redis-server --requirepass danhdau4\n    environment:\n      SUPABASE_SERVICE_ROLE_KEY: eyJdanhdau5\n      SECURITY_PASSWORD_SALT: danhdau6\n  web:\n    build: https://ghp_danhdau7@github.com/x/y.git\n",
+    )
+    .unwrap();
+    for args in [&["scan", "--json"][..], &["scan"][..], &["scan", "--json", "Dockerfile", "docker-compose.yml"][..]] {
+        let out = text(&p.run(args));
+        for marker in
+            ["danhdau1", "danhdau2", "danhdau3", "danhdau4", "danhdau5", "danhdau6", "danhdau7", "danhdau8", "danhdau9", "danhdauA"]
+        {
+            assert!(!out.contains(marker), "{args:?} lộ `{marker}`:\n{out}");
+        }
+    }
+    // `--verbatim` là lựa chọn có chủ ý, cho bộ đo: đối số được in (kể cả
+    // `ENV` của Dockerfile), nhưng giá trị biến môi trường của compose thì vẫn
+    // không.
+    let out = text(&p.run(&["scan", "--json", "--verbatim", "Dockerfile", "docker-compose.yml"]));
+    assert!(out.contains("danhdau4") && !out.contains("danhdau5") && !out.contains("danhdau6"), "{out}");
+}
+
