@@ -361,6 +361,14 @@ không.
   "Chưa làm" của `docs/ml.md`.
 Việc còn lại ở mốc "Khép yêu cầu ban đầu" trong §1.
 
+**CI trên nhánh thử xanh, đã đưa lên `main` (2026-10-12).** Nhánh
+`thu/ha-tang-dot-1`. Lần 1 (run 38221130465, `2ac0fb8`): 4/5 job, `luật` trượt vì
+clippy 1.99 bắt `needless_borrows_for_generic_args` mà clippy 1.98 trên máy dev
+không bắt; sửa ở `dc61339`. Lần 2 (run 38222284663, `dc61339`): 5/5 — `luật`,
+`rust tối thiểu`, `nền tảng khác`, `repo thật`, `kiến trúc mô hình` (lần đầu
+trên Linux). Test chạy trên Linux x86_64 nên nhánh hằng `O_NOFOLLOW` của Linux
+đã biên dịch. Bạn bảo "CI xanh thì merge vào main rồi push": fast-forward.
+
 **4.1 và 4.3 xong, chưa commit** (2026-10-11). `verify model_arch` chạy thật:
 `examples/ml/requirements-test.txt` ghim torch 2.14.0 (Linux lấy bản `+cpu` từ
 index của PyTorch), pytest và 13 gói kéo theo, 174 hash, chỉ bản ra trước
@@ -459,7 +467,7 @@ hàm, `ctypes` của Python và IPC thì không — xem [docs/check.md](docs/che
 - [x] Chốt năm câu thiết kế tầng service, mạng, triển khai trong DSL
   (bạn chọn theo khuyên hết; trang phương án: https://claude.ai/artifact/VVd2dz5WrcsyoKJBkvetPm).
 - [x] `.agent/threat-model.md` vào git (bạn đồng ý), thêm TM-7.
-- [ ] @ban Push lên nhánh thử rồi chạy CI bằng `workflow_dispatch`
+- [x] @ban Push lên nhánh thử rồi chạy CI bằng `workflow_dispatch`
   (job `kiến trúc mô hình` chưa chạy trên runner Linux lần nào).
 
 ### Tầng hạ tầng, đợt 1
