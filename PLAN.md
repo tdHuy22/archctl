@@ -5,11 +5,13 @@ Mô tả sản phẩm ở [README.md](README.md); file này chỉ ghi trạng th
 
 ## §0 Đang ở đâu, việc tiếp theo
 
-Cập nhật 2026-10-12.
+Cập nhật 2026-10-13.
 
 ### Đã xong, có bằng chứng
 
-- **Cạnh gRPC, việc 6.1** (2026-10-12, chưa commit; bạn chốt "theo khuyên hết").
+- **Cạnh gRPC, việc 6.1** (2026-10-12, commit `da89744`, đã push lên `main`
+  2026-10-13 sau khi CI trên nhánh thử `thu/grpc` xanh 5/5, run 38341136312;
+  bạn chốt "theo khuyên hết").
   `scan/grpc.rs`: bộ đọc `.proto`, dò client/server Python và Go (chỗ gọi và
   chỗ nhắc tới, generic handler, `Invoke`, `X_ServiceDesc`, dot-import), dấu cài
   đặt server; ghép `package.Service`. `check`: cạnh `allow` (via `rpc`), `link`
