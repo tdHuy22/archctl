@@ -470,6 +470,7 @@ fn model_json(root: &Path) -> String {
                     Via::Ffi => "ffi",
                     Via::Network => "network",
                     Via::Entry => "entry",
+                    Via::Rpc => "rpc",
                 }),
                 v.count,
                 json::string(&v.rule),

@@ -220,9 +220,15 @@ Bốn kiểu phá tầng hạ tầng của bộ đo, trên example-voting-app: `
 báo thêm một file triển khai không đọc được. `--deploy-repo example-voting-app`
 thêm bốn kiểu ở dữ kiện compose và Dockerfile của `scan --json` (mất một
 `depends_on`, lệch dòng một biến môi trường, thêm một tên máy giả, sửa một chỉ
-thị Dockerfile), đối chiếu bằng PyYAML nên cần mạng. CI chạy bước này sau bộ
-đo, với `--rust-repo ripgrep --notebook-repo matplotlib --deploy-repo
-example-voting-app`: hai mươi tám kiểu phá.
+thị Dockerfile), đối chiếu bằng PyYAML nên cần mạng.
+
+Kiểu `rpc` xoá cạnh gRPC bắt buộc (`consistency.RPC`: etcd `Client -> Server`,
+`Api -> Server`) khỏi cả luật `init` sinh ra lẫn vi phạm `check` báo.
+`--proto-repo vllm` thêm hai kiểu ở dữ kiện `.proto` của `scan --json` (mất một
+`rpc`, lệch dòng một `service`), đối chiếu bằng `protoc` của grpcio-tools nên
+cần mạng. CI chạy bước này sau bộ đo, với `--rust-repo ripgrep
+--notebook-repo matplotlib --deploy-repo example-voting-app --proto-repo
+vllm`: ba mươi mốt kiểu phá.
 
 Nó có mặt vì bộ đo này từng nằm ngoài git, và lúc đưa vào, đọc lại thì bốn
 phép kiểm không kiểm gì: một cái chỉ xét file có tồn tại vì vế sau của `or`

@@ -35,6 +35,10 @@ Dockerfile mà `scan --json` in ra (mất một `depends_on`, lệch dòng một
 môi trường, thêm một tên máy giả, sửa một chỉ thị Dockerfile), đối chiếu bằng
 PyYAML và dockerfile-parse cài vào venv nên cần mạng; CI bật nó.
 
+`--proto-repo vllm` phá thêm hai kiểu ở dữ kiện `.proto` (mất một `rpc`, lệch
+dòng một `service`), đối chiếu bằng `protoc` của grpcio-tools cài vào venv nên
+cần mạng; CI bật nó. Kiểu `rpc` chạy trên `--rpc-repo` (mặc định etcd): xoá cạnh
+gRPC bắt buộc khỏi cả luật `init` sinh ra lẫn vi phạm `check` báo.
 `--rust-repo ripgrep` phá thêm ba kiểu như vậy ở file Rust, đối chiếu bằng
 `oracle.py --require syn` — tức là tải crate, nên chỉ CI bật. Phần Rust miễn
 trừ import nằm trong thân macro; kiểu `rust-extra` đặt import giả ở ngoài macro
@@ -66,6 +70,8 @@ MODES = {
 
 # kiểu phá chạy trên `--crossing-repo` → phép kiểm phải bắt được nó
 CROSSING_MODES = {"crossing": "thiếu cạnh liên ngôn ngữ"}
+# kiểu phá chạy trên `--rpc-repo`: cạnh gRPC bắt buộc mất ở cả hai phía
+RPC_MODES = {"rpc": "thiếu cạnh gRPC"}
 
 # kiểu phá đầu ra `scan --json` → dòng `oracle.py` phải in ra
 ORACLE_MODES = {
@@ -105,6 +111,26 @@ DEPLOY_ORACLE_MODES = {
     "dep-extra": "thừa:",
     "dep-docker": "thiếu:",
 }
+
+# phá dữ kiện `.proto` trong `scan --json` → dòng `oracle.py` phải in ra
+PROTO_ORACLE_MODES = {
+    "proto-drop": "thiếu:",
+    "proto-line": "lệch dòng:",
+}
+
+
+def sabotage_protos(rep: dict, mode: str):
+    """Mất `rpc` đầu tiên, hay lệch dòng `service` đầu tiên, của **mọi** file
+    `.proto`: file nào `protoc` không dựng được thì oracle bỏ qua, nên phá một
+    file có thể rơi đúng vào chỗ không ai đo."""
+    for f in rep.get("protos", []):
+        for svc in f.get("services", []):
+            if mode == "proto-line":
+                svc["line"] += 1
+                break
+            if svc["rpcs"]:
+                svc["rpcs"].pop(0)
+                break
 
 
 def sabotage_deploy(rep: dict, mode: str):
@@ -169,21 +195,21 @@ def sabotage_scan(rep: dict, mode: str):
             return
 
 
-def crossing_edges() -> set:
+def crossing_edges(table: str = "CROSSINGS") -> set:
     sys.path.insert(0, str(HERE))
     import consistency
-    return {edge for edges in consistency.CROSSINGS.values() for edge in edges}
+    return {edge for edges in getattr(consistency, table).values() for edge in edges}
 
 
-def drop_crossings_from_law(args: list[str]):
-    """Luật `init` sinh ra mất mọi cạnh liên ngôn ngữ bắt buộc."""
+def drop_crossings_from_law(args: list[str], table: str = "CROSSINGS"):
+    """Luật `init` sinh ra mất mọi cạnh bắt buộc của bảng `table`."""
     root = Path(args[args.index("--root") + 1]) if "--root" in args else Path.cwd()
     law = root / ".arch/system.arch"
     if not law.exists():
         return
     keep = [
         line for line in law.read_text().splitlines(keepends=True)
-        if not any(re.match(rf"allow\s+{a}\s*->\s*{b}\b", line) for a, b in crossing_edges())
+        if not any(re.match(rf"allow\s+{a}\s*->\s*{b}\b", line) for a, b in crossing_edges(table))
     ]
     law.write_text("".join(keep))
 
@@ -193,6 +219,8 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
     out = p.stdout
     if mode == "crossing" and args[:1] == ["init"] and p.returncode == 0:
         drop_crossings_from_law(args)
+    if mode == "rpc" and args[:1] == ["init"] and p.returncode == 0:
+        drop_crossings_from_law(args, "RPC")
     if mode == "deploy-gen" and args[:1] == ["init"] and p.returncode == 0:
         root = Path(args[args.index("--root") + 1]) if "--root" in args else Path.cwd()
         law = root / ".arch/system.arch"
@@ -201,11 +229,11 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
                                    if not l.startswith("link ")))
     if args[:1] == ["check"] and "--json" in args and p.stdout.startswith("{"):
         rep = json.loads(out)
-        if mode == "crossing":
-            edges = crossing_edges()
+        if mode in ("crossing", "rpc"):
+            via, edges = ("ffi", crossing_edges()) if mode == "crossing" else ("rpc", crossing_edges("RPC"))
             rep["violations"] = [
                 v for v in rep["violations"]
-                if not (v.get("via") == "ffi" and (v["from"], v["to"]) in edges)
+                if not (v.get("via") == via and (v["from"], v["to"]) in edges)
             ]
         elif mode == "violation":
             rep["violations"].append(
@@ -243,6 +271,10 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
         rep = json.loads(out)
         sabotage_deploy(rep, mode)
         out = json.dumps(rep)
+    elif mode in PROTO_ORACLE_MODES and args[:1] == ["scan"] and "--json" in args:
+        rep = json.loads(out)
+        sabotage_protos(rep, mode)
+        out = json.dumps(rep)
     sys.stdout.write(out)
     sys.stderr.write(p.stderr)
     return p.returncode
@@ -261,8 +293,12 @@ def main():
                     help="phá cả phần notebook của oracle.py trên repo này (cài IPython vào venv)")
     ap.add_argument("--crossing-repo", default="pydantic-core",
                     help="repo có cạnh liên ngôn ngữ bắt buộc, cho kiểu phá `crossing`")
+    ap.add_argument("--rpc-repo", default="etcd",
+                    help="repo có cạnh gRPC bắt buộc, cho kiểu phá `rpc`")
     ap.add_argument("--deploy-bench-repo", default="example-voting-app",
                     help="repo có compose và `runs`, `link` bắt buộc, cho các kiểu phá `deploy-*`")
+    ap.add_argument("--proto-repo",
+                    help="phá cả phần `.proto` của oracle.py trên repo này (cài grpcio-tools vào venv)")
     ap.add_argument("--deploy-repo",
                     help="phá cả phần hạ tầng của oracle.py trên repo này (cài PyYAML vào venv)")
     args = ap.parse_args()
@@ -279,12 +315,17 @@ def main():
         runs = [("bench.py", args.repo, m, e) for m, e in [("", None), *MODES.items()]]
         runs += [("bench.py", args.crossing_repo, m, e)
                  for m, e in [("", None), *CROSSING_MODES.items()]]
+        runs += [("bench.py", args.rpc_repo, m, e)
+                 for m, e in [("", None), *RPC_MODES.items()]]
         runs += [("bench.py", args.deploy_bench_repo, m, e)
                  for m, e in [("", None), *DEPLOY_MODES.items()]]
         runs += [("oracle.py", args.repo, m, e) for m, e in [("", None), *ORACLE_MODES.items()]]
         if args.deploy_repo:
             runs += [("oracle.py", args.deploy_repo, m, e)
                      for m, e in [("", None), *DEPLOY_ORACLE_MODES.items()]]
+        if args.proto_repo:
+            runs += [("oracle.py", args.proto_repo, m, e)
+                     for m, e in [("", None), *PROTO_ORACLE_MODES.items()]]
         if args.rust_repo:
             runs += [("oracle.py", args.rust_repo, m, e)
                      for m, e in [("", None), *RUST_ORACLE_MODES.items()]]
@@ -298,16 +339,23 @@ def main():
             env = {**os.environ, "SABOTAGE": mode,
                    "SABOTAGE_REAL": str(Path(args.archctl).resolve())}
             extra = ["--rounds", "1"] if script == "bench.py" else []
+            need = []
             if mode in RUST_ORACLE_MODES or (script == "oracle.py" and repo == args.rust_repo):
-                extra = ["--require", "syn"]
+                need = ["syn"]
             if mode in NOTEBOOK_ORACLE_MODES or (script == "oracle.py" and repo == args.notebook_repo):
-                extra = ["--require", "ipython"]
+                need = ["ipython"]
             if mode in DEPLOY_ORACLE_MODES or (script == "oracle.py" and repo == args.deploy_repo and not mode):
-                extra = ["--require", "deploy"]
+                need = ["deploy"]
             binding_repos = {r for _, r, _ in BINDING_ORACLE_RUNS}
             if mode in BINDING_ORACLE_MODES or (script == "oracle.py" and not mode and repo in binding_repos
                                                 and repo not in (args.notebook_repo, args.rust_repo, args.repo)):
-                extra = ["--require", "clang"]
+                need = ["clang"]
+            # Phần `.proto` cộng thêm, không thay: repo của nó có thể cũng là
+            # repo của phần Binding.
+            if mode in PROTO_ORACLE_MODES or (script == "oracle.py" and repo == args.proto_repo and not mode):
+                need = [*need, "proto"]
+            if need:
+                extra = ["--require", ",".join(need)]
             p = subprocess.run(
                 [sys.executable, str(HERE / script), "--archctl", str(fake),
                  "--only", repo, *extra],

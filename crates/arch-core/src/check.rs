@@ -13,6 +13,7 @@ use crate::model::*;
 use crate::resolve::{NativeImport, Resolved, Resolver};
 use crate::scan::deploy::{self, Deploy, Key, Svc};
 use crate::scan::foreign::Crossing;
+use crate::scan::grpc;
 use crate::scan::{self, Lang};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -75,6 +76,9 @@ pub enum Via {
     Network,
     /// Lệnh khởi chạy của service: `command`, `CMD`, `ENTRYPOINT`.
     Entry,
+    /// Lời gọi gRPC: chỗ gọi stub ghép với chỗ đăng ký server cùng
+    /// `package.Service`. Hai phía không import nhau.
+    Rpc,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +104,9 @@ pub enum UnresolvedReason {
     Alias,
     /// Đường dẫn trông đúng dạng nhưng không có gì ở đó.
     Missing,
+    /// Lời gọi hay chỗ đăng ký gRPC không ghép được: tên service có ở nhiều
+    /// package `.proto`, hay bước tìm phía bên kia chạm trần.
+    Rpc,
 }
 
 impl UnresolvedReason {
@@ -110,6 +117,7 @@ impl UnresolvedReason {
                 "không tìm thấy header, có thể nằm trong include path của build"
             }
             (UnresolvedReason::Missing, _) => "không tìm thấy file nào ở đường dẫn này",
+            (UnresolvedReason::Rpc, _) => "không ghép được lời gọi gRPC với server",
         }
     }
 }
@@ -263,6 +271,14 @@ pub fn may_touch_deploy(doc: &Document, path: &str) -> bool {
     owners_of(doc, path).is_empty()
 }
 
+/// File `.proto` của repo.
+pub fn proto_files(root: &Path, extra_ignores: &[String]) -> Vec<String> {
+    let mut files = Vec::new();
+    walk(root, "", extra_ignores, &mut files);
+    files.retain(|f| f.ends_with(".proto"));
+    files
+}
+
 /// File cấu hình triển khai của sản phẩm trong repo.
 pub fn deploy_files(root: &Path, extra_ignores: &[String]) -> Vec<String> {
     let mut files = Vec::new();
@@ -315,6 +331,9 @@ fn check_with(root: &Path, doc: &Document, files: &[String], partial: bool, depl
     // Import có thể đang nạp module mở rộng; chọn cái nào được ghép sau khi
     // thấy hết, vì cùng một tên có thể được nạp từ nhiều package.
     let mut natives: Vec<(String, String, usize, NativeImport)> = Vec::new();
+    let mut rpc_calls: Vec<RpcSite> = Vec::new();
+    let mut rpc_serves: Vec<RpcSite> = Vec::new();
+    let mut rpc_impls: Vec<RpcSite> = Vec::new();
     let mut ffi_provides: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
     fn as_refs(v: &[String]) -> Vec<&str> {
@@ -378,6 +397,13 @@ fn check_with(root: &Path, doc: &Document, files: &[String], partial: bool, depl
                 .or_insert_with(|| from.clone());
         }
 
+        if !grpc::generated_stub_path(path) {
+            let site = |s: &grpc::Site| RpcSite { from: from.clone(), file: path.clone(), lang, site: s.clone() };
+            rpc_calls.extend(scan.rpc.calls.iter().map(site));
+            rpc_serves.extend(scan.rpc.serves.iter().map(site));
+            rpc_impls.extend(scan.rpc.implements.iter().map(site));
+        }
+
         for hit in &scan.symbols {
             if let Some(name) = needle_set.get(hit.symbol.as_str()) {
                 sightings.entry(*name).or_default().push(Sighting {
@@ -403,9 +429,10 @@ fn check_with(root: &Path, doc: &Document, files: &[String], partial: bool, depl
     // nghĩa nó ở phía native: nó đã được phân giải.
     report.unresolved.retain(|u| !paired.contains(&(u.file.as_str(), u.line, u.spec.as_str())));
     judge_expectations(&expectations, &sightings, symbol_scanned, &mut report);
+    let rpc_links = judge_grpc(root, doc, files, partial, rpc_calls, rpc_serves, rpc_impls, &mut report);
     if let Some(deploy_files) = deploy {
         report.deploy_checked = true;
-        judge_deploy(root, doc, &resolver, &deploy::load(root, &deploy_files), &mut report);
+        judge_deploy(root, doc, &resolver, &deploy::load(root, &deploy_files), &rpc_links, &mut report);
     }
 
     counts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
@@ -482,6 +509,289 @@ fn judge_ffi<'a>(
         });
     }
     paired
+}
+
+/// Một chỗ gọi stub hay đăng ký server gRPC, kèm component và file của nó.
+#[derive(Debug, Clone)]
+struct RpcSite {
+    from: String,
+    file: String,
+    lang: Lang,
+    site: grpc::Site,
+}
+
+/// Trần byte đọc thêm khi tìm phía bên kia của lời gọi gRPC trong hook (TM-13).
+const MAX_RPC_SEARCH_BYTES: usize = 64 << 20;
+
+/// Cạnh gRPC: ghép chỗ gọi với chỗ đăng ký theo `package.Service`, rồi xét
+/// `allow` giữa component và, khi file luật đã khai `service`, `link` giữa
+/// service. Trả các cặp service có lời gọi gRPC, để `link` của chúng không bị
+/// báo là "không thấy trong cấu hình".
+///
+/// Lời gọi không có server nào trong repo (collector của OpenTelemetry, API
+/// của Google) được coi như import gói ngoài: không vi phạm, không cảnh báo.
+#[allow(clippy::too_many_arguments)]
+fn judge_grpc(
+    root: &Path,
+    doc: &Document,
+    files: &[String],
+    partial: bool,
+    mut calls: Vec<RpcSite>,
+    mut serves: Vec<RpcSite>,
+    impls: Vec<RpcSite>,
+    report: &mut Report,
+) -> std::collections::BTreeSet<(String, String)> {
+    if calls.is_empty() && serves.is_empty() && impls.is_empty() {
+        return std::collections::BTreeSet::new();
+    }
+    let ignores = crate::read_ignores(root);
+    let mut index = grpc::ProtoIndex::default();
+    for p in proto_files(root, &ignores) {
+        match deploy::read_in(root, &p, MAX_FILE_BYTES) {
+            Ok(text) => index.add(&p, &grpc::read_proto(&text)),
+            Err(why) if why.starts_with("quá") => report.oversized.push((p, MAX_FILE_BYTES + 1)),
+            Err(_) => {}
+        }
+    }
+    if index.truncated {
+        report.unresolved.push(Unresolved {
+            file: ".proto".into(),
+            line: 0,
+            spec: format!("quá {} service trong các file .proto; phần sau không ghép", grpc::MAX_INDEX),
+            lang: Lang::Python,
+            reason: UnresolvedReason::Rpc,
+        });
+    }
+    // Mỗi (service, nguồn gốc) tra một lần: một file có thể có hàng chục
+    // nghìn chỗ gọi (TM-13).
+    let mut keys: HashMap<(String, grpc::Origin), grpc::Key> = HashMap::new();
+    let mut key_of = |s: &grpc::Site| keys.entry((s.service.clone(), s.origin.clone())).or_insert_with(|| index.key(s)).clone();
+    // Hàm `NewXClient` không phải gRPC thì không đáng đi tìm phía bên kia.
+    calls.retain(|s| !matches!(key_of(&s.site), grpc::Key::NotRpc));
+    serves.retain(|s| !matches!(key_of(&s.site), grpc::Key::NotRpc));
+    let impls: Vec<RpcSite> = impls.into_iter().filter(|s| !matches!(key_of(&s.site), grpc::Key::NotRpc)).collect();
+    if partial && !(calls.is_empty() && serves.is_empty() && impls.is_empty()) {
+        other_side(root, doc, files, &ignores, &impls, &mut calls, &mut serves, report);
+    }
+
+    let ambiguous = |s: &RpcSite, candidates: Vec<String>, report: &mut Report| {
+        report.unresolved.push(Unresolved {
+            file: s.file.clone(),
+            line: s.site.line,
+            spec: format!("{} (service có ở {})", s.site.shown, candidates.join(", ")),
+            lang: s.lang,
+            reason: UnresolvedReason::Rpc,
+        });
+    };
+    let mut servers: grpc::Servers = grpc::Servers::new();
+    // Khoá chỉ có server trong file test hay mock.
+    let mut fake: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for s in &serves {
+        match key_of(&s.site) {
+            grpc::Key::Found(key) if grpc::fake_server_path(&s.file) => {
+                fake.insert(key);
+            }
+            grpc::Key::Found(key) => {
+                servers.entry(key).or_default().insert(s.from.clone());
+            }
+            grpc::Key::Ambiguous(c) => ambiguous(s, c, report),
+            grpc::Key::NotRpc => {}
+        }
+    }
+    let mut edges: Vec<(&RpcSite, String, String)> = Vec::new();
+    for c in &calls {
+        let key = match key_of(&c.site) {
+            grpc::Key::Found(key) => key,
+            grpc::Key::Ambiguous(cands) => {
+                ambiguous(c, cands, report);
+                continue;
+            }
+            grpc::Key::NotRpc => continue,
+        };
+        let Some(targets) = servers.get(&key) else {
+            // Server chỉ có trong test hay mock: không biết service chạy thật
+            // ở đâu, nên nói ra thay vì coi như gói ngoài.
+            if fake.contains(&key) && !grpc::fake_server_path(&c.file) {
+                report.unresolved.push(Unresolved {
+                    file: c.file.clone(),
+                    line: c.site.line,
+                    spec: format!("{} ({key}: chỉ thấy server trong file test hay mock)", c.site.shown),
+                    lang: c.lang,
+                    reason: UnresolvedReason::Rpc,
+                });
+            }
+            continue;
+        };
+        for to in targets.iter().filter(|t| **t != c.from) {
+            edges.push((c, to.clone(), key.clone()));
+        }
+    }
+    // Có chỗ cài đặt server mà không thấy chỗ đăng ký nào: phía server đang
+    // bị giấu (gán hàm đăng ký qua biến, `getattr`…), và mọi cạnh tới nó sẽ
+    // biến mất. Nói ra thay vì im lặng (TM-12).
+    let mut said: HashSet<String> = HashSet::new();
+    for s in impls.iter().filter(|s| !grpc::fake_server_path(&s.file)) {
+        let grpc::Key::Found(key) = key_of(&s.site) else { continue };
+        if !servers.contains_key(&key) && !fake.contains(&key) && said.insert(key.clone()) {
+            report.unresolved.push(Unresolved {
+                file: s.file.clone(),
+                line: s.site.line,
+                spec: format!("{} ({key}: cài đặt server mà không thấy chỗ đăng ký)", s.site.shown),
+                lang: s.lang,
+                reason: UnresolvedReason::Rpc,
+            });
+        }
+    }
+    for (c, to, key) in &edges {
+        let shown = format!("{} ({})", c.site.shown, key);
+        let Some((reason, rule, status)) = judge(doc, &c.from, to) else { continue };
+        report.violations.push(Violation {
+            from: c.from.clone(),
+            to: to.clone(),
+            file: c.file.clone(),
+            line: c.site.line,
+            spec: shown,
+            via: Via::Rpc,
+            count: 1,
+            reason,
+            rule,
+            status,
+            hint: hint_for(doc, &c.from, to, reason, Via::Rpc),
+        });
+    }
+    judge_rpc_links(doc, &edges, report)
+}
+
+/// Trong hook chỉ có vài file: phía bên kia của lời gọi gRPC nằm ở file khác.
+/// Tìm nhắm một lượt: đọc file Python, Go (trần byte), quét định danh một lượt
+/// mỗi file và tra bảng băm (`add_XServicer_to_server`, `RegisterXServer`,
+/// `X_ServiceDesc`, `XStub`, `NewXClient`), chỉ lex file khớp (TM-13).
+#[allow(clippy::too_many_arguments)]
+fn other_side(
+    root: &Path,
+    doc: &Document,
+    files: &[String],
+    ignores: &[String],
+    impls: &[RpcSite],
+    calls: &mut Vec<RpcSite>,
+    serves: &mut Vec<RpcSite>,
+    report: &mut Report,
+) {
+    // Server của service được gọi, hay được cài đặt ở đây mà đăng ký ở file khác.
+    let want_servers: HashSet<String> = calls.iter().chain(impls).map(|c| c.site.service.clone()).collect();
+    let want_callers: HashSet<String> = serves.iter().map(|s| s.site.service.clone()).collect();
+    let scanned: HashSet<&str> = files.iter().map(String::as_str).collect();
+    let mut budget = MAX_RPC_SEARCH_BYTES;
+    for f in source_files(root, ignores) {
+        let Some(lang) = Lang::for_path(&f).filter(|l| matches!(l, Lang::Python | Lang::Go)) else { continue };
+        if scanned.contains(f.as_str()) {
+            continue;
+        }
+        let Some(from) = owners_of(doc, &f).into_iter().next() else { continue };
+        let Ok(text) = deploy::read_in(root, &f, MAX_FILE_BYTES) else { continue };
+        if text.len() > budget {
+            report.unresolved.push(Unresolved {
+                file: f.clone(),
+                line: 0,
+                spec: format!("tìm phía bên kia của lời gọi gRPC dừng ở trần {} MB", MAX_RPC_SEARCH_BYTES >> 20),
+                lang,
+                reason: UnresolvedReason::Rpc,
+            });
+            return;
+        }
+        budget -= text.len();
+        if grpc::generated_stub_path(&f) || !mentions(&text, &want_servers, &want_callers) {
+            continue;
+        }
+        let found = grpc::scan(&lang.tokens(&scan::source_view(&f, &text)), lang);
+        let site = |s: &grpc::Site| RpcSite { from: from.clone(), file: f.clone(), lang, site: s.clone() };
+        serves.extend(found.serves.iter().filter(|s| want_servers.contains(&s.service)).map(site));
+        calls.extend(found.calls.iter().filter(|s| want_callers.contains(&s.service)).map(site));
+    }
+}
+
+/// Mã chạy trong service `a` có thể gọi mã chạy trong `b`: có `allow` giữa
+/// hai component trong `runs` của chúng. Trong hook chỉ có vài file, nên lời
+/// gọi gRPC biện minh cho `link a -> b` có thể nằm ở file khác; khi đó không
+/// báo `link` là "không thấy". Lần kiểm cả repo thì thấy hết và báo đúng.
+fn may_call(doc: &Document, a: &str, b: &str) -> bool {
+    let runs = |name: &str| doc.services.iter().find(|s| s.name == name).map(|s| s.runs.clone()).unwrap_or_default();
+    let (from, to) = (runs(a), runs(b));
+    from.iter().any(|x| to.iter().any(|y| x != y && matching(doc, RuleKind::Allow, x, y).is_some()))
+}
+
+/// File có nhắc tới phía bên kia không: một lượt qua các định danh, tra bảng
+/// băm, nên tốn theo cỡ file chứ không theo số service cần tìm (TM-13). Dạng
+/// generic (`"/pkg.KV/Get"`, `method_handlers_generic_handler("pkg.KV", …)`)
+/// thì tên service đứng một mình.
+fn mentions(text: &str, servers: &HashSet<String>, callers: &HashSet<String>) -> bool {
+    let generic = ["generic_handler", "unary_", "stream_", "Invoke", "NewStream"].iter().any(|g| text.contains(g));
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).any(|w| {
+        let cut = |p: &str, s: &str| w.strip_prefix(p).and_then(|r| r.strip_suffix(s));
+        [cut("add_", "Servicer_to_server"), cut("Register", "Server"), cut("", "_ServiceDesc")]
+            .into_iter()
+            .flatten()
+            .any(|x| servers.contains(x))
+            || [cut("", "Stub"), cut("New", "Client")].into_iter().flatten().any(|x| callers.contains(x))
+            || (generic && (servers.contains(w) || callers.contains(w)))
+    })
+}
+
+/// Lời gọi gRPC giữa hai component chạy ở hai service khác nhau cần `link`.
+/// Với mỗi service chạy phía client, phải có một service chạy phía server là
+/// chính nó, hoặc có `link` tới. Không service nào chạy phía server thì không
+/// biết lời gọi đi đâu, và không đòi gì.
+fn judge_rpc_links(
+    doc: &Document,
+    edges: &[(&RpcSite, String, String)],
+    report: &mut Report,
+) -> std::collections::BTreeSet<(String, String)> {
+    let mut used = std::collections::BTreeSet::new();
+    if doc.services.is_empty() {
+        return used;
+    }
+    let running = |c: &str| -> Vec<&Service> {
+        doc.services.iter().filter(|s| s.meta.status.is_enforced() && s.runs.iter().any(|r| r == c)).collect()
+    };
+    let linked = |a: &str, b: &str| doc.links.iter().any(|l| l.meta.status.is_enforced() && l.from == a && l.to.iter().any(|t| t == b));
+    let mut reported: HashSet<(String, String, usize)> = HashSet::new();
+    for (c, to, key) in edges {
+        let targets = running(to);
+        if targets.is_empty() {
+            continue;
+        }
+        for s in running(&c.from) {
+            if targets.iter().any(|t| t.name == s.name) {
+                continue;
+            }
+            let mut ok = false;
+            for t in targets.iter().filter(|t| linked(&s.name, &t.name)) {
+                used.insert((s.name.clone(), t.name.clone()));
+                ok = true;
+            }
+            if ok {
+                continue;
+            }
+            let t = targets[0];
+            if !reported.insert((s.name.clone(), c.file.clone(), c.site.line)) {
+                continue;
+            }
+            report.violations.push(Violation {
+                from: s.name.clone(),
+                to: t.name.clone(),
+                file: c.file.clone(),
+                line: c.site.line,
+                spec: format!("{} ({key}, {} chạy trong {})", c.site.shown, to, t.name),
+                via: Via::Rpc,
+                count: 1,
+                reason: Reason::NotLinked,
+                rule: format!("không có link nào cho {} -> {}", s.name, t.name),
+                status: Status::Accepted,
+                hint: hint_for(doc, &s.name, &t.name, Reason::NotLinked, Via::Rpc),
+            });
+        }
+    }
+    used
 }
 
 /// Một lần gặp một cái tên trong mã.
@@ -813,7 +1123,7 @@ fn hint_for(doc: &Document, from: &str, to: &str, reason: Reason, via: Via) -> S
     {
         return match via {
             Via::Import => format!("gọi {only} thay vì truy cập thẳng {to}"),
-            Via::Symbol | Via::Table | Via::Ffi | Via::Network | Via::Entry => format!("chỉ {only} được dùng {to}"),
+            Via::Symbol | Via::Table | Via::Ffi | Via::Network | Via::Entry | Via::Rpc => format!("chỉ {only} được dùng {to}"),
         };
     }
     if reason == Reason::NotOwner
@@ -994,7 +1304,14 @@ pub fn to_undeclared(v: &Violation) -> bool {
     v.reason == Reason::NotLinked && v.rule.starts_with(UNDECLARED)
 }
 
-fn judge_deploy(root: &Path, doc: &Document, resolver: &Resolver, dep: &Deploy, report: &mut Report) {
+fn judge_deploy(
+    root: &Path,
+    doc: &Document,
+    resolver: &Resolver,
+    dep: &Deploy,
+    rpc_links: &std::collections::BTreeSet<(String, String)>,
+    report: &mut Report,
+) {
     let mut svcs: Vec<Svc> = dep.services.clone();
     report.deploy_unread.extend(dep.unread.iter().cloned());
     for s in &doc.services {
@@ -1050,7 +1367,8 @@ fn judge_deploy(root: &Path, doc: &Document, resolver: &Resolver, dep: &Deploy, 
     // Service compose → `service` của file luật, để gọi tên đích của cạnh mạng.
     let declared = |key: &Key| doc.services.iter().find(|s| s.source.as_ref().is_some_and(|src| matches_source(src, key)));
 
-    let mut seen: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
+    // Cặp service có lời gọi gRPC cũng là `link` được thấy.
+    let mut seen: std::collections::BTreeSet<(String, String)> = rpc_links.clone();
     // Import của từng file điểm vào, đọc một lần dù hàng nghìn service cùng
     // chạy nó (TM-8).
     let mut targets: HashMap<String, Targets> = HashMap::new();
@@ -1173,7 +1491,7 @@ fn judge_deploy(root: &Path, doc: &Document, resolver: &Resolver, dep: &Deploy, 
             continue;
         }
         for t in &l.to {
-            if has_config(t) && !seen.contains(&(l.from.clone(), t.clone())) {
+            if has_config(t) && !seen.contains(&(l.from.clone(), t.clone())) && !(report.partial && may_call(doc, &l.from, t)) {
                 report.links_unseen.push((l.from.clone(), t.clone(), l.meta.line));
             }
         }

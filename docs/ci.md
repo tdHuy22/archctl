@@ -119,11 +119,13 @@ dockerfile-parse cho compose và Dockerfile. Bốn cái đầu có sẵn trên i
 mở lại mạng cho cargo (`CARGO_NET_OFFLINE: "false"`); archctl đã dựng xong ở
 bước trước khi còn offline, và crate tải về chỉ vào trình đọc của bộ đo, ghim
 cứng bằng `=`. IPython, PyYAML và dockerfile-parse cài bằng pip vào venv riêng,
-mọi gói ghim `==` kèm sha256. `--require clang,node,go,syn,ipython,deploy` để
-ngày thiếu một cái thì bước này đỏ chứ không lặng lẽ bỏ qua. Mười sáu trong hai
-mươi tám kiểu phá của `sabotage.py` nhắm vào bước này: ba ở import Python, ba ở
-import Rust, hai ở notebook, bốn ở cạnh Python ↔ native, bốn ở compose và
-Dockerfile. Bốn kiểu khác nhắm vào phần hạ tầng của chính bộ đo. Phần Rust cũng cần `syn`, nên bước
+mọi gói ghim `==` kèm sha256; grpcio-tools (`protoc`) cũng vậy. `--require
+clang,node,go,syn,ipython,deploy,proto` để ngày thiếu một cái thì bước này đỏ
+chứ không lặng lẽ bỏ qua. Mười tám trong ba mươi mốt kiểu phá của
+`sabotage.py` nhắm vào bước này: ba ở import Python, ba ở import Rust, hai ở
+notebook, bốn ở cạnh Python ↔ native, bốn ở compose và Dockerfile, hai ở
+`.proto`. Bốn kiểu khác nhắm vào phần hạ tầng của chính bộ đo, một kiểu vào
+cạnh gRPC bắt buộc. Phần Rust cũng cần `syn`, nên bước
 sabotage mở mạng giống bước đối chiếu.
 
 ## Kiến trúc mô hình chạy thật

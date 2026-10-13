@@ -778,6 +778,54 @@ def deploy_truth(python, root, files):
     return out
 
 
+PROTO_REQUIREMENTS = HERE / "proto-requirements.txt"
+
+
+def proto_version():
+    m = re.search(r"^grpcio-tools==(\S+)", PROTO_REQUIREMENTS.read_text(), re.M)
+    return f"protoc (grpcio-tools {m.group(1)})" if m else "?"
+
+
+def proto_files(root):
+    """File `.proto` mà git theo dõi và có trên đĩa (repo tải sparse)."""
+    p = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--", "*.proto"], capture_output=True, text=True)
+    return sorted(f for f in p.stdout.split("\0") if f and (root / f).is_file() and not (root / f).is_symlink())
+
+
+def archctl_protos(archctl, root, files):
+    """`{file: Counter (dòng, dữ kiện)}` theo `archctl scan`, hay chuỗi lỗi."""
+    p = subprocess.run([archctl, "scan", "--json", "--root", str(root), *files],
+                       capture_output=True, text=True, timeout=600)
+    if p.returncode != 0:
+        bench.die(f"archctl scan hỏng ở {root.name}: {p.stderr.strip()[-300:]}")
+    out = {}
+    for f in json.loads(p.stdout)["protos"]:
+        if "error" in f:
+            out[f["file"]] = f"ERR {f['error']}"
+            continue
+        facts = [(0, f"package {f['package']}")]
+        for s in f["services"]:
+            facts.append((s["line"], f"service {s['name']}"))
+            facts += [(line, f"rpc {s['name']}.{name}") for name, line in s["rpcs"]]
+        out[f["file"]] = collections.Counter(facts)
+    return out
+
+
+def proto_truth(python, root, files):
+    """`{file: Counter (dòng, dữ kiện)}` theo `protoc`; chuỗi `SKIP …` khi
+    `protoc` không dựng được descriptor."""
+    p = subprocess.run([python, "-I", str(HERE / "proto_truth.py")],
+                       input="".join(f"{root}\t{f}\n" for f in files),
+                       capture_output=True, text=True, timeout=1800)
+    if p.returncode != 0:
+        bench.die(f"thước đo .proto hỏng: {p.stderr.strip()[-400:]}")
+    out = {}
+    for line in p.stdout.splitlines():
+        file, res = line.split("\t", 1)
+        out[file] = res if res.startswith("SKIP") else collections.Counter((l, s) for l, s in json.loads(res)["facts"])
+    return out
+
+
 def notebook_truth(python, root, files):
     """`{file: (Counter (dòng, spec), exact)}`, hoặc None nếu file không đọc được."""
     p = subprocess.run([python, str(HERE / "notebook_truth.py")],
@@ -839,7 +887,7 @@ class Tally:
             self.examples.append(msg)
 
     def line(self, repo):
-        unit = {"Binding": "đầu cạnh", "Hạ tầng": "dữ kiện"}.get(self.label, "import")
+        unit = {"Binding": "đầu cạnh", "Hạ tầng": "dữ kiện", "Proto": "dữ kiện"}.get(self.label, "import")
         head = f"  {repo:22} {self.label:8} {self.files:5} file, {self.imports:6} {unit}"
         tail = f", {self.unparsed} không parse được" if self.unparsed else ""
         if self.in_macro:
@@ -875,7 +923,7 @@ def main():
     ap.add_argument("--archctl", default=str(ROOT / "target/release/archctl"))
     ap.add_argument("--only", help="tên repo, cách nhau bằng dấu phẩy")
     ap.add_argument("--require", default="",
-                    help="công cụ bắt buộc phải có: clang, node, go, syn (tải crate), ipython, deploy (tải gói)")
+                    help="công cụ bắt buộc phải có: clang, node, go, syn (tải crate), ipython, deploy, proto (tải gói)")
     ap.add_argument("--cache", default=str(ROOT / "target/bench"))
     args = ap.parse_args()
 
@@ -893,7 +941,7 @@ def main():
     have_go = shutil.which("go") is not None
     strip_ts = have_node and node_can_strip_types()
     required = args.require.split(",")
-    unknown = set(filter(None, required)) - {"clang", "node", "go", "syn", "ipython", "deploy"}
+    unknown = set(filter(None, required)) - {"clang", "node", "go", "syn", "ipython", "deploy", "proto"}
     if unknown:
         bench.die(f"`--require` không biết: {', '.join(sorted(unknown))}")
     for tool, ok in [("clang", have_clang), ("node", have_node), ("go", have_go)]:
@@ -911,8 +959,10 @@ def main():
     ipy_v = ipython_version() if use_ipython else "BỎ QUA: cần tải gói, bật bằng --require ipython"
     use_deploy = "deploy" in required
     dep_v = deploy_version() if use_deploy else "BỎ QUA: cần tải gói, bật bằng --require deploy"
+    use_proto = "proto" in required
+    proto_v = proto_version() if use_proto else "BỎ QUA: cần tải gói, bật bằng --require proto"
     print(f"python {sys.version.split()[0]} · clang: {clang_v} · node: {node_v} · go: {go_v} · syn: {syn_v}"
-          f" · ipython: {ipy_v} · hạ tầng: {dep_v}"
+          f" · ipython: {ipy_v} · hạ tầng: {dep_v} · proto: {proto_v}"
           + ("" if strip_ts or not have_node else " (không gỡ được kiểu TS: BỎ QUA .ts)"))
 
     missing_repos = [r for r in repos if not (Path(args.cache) / "repos" / r).is_dir()]
@@ -924,6 +974,7 @@ def main():
     syn_helper = build_syn_helper(args.cache) if use_syn else None
     nb_python = build_ipython_helper(args.cache) if use_ipython else None
     dep_python = build_venv(args.cache, "deploy-oracle", DEPLOY_REQUIREMENTS, "hạ tầng") if use_deploy else None
+    proto_python = build_venv(args.cache, "proto-oracle", PROTO_REQUIREMENTS, ".proto") if use_proto else None
 
     bad = 0
     for repo in repos:
@@ -1060,6 +1111,26 @@ def main():
             if skipped:
                 dep.skipped = f"{skipped} Dockerfile có heredoc BỎ QUA"
             tallies.append(dep)
+
+        protos = proto_files(root) if proto_python else []
+        if protos:
+            pt = Tally("Proto")
+            have_all = archctl_protos(archctl, root, protos)
+            skipped = 0
+            for file, want in proto_truth(proto_python, root, protos).items():
+                if isinstance(want, str):
+                    skipped += 1
+                    continue
+                have = have_all.get(file, "ERR archctl không in file này")
+                if isinstance(have, str):
+                    pt.files += 1
+                    pt.note(f"{file}: archctl không đọc được mà protoc đọc được — {have[4:120]}")
+                    continue
+                pt.imports += sum(want.values())
+                check_lines(pt, file, want, have)
+            if skipped:
+                pt.skipped = f"{skipped} file protoc không dựng được (import ngoài repo) BỎ QUA"
+            tallies.append(pt)
         for t in tallies:
             sane(t, repo)
             if t.files or t.unparsed or t.skipped:

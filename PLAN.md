@@ -9,6 +9,21 @@ Cập nhật 2026-10-12.
 
 ### Đã xong, có bằng chứng
 
+- **Cạnh gRPC, việc 6.1** (2026-10-12, chưa commit; bạn chốt "theo khuyên hết").
+  `scan/grpc.rs`: bộ đọc `.proto`, dò client/server Python và Go (chỗ gọi và
+  chỗ nhắc tới, generic handler, `Invoke`, `X_ServiceDesc`, dot-import), dấu cài
+  đặt server; ghép `package.Service`. `check`: cạnh `allow` (via `rpc`), `link`
+  khi đã khai service, hook tìm phía bên kia; `init` sinh `allow`/`link`; `scan`
+  in chỗ gọi, đăng ký, cài đặt và `.proto`. Bộ đo: etcd `Client -> Server`,
+  `Api -> Server` (`consistency.RPC`); oracle `.proto` bằng `protoc`
+  (grpcio-tools ghim hash): vllm 54 dữ kiện, etcd, google-cloud, otel khớp;
+  sabotage `rpc`, `proto-drop`, `proto-line`. Threat model TM-13..17 đã có.
+  Review: reviewer opus 6 mục, agent đối kháng 13 mục (72 thư mục tấn công),
+  đã sửa hết; DoS hook 140 s → 0,56 s, cả repo 311 s → 0,39 s. Biên nhận trên mã
+  cuối: `cargo test` (548), clippy, `cargo +1.88 check`, bộ đo 29 repo 0 bất
+  nhất 1015/1015, oracle `--require …,deploy,proto` khớp hết, sabotage 43/43,
+  `verify` 3/3, `check --strict` 0.
+
 - **Tầng hạ tầng, đợt 1** (2026-10-12, commit "Tầng hạ tầng đợt 1…"; bạn chốt "theo khuyên hết").
   DSL `service <Tên> [from compose:…|dockerfile:…] [runs …]` và `link A -> B`
   (không gian tên riêng); bộ đọc YAML tập con (khớp PyYAML 793/804 file YAML của
@@ -490,5 +505,13 @@ hàm, `ctypes` của Python và IPC thì không — xem [docs/check.md](docs/che
 
 ### Tầng hạ tầng, đợt 2
 
-- [ ] Cạnh gRPC: đọc `.proto` (service, rpc) và stub sinh ra, ghép client với server.
+- [x] Cạnh gRPC: đọc `.proto` (service, rpc) và stub sinh ra, ghép client với server.
+  Bạn chốt "theo khuyên hết" (2026-10-12, trang https://claude.ai/artifact/DBcz8fdtBZ8DLbwdHjYmUU):
+  cạnh component cần `allow`, đã khai `service` thì cần thêm `link`; ghép theo
+  `package.Service`, lùi về tên khi duy nhất; server ngoài repo như gói ngoài;
+  Python và Go. reuse-best: không có bộ trích dùng lại được, oracle `.proto` là
+  `grpcio-tools`. Threat model TM-13 tới TM-17.
+- [x] Bộ đọc `.proto` và bộ dò client/server Python, Go; ghép, `allow`, `link`; hook tìm phía server.
+- [x] `init --from-code`, `scan`, `export`/`serve` có cạnh gRPC; tài liệu.
+- [x] Bộ đo: etcd cạnh bắt buộc qua `etcdserverpb.KV`; oracle `.proto` bằng `grpcio-tools`; sabotage.
 - [ ] Manifest Kubernetes (Deployment, Service) vào `service`/`link`; không render Helm.

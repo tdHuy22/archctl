@@ -14,6 +14,7 @@ mod python;
 mod rustlang;
 mod ts;
 pub mod yaml;
+pub mod grpc;
 pub mod dockerfile;
 pub mod command;
 pub mod compose;
@@ -155,6 +156,7 @@ impl Lang {
             symbols: find_symbols(&toks, needles, self),
             tables: find_tables(&toks, tables),
             foreign: foreign::scan(&toks, self),
+            rpc: grpc::scan(&toks, self),
         }
     }
 }
@@ -180,6 +182,8 @@ pub struct FileScan {
     pub tables: Vec<SymbolHit>,
     /// Hàm đi qua ranh giới ngôn ngữ — thứ mà câu lệnh import không nói gì.
     pub foreign: foreign::Foreign,
+    /// Chỗ gọi stub và chỗ đăng ký server gRPC.
+    pub rpc: grpc::Rpc,
 }
 
 /// Tìm tên bảng, **chỉ trong chuỗi**.

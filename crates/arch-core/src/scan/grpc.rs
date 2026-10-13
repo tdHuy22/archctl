@@ -1,0 +1,848 @@
+//! Cạnh gRPC: lời gọi giữa hai phần mã không import nhau.
+//!
+//! ```text
+//! // client                              // server
+//! stub = rpc_pb2_grpc.KVStub(channel)    rpc_pb2_grpc.add_KVServicer_to_server(impl, s)
+//! kv := pb.NewKVClient(conn)             pb.RegisterKVServer(s, impl)
+//! ```
+//!
+//! Hai phía chỉ cùng import mã sinh ra từ một file `.proto`, nên đồ thị import
+//! không thấy lời gọi. Ở đây dò chỗ gọi stub và chỗ đăng ký server theo token,
+//! rồi [`ProtoIndex`] ghép chúng theo tên đầy đủ `package.Service` đọc từ
+//! `.proto`: lần từ module sinh ra (`rpc_pb2_grpc` từ `rpc.proto`, import path
+//! của Go là `option go_package`) về file `.proto`; không lần được thì theo tên
+//! service, khi tên đó là duy nhất.
+//!
+//! Chỉ tính chỗ **gọi** stub và chỗ **đăng ký** server, không tính định nghĩa
+//! trong mã sinh ra, lớp `XServicer` chỉ được kế thừa, gateway
+//! (`RegisterXHandlerServer`), health và reflection.
+//!
+//! Không nhận ra (ghi trong `docs/infra.md`): stub gán vào biến rồi gọi qua
+//! biến, `getattr`, reflection, client dựng động.
+
+use super::Lang;
+use super::lexer::{self, CharLit, LexConfig, Tok, Token};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+/// Trần cho một file `.proto` (TM-13). File thật có vài chục service.
+pub const MAX_SERVICES: usize = 1000;
+pub const MAX_RPCS: usize = 20_000;
+
+/// Những gì cần từ một file `.proto`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Proto {
+    pub package: String,
+    /// `option go_package = "path;name"`, chỉ phần đường dẫn.
+    pub go_package: Option<String>,
+    /// Tên package Go: phần `name` của `go_package`, không có thì đoạn cuối
+    /// của đường dẫn.
+    pub go_name: Option<String>,
+    pub services: Vec<Service>,
+    /// Quá trần thì phần sau không đọc.
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Service {
+    pub name: String,
+    pub line: usize,
+    /// Tên các `rpc`, kèm dòng.
+    pub rpcs: Vec<(String, usize)>,
+}
+
+fn proto_config() -> LexConfig {
+    LexConfig { char_literals: CharLit::AsString, path_separator: Some("."), ..LexConfig::base() }
+}
+
+/// Đọc `package`, `option go_package`, `service` và `rpc` ở cấp ngoài cùng.
+/// Một lượt qua dòng token, đếm ngoặc, không đệ quy (TM-13).
+pub fn read_proto(src: &str) -> Proto {
+    let toks = lexer::lex(crate::strip_bom(src), &proto_config());
+    let mut out = Proto::default();
+    let word = |i: usize| match toks.get(i).map(|t| &t.tok) {
+        Some(Tok::Word(w)) => Some(w.as_str()),
+        _ => None,
+    };
+    let punct = |i: usize, c: char| matches!(toks.get(i).map(|t| &t.tok), Some(Tok::Punct(p)) if *p == c);
+    let mut depth = 0usize;
+    // Service đang đọc và độ sâu của ngoặc mở nó.
+    let mut open: Option<usize> = None;
+    let mut rpcs = 0usize;
+    let mut i = 0;
+    while i < toks.len() {
+        match &toks[i].tok {
+            Tok::Punct('{') => depth += 1,
+            Tok::Punct('}') => {
+                depth = depth.saturating_sub(1);
+                if open.is_some_and(|d| depth < d) {
+                    open = None;
+                }
+            }
+            Tok::Word(w) if depth == 0 && w == "package" => {
+                if let Some(name) = word(i + 1) {
+                    out.package = name.to_string();
+                }
+            }
+            Tok::Word(w) if depth == 0 && w == "option" && word(i + 1) == Some("go_package") && punct(i + 2, '=') => {
+                if let Some(Tok::Str(v)) = toks.get(i + 3).map(|t| &t.tok) {
+                    let (path, name) = v.split_once(';').unwrap_or((v, ""));
+                    out.go_package = Some(path.to_string());
+                    let name = if name.is_empty() { path.rsplit('/').next().unwrap_or(path) } else { name };
+                    out.go_name = Some(name.to_string());
+                }
+            }
+            Tok::Word(w) if depth == 0 && w == "service" && punct(i + 2, '{') => {
+                if let Some(name) = word(i + 1) {
+                    if out.services.len() >= MAX_SERVICES {
+                        out.truncated = true;
+                        break;
+                    }
+                    out.services.push(Service { name: name.to_string(), line: toks[i].line, rpcs: Vec::new() });
+                    open = Some(depth + 1);
+                }
+            }
+            Tok::Word(w) if w == "rpc" && open == Some(depth) && punct(i + 2, '(') => {
+                if let (Some(name), Some(s)) = (word(i + 1), out.services.last_mut()) {
+                    if rpcs >= MAX_RPCS {
+                        out.truncated = true;
+                        break;
+                    }
+                    rpcs += 1;
+                    s.rpcs.push((name.to_string(), toks[i].line));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Thứ cho biết service thuộc file `.proto` nào.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Origin {
+    /// Không biết module (`self.pb.KVStub`, `KVStub` re-export qua
+    /// `__init__.py`): chỉ tin khi một `.proto` trong repo khai service này.
+    Unknown,
+    /// Chỗ đăng ký Python không rõ module: `add_KVServicer_to_server` đủ đặc
+    /// trưng để là gRPC, ghép theo tên.
+    Loose,
+    /// Python: đường dẫn module sinh ra, bỏ `_pb2_grpc`: `shop.v1.kv`,
+    /// `..gen.kv`, `kv`. Đoạn cuối là tên file `.proto`.
+    Stem(String),
+    /// Go: import path của package sinh ra, khớp `option go_package`.
+    GoPackage(String),
+    /// Go: tên đứng trước `.NewXClient` không phải alias import nào trong
+    /// file (package có tên khác đoạn cuối đường dẫn, như `orderv1` của
+    /// `…/order/v1;orderv1`), hay package của chính file khi gọi không tiền
+    /// tố: khớp tên package trong `go_package`.
+    GoName(String),
+    /// Tên đầy đủ viết thẳng trong chuỗi: `"/shop.v1.KV/Get"` của client
+    /// generic, `"shop.v1.KV"` của `method_handlers_generic_handler`. Giữ
+    /// package.
+    Package(String),
+}
+
+/// Một chỗ gọi stub hay đăng ký server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Site {
+    pub service: String,
+    pub origin: Origin,
+    pub line: usize,
+    /// Như mã viết, để báo cáo.
+    pub shown: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Rpc {
+    /// Chỗ dùng stub: phía client. Tính cả chỗ nhắc tới mà không gọi
+    /// (`S = kv_pb2_grpc.KVStub`), vì gọi qua biến thì không thấy.
+    pub calls: Vec<Site>,
+    /// Chỗ đăng ký server: `add_KVServicer_to_server`, `RegisterKVServer`,
+    /// `KV_ServiceDesc`, `method_handlers_generic_handler("pkg.KV", …)`. Tính
+    /// cả chỗ nhắc tới mà không gọi (`reg = g.add_KVServicer_to_server`).
+    pub serves: Vec<Site>,
+    /// Chỗ cài đặt server: lớp kế thừa `KVServicer`, struct nhúng
+    /// `UnimplementedKVServer`. Có cài đặt mà không thấy chỗ đăng ký nào thì
+    /// phía server đang bị giấu, và `check` nói ra (TM-12).
+    pub implements: Vec<Site>,
+}
+
+impl Rpc {
+    pub fn is_empty(&self) -> bool {
+        self.calls.is_empty() && self.serves.is_empty() && self.implements.is_empty()
+    }
+}
+
+/// Service hạ tầng của chính gRPC, không phải service của sản phẩm.
+fn infrastructure(module: &str, service: &str) -> bool {
+    let last = module.rsplit(['.', '/']).next().unwrap_or(module);
+    matches!(last, "health" | "reflection" | "channelz")
+        || matches!(service, "ServerReflection" | "Channelz")
+        || module.contains("grpc_health")
+        || module.contains("grpc_reflection")
+        || module.contains("grpc.health")
+        || module.contains("grpc.reflection")
+}
+
+/// File stub sinh ra: chứa định nghĩa của chính `KVStub`, `add_KVServicer_to_server`
+/// và chuỗi `"/pkg.KV/Get"`, không phải chỗ dùng.
+pub fn generated_stub_path(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.ends_with("_pb2_grpc.py") || name.ends_with("_grpc.pb.go")
+}
+
+pub fn scan(toks: &[Token], lang: Lang) -> Rpc {
+    match lang {
+        Lang::Python => python(toks),
+        Lang::Go => go(toks),
+        _ => Rpc::default(),
+    }
+}
+
+/// `rpc_pb2_grpc` → `rpc`.
+fn generated_stem(module: &str) -> Option<&str> {
+    module.rsplit('.').next()?.strip_suffix("_pb2_grpc").filter(|s| !s.is_empty())
+}
+
+/// `a.b.rpc_pb2_grpc` → `a.b.rpc`.
+fn generated_module(module: &str) -> Option<String> {
+    generated_stem(module)?;
+    module.strip_suffix("_pb2_grpc").map(str::to_string)
+}
+
+/// `"shop.v1.KV"` hay `"/shop.v1.KV/Get"` → (package, service).
+fn full_name(s: &str) -> Option<(String, String)> {
+    let s = s.strip_prefix('/').map_or(s, |r| r.split('/').next().unwrap_or(r));
+    let (pkg, service) = s.rsplit_once('.')?;
+    let ident = |x: &str| !x.is_empty() && x.split('.').all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_alphanumeric() || c == '_'));
+    (ident(pkg) && ident(service) && service.chars().next().is_some_and(char::is_uppercase))
+        .then(|| (pkg.to_string(), service.to_string()))
+}
+
+fn python(toks: &[Token]) -> Rpc {
+    let word = |i: usize| match toks.get(i).map(|t| &t.tok) {
+        Some(Tok::Word(w)) => Some(w.as_str()),
+        _ => None,
+    };
+    let string = |i: usize| match toks.get(i).map(|t| &t.tok) {
+        Some(Tok::Str(s)) => Some(s.as_str()),
+        _ => None,
+    };
+    let punct = |i: usize, c: char| matches!(toks.get(i).map(|t| &t.tok), Some(Tok::Punct(p)) if *p == c);
+    // Tên trong file → module sinh ra: `import a.rpc_pb2_grpc as g`, `from a
+    // import rpc_pb2_grpc`. Và tên trong file → (module, tên gốc): `from
+    // a.rpc_pb2_grpc import KVStub as S`.
+    let mut modules: HashMap<String, String> = HashMap::new();
+    let mut names: HashMap<String, (String, String)> = HashMap::new();
+    // `from a.rpc_pb2_grpc import *`: tên trần `KVStub` có thể đến từ đây.
+    let mut star: Vec<String> = Vec::new();
+    // Token nằm trong câu import: tên ở đó là khai báo, không phải chỗ dùng.
+    let mut in_import = vec![false; toks.len()];
+    // Bỏ `\` nối dòng nếu lexer để lại nó.
+    let skip = |mut j: usize| {
+        while punct(j, '\\') {
+            j += 1;
+        }
+        j
+    };
+    let mut i = 0;
+    while i < toks.len() {
+        let at_stmt = i == 0 || toks[i - 1].line != toks[i].line || punct(i - 1, ';');
+        let begin = i;
+        match word(i) {
+            Some("import") if at_stmt => {
+                // import a.b as c, d
+                let mut j = skip(i + 1);
+                while let Some(m) = word(j) {
+                    let (alias, next) = if word(skip(j + 1)) == Some("as") {
+                        (word(skip(skip(j + 1) + 1)).unwrap_or(m), skip(skip(j + 1) + 1) + 1)
+                    } else {
+                        (m, j + 1)
+                    };
+                    if generated_stem(m).is_some() {
+                        modules.insert(alias.to_string(), m.to_string());
+                    }
+                    j = skip(next);
+                    if !punct(j, ',') {
+                        break;
+                    }
+                    j = skip(j + 1);
+                }
+                in_import[begin..j.min(toks.len())].iter_mut().for_each(|x| *x = true);
+                i = j;
+                continue;
+            }
+            Some("from") if at_stmt => {
+                // `from a.b`, `from .a`, `from ..a.b`, `from .`: dấu chấm đứng
+                // đầu là import tương đối, lexer tách chúng thành dấu câu.
+                let mut j = i + 1;
+                let mut base = String::new();
+                while punct(j, '.') {
+                    base.push('.');
+                    j += 1;
+                }
+                if let Some(w) = word(j).filter(|w| *w != "import") {
+                    base.push_str(w);
+                    j += 1;
+                }
+                j = skip(j);
+                if base.is_empty() || word(j) != Some("import") {
+                    i += 1;
+                    continue;
+                }
+                j = skip(j + 1);
+                if punct(j, '*') {
+                    if generated_stem(&base).is_some() {
+                        star.push(base);
+                    }
+                    in_import[begin..=j].iter_mut().for_each(|x| *x = true);
+                    i = j + 1;
+                    continue;
+                }
+                let paren = punct(j, '(');
+                if paren {
+                    j = skip(j + 1);
+                }
+                while let Some(n) = word(j) {
+                    let (alias, next) = if word(skip(j + 1)) == Some("as") {
+                        (word(skip(skip(j + 1) + 1)).unwrap_or(n), skip(skip(j + 1) + 1) + 1)
+                    } else {
+                        (n, j + 1)
+                    };
+                    let full = if base.ends_with('.') { format!("{base}{n}") } else { format!("{base}.{n}") };
+                    if generated_stem(n).is_some() {
+                        modules.insert(alias.to_string(), full);
+                    } else if generated_stem(&base).is_some() {
+                        names.insert(alias.to_string(), (base.clone(), n.to_string()));
+                    }
+                    j = skip(next);
+                    if !punct(j, ',') {
+                        break;
+                    }
+                    j = skip(j + 1);
+                }
+                in_import[begin..j.min(toks.len())].iter_mut().for_each(|x| *x = true);
+                i = j;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let mut out = Rpc::default();
+    for i in 0..toks.len() {
+        let Some(w) = word(i) else { continue };
+        if in_import[i] {
+            continue;
+        }
+        // `def add_XServicer_to_server(`, `class XStub(` là định nghĩa.
+        if i > 0 && matches!(word(i - 1), Some("def" | "class")) {
+            continue;
+        }
+        let (module, name): (Option<String>, &str) = match w.rsplit_once('.') {
+            Some((qual, last)) => {
+                let module = modules.get(qual).cloned().or_else(|| generated_stem(qual).map(|_| qual.to_string()));
+                (module, last)
+            }
+            None => match names.get(w) {
+                Some((m, original)) => (Some(m.clone()), original.as_str()),
+                None => (star.first().cloned(), w),
+            },
+        };
+        let generated = module.as_deref().and_then(generated_module);
+        let infra = |service: &str| infrastructure(generated.as_deref().unwrap_or(""), service);
+        let site = |service: &str, origin: Origin| Site { service: service.to_string(), origin, line: toks[i].line, shown: w.to_string() };
+        let stem_or = |fallback: Origin| generated.clone().map_or(fallback, Origin::Stem);
+        // Generic: tên đầy đủ nằm trong chuỗi.
+        if punct(i + 1, '(') && name == "method_handlers_generic_handler" {
+            if let Some((pkg, service)) = string(i + 2).and_then(full_name)
+                && !infrastructure(&pkg, &service)
+            {
+                out.serves.push(site(&service, Origin::Package(pkg)));
+            }
+            continue;
+        }
+        if punct(i + 1, '(') && matches!(name, "unary_unary" | "unary_stream" | "stream_unary" | "stream_stream") {
+            if let Some((pkg, service)) = string(i + 2).and_then(full_name)
+                && !infrastructure(&pkg, &service)
+            {
+                out.calls.push(site(&service, Origin::Package(pkg)));
+            }
+            continue;
+        }
+        if let Some(service) = name.strip_prefix("add_").and_then(|n| n.strip_suffix("Servicer_to_server")) {
+            if !service.is_empty() && !infra(service) {
+                out.serves.push(site(service, stem_or(Origin::Loose)));
+            }
+        } else if let Some(service) = name.strip_suffix("Servicer") {
+            // Lớp cha của server: chỉ tin khi đến từ module sinh ra.
+            if !service.is_empty() && generated.is_some() && !infra(service) {
+                out.implements.push(site(service, stem_or(Origin::Unknown)));
+            }
+        } else if let Some(service) = name.strip_suffix("Stub") {
+            // Đến từ module sinh ra thì chắc là gRPC; không thì chỉ tin khi
+            // một `.proto` trong repo khai service đó (`QuantStub()` của
+            // PyTorch thì không).
+            if !service.is_empty() && service.chars().next().is_some_and(char::is_uppercase) && !infra(service) {
+                out.calls.push(site(service, stem_or(Origin::Unknown)));
+            }
+        }
+    }
+    out
+}
+
+fn go(toks: &[Token]) -> Rpc {
+    let word = |i: usize| match toks.get(i).map(|t| &t.tok) {
+        Some(Tok::Word(w)) => Some(w.as_str()),
+        _ => None,
+    };
+    let punct = |i: usize, c: char| matches!(toks.get(i).map(|t| &t.tok), Some(Tok::Punct(p)) if *p == c);
+    // Package của chính file: gọi không tiền tố trong package sinh ra.
+    let own = (0..toks.len()).find(|&i| word(i) == Some("package")).and_then(|i| word(i + 1)).unwrap_or("").to_string();
+    // Alias của từng import: `pb "go.etcd.io/etcd/api/v3/etcdserverpb"`, hay
+    // tên mặc định là đoạn cuối của đường dẫn (bỏ `v3`).
+    let mut aliases: HashMap<String, String> = HashMap::new();
+    // `import . "x/kvpb"`: tên của package đó dùng không tiền tố.
+    let mut dotted: Vec<String> = Vec::new();
+    let mut add = |alias: Option<&str>, path: &str| {
+        if alias == Some(".") {
+            dotted.push(path.to_string());
+            return;
+        }
+        let default = || {
+            let mut segs = path.rsplit('/');
+            let last = segs.next().unwrap_or(path);
+            let versioned = last.len() > 1 && last.starts_with('v') && last[1..].bytes().all(|b| b.is_ascii_digit());
+            if versioned { segs.next().unwrap_or(last).to_string() } else { last.to_string() }
+        };
+        let name = alias.map_or_else(default, str::to_string);
+        if name != "_" && name != "." {
+            aliases.insert(name, path.to_string());
+        }
+    };
+    let mut i = 0;
+    while i < toks.len() {
+        if word(i) != Some("import") {
+            i += 1;
+            continue;
+        }
+        let one = |j: usize| -> (Option<String>, Option<(String, usize)>) {
+            match (toks.get(j).map(|t| &t.tok), toks.get(j + 1).map(|t| &t.tok)) {
+                (Some(Tok::Word(a)), Some(Tok::Str(p))) => (Some(a.clone()), Some((p.clone(), j + 2))),
+                (Some(Tok::Punct('.')), Some(Tok::Str(p))) => (Some(".".into()), Some((p.clone(), j + 2))),
+                (Some(Tok::Str(p)), _) => (None, Some((p.clone(), j + 1))),
+                _ => (None, None),
+            }
+        };
+        if punct(i + 1, '(') {
+            let mut j = i + 2;
+            while j < toks.len() && !punct(j, ')') {
+                match one(j) {
+                    (alias, Some((path, next))) => {
+                        add(alias.as_deref(), &path);
+                        j = next;
+                    }
+                    _ => j += 1,
+                }
+            }
+            i = j + 1;
+        } else {
+            match one(i + 1) {
+                (alias, Some((path, next))) => {
+                    add(alias.as_deref(), &path);
+                    i = next;
+                }
+                _ => i += 1,
+            }
+        }
+    }
+
+    // `RegisterKVHandlerServer` của grpc-gateway chạy handler trong cùng
+    // process, không phải server gRPC.
+    let service_of = |f: &str, prefix: &str, suffix: &str| -> Option<String> {
+        f.strip_prefix(prefix)
+            .and_then(|r| r.strip_suffix(suffix))
+            .filter(|s| !s.is_empty() && !s.ends_with("Handler") && s.chars().next().is_some_and(char::is_uppercase))
+            .map(str::to_string)
+    };
+    let mut out = Rpc::default();
+    for i in 0..toks.len() {
+        let Some(f) = word(i) else { continue };
+        let qualified = punct(i.wrapping_sub(1), '.') && i >= 2;
+        let (origin, shown, module) = if qualified {
+            let Some(pkg) = word(i - 2) else { continue };
+            // `a.pb.NewKVClient`: không phải tên package.
+            if punct(i.wrapping_sub(3), '.') && i >= 3 {
+                continue;
+            }
+            match aliases.get(pkg) {
+                Some(path) => (Origin::GoPackage(path.clone()), format!("{pkg}.{f}"), path.clone()),
+                None => (Origin::GoName(pkg.to_string()), format!("{pkg}.{f}"), pkg.to_string()),
+            }
+        } else {
+            // Gọi không tiền tố: chỉ tính lời gọi, không tính định nghĩa
+            // `func NewKVClient(` hay method `func (c *x) NewKVClient(`.
+            if !punct(i + 1, '(') || (i > 0 && (word(i - 1) == Some("func") || punct(i - 1, ')'))) {
+                continue;
+            }
+            (Origin::GoName(own.clone()), f.to_string(), own.clone())
+        };
+        // Không tiền tố: có thể từ package của chính file, hay từ một package
+        // dot-import. Ghi mỗi khả năng một chỗ; bảng tra `.proto` bỏ chỗ sai.
+        let mut origins = vec![origin];
+        if !qualified {
+            origins.extend(dotted.iter().map(|p| Origin::GoPackage(p.clone())));
+        }
+        let site = |service: &str, origin: &Origin| Site {
+            service: service.to_string(),
+            origin: origin.clone(),
+            line: toks[i].line,
+            shown: shown.clone(),
+        };
+        if let Some(service) = service_of(f, "Register", "Server") {
+            if !infrastructure(&module, &service) {
+                out.serves.extend(origins.iter().map(|o| site(&service, o)));
+            }
+        } else if let Some(service) = service_of(f, "New", "Client") {
+            if !infrastructure(&module, &service) {
+                out.calls.extend(origins.iter().map(|o| site(&service, o)));
+            }
+        } else if qualified {
+            let origin = origins.swap_remove(0);
+            let site = |service: String, origin: Origin| Site { service, origin, line: toks[i].line, shown: shown.clone() };
+            if let Some(service) = f.strip_suffix("_ServiceDesc").filter(|s| !s.is_empty()).map(str::to_string) {
+                if !infrastructure(&module, &service) {
+                    out.serves.push(site(service, origin));
+                }
+            } else if let Some(service) = service_of(f, "Unimplemented", "Server")
+                && !infrastructure(&module, &service)
+            {
+                out.implements.push(site(service, origin));
+            } else if matches!(f, "Invoke" | "NewStream") && punct(i + 1, '(') {
+                // Client generic: `conn.Invoke(ctx, "/pkg.KV/Range", …)`.
+                for j in i + 2..(i + 10).min(toks.len()) {
+                    if let Some(Tok::Str(s)) = toks.get(j).map(|t| &t.tok)
+                        && let Some((pkg, service)) = full_name(s)
+                    {
+                        if !infrastructure(&pkg, &service) {
+                            out.calls.push(Site { service, origin: Origin::Package(pkg), line: toks[i].line, shown: shown.clone() });
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// File test hay mock: server đăng ký ở đó là server giả cho test
+/// (`client/v3/mock/mockserver` của etcd), không phải nơi service chạy thật.
+/// Lời gọi từ test thì vẫn là lời gọi thật.
+pub fn fake_server_path(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let dirs = path.rsplit_once('/').map_or("", |(d, _)| d);
+    name.ends_with("_test.go")
+        || name.starts_with("test_")
+        || name.ends_with("_test.py")
+        || name == "conftest.py"
+        || dirs.split('/').any(|d| {
+            matches!(d, "test" | "tests" | "testdata" | "testutil" | "testutils" | "mock" | "mocks" | "grpctesting")
+        })
+}
+
+/// Tổng số service đưa vào bảng tra (TM-13): repo thật có vài trăm.
+pub const MAX_INDEX: usize = 100_000;
+/// Số ứng viên tối đa xét khi phân biệt theo đường dẫn module.
+const MAX_SUFFIX_CANDIDATES: usize = 64;
+
+/// Mọi file `.proto` của repo, tra theo tên service bằng bảng băm (TM-13).
+#[derive(Debug, Clone, Default)]
+pub struct ProtoIndex {
+    by_service: HashMap<String, Known>,
+    /// Tên mọi file `.proto` (không đuôi), kể cả file không có service.
+    stems: std::collections::HashSet<String>,
+    count: usize,
+    /// Quá [`MAX_INDEX`] service thì phần sau không vào bảng.
+    pub truncated: bool,
+}
+
+/// Một tên service: nó có ở đâu.
+#[derive(Debug, Clone, Default)]
+struct Known {
+    packages: BTreeSet<String>,
+    /// Tên file → (đường dẫn file bằng dấu chấm, không đuôi; package).
+    by_stem: HashMap<String, Vec<(String, String)>>,
+    by_go_package: HashMap<String, BTreeSet<String>>,
+    by_go_name: HashMap<String, BTreeSet<String>>,
+}
+
+/// Kết quả ghép một chỗ gọi hay đăng ký với `.proto`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Key {
+    /// `grpc:package.Service`, hay `grpc:Service` khi không có package, hay
+    /// khi module sinh ra không ứng với `.proto` nào trong repo.
+    Found(String),
+    /// Tên service có ở nhiều package mà không lần được về file nào.
+    Ambiguous(Vec<String>),
+    /// Không phải gRPC: `NewXClient` của Go, `XStub` không rõ module, mà không
+    /// `.proto` nào trong repo khai service `X`.
+    NotRpc,
+}
+
+impl ProtoIndex {
+    pub fn add(&mut self, path: &str, proto: &Proto) {
+        let file = path.strip_suffix(".proto").unwrap_or(path);
+        let stem = file.rsplit('/').next().unwrap_or(file).to_string();
+        let dotted = file.replace('/', ".");
+        self.stems.insert(stem.clone());
+        for s in &proto.services {
+            if self.count >= MAX_INDEX {
+                self.truncated = true;
+                return;
+            }
+            self.count += 1;
+            let k = self.by_service.entry(s.name.clone()).or_default();
+            k.packages.insert(proto.package.clone());
+            k.by_stem.entry(stem.clone()).or_default().push((dotted.clone(), proto.package.clone()));
+            if let Some(g) = &proto.go_package {
+                k.by_go_package.entry(g.clone()).or_default().insert(proto.package.clone());
+            }
+            if let Some(n) = &proto.go_name {
+                k.by_go_name.entry(n.clone()).or_default().insert(proto.package.clone());
+            }
+        }
+    }
+
+    fn full(package: &str, service: &str) -> String {
+        if package.is_empty() { format!("grpc:{service}") } else { format!("grpc:{package}.{service}") }
+    }
+
+    fn one(set: &BTreeSet<String>, service: &str) -> Option<Key> {
+        (set.len() == 1).then(|| Key::Found(Self::full(set.first().map_or("", String::as_str), service)))
+    }
+
+    pub fn key(&self, site: &Site) -> Key {
+        let service = site.service.as_str();
+        let empty = Known::default();
+        let known = self.by_service.get(service).unwrap_or(&empty);
+        // Chỉ theo tên: duy nhất thì ghép, nhiều thì nhập nhằng.
+        let by_name = |none: Key| match known.packages.len() {
+            0 => none,
+            1 => Key::Found(Self::full(known.packages.first().map_or("", String::as_str), service)),
+            _ => Key::Ambiguous(known.packages.iter().map(|p| Self::full(p, service)).collect()),
+        };
+        match &site.origin {
+            Origin::Package(pkg) => Key::Found(Self::full(pkg, service)),
+            Origin::GoName(name) => {
+                known.by_go_name.get(name).and_then(|set| Self::one(set, service)).unwrap_or(Key::NotRpc)
+            }
+            Origin::GoPackage(path) => match known.by_go_package.get(path).and_then(|set| Self::one(set, service)) {
+                Some(k) => k,
+                None => by_name(Key::NotRpc),
+            },
+            Origin::Unknown => by_name(Key::NotRpc),
+            Origin::Loose => by_name(Key::Found(Self::full("", service))),
+            Origin::Stem(module) => {
+                let last = module.rsplit('.').next().unwrap_or(module);
+                // Không file `.proto` nào trong repo mang tên này: module đến
+                // từ thư viện ngoài, hay `.proto` để ở repo khác. Ghép theo tên
+                // trần, không lấy service cùng tên của repo này.
+                if !self.stems.contains(last) {
+                    return Key::Found(Self::full("", service));
+                }
+                let Some(cands) = known.by_stem.get(last) else { return by_name(Key::Found(Self::full("", service))) };
+                let pkgs: BTreeSet<String> = cands.iter().map(|(_, p)| p.clone()).collect();
+                if let Some(k) = Self::one(&pkgs, service) {
+                    return k;
+                }
+                // `shop.v1.kv` và `shop.v2.kv`: phân biệt theo đường dẫn module.
+                if cands.len() <= MAX_SUFFIX_CANDIDATES {
+                    let want: Vec<&str> = module.trim_start_matches('.').split('.').collect();
+                    let matched: BTreeSet<String> = cands
+                        .iter()
+                        .filter(|(path, _)| path.split('.').collect::<Vec<_>>().ends_with(&want))
+                        .map(|(_, p)| p.clone())
+                        .collect();
+                    if let Some(k) = Self::one(&matched, service) {
+                        return k;
+                    }
+                }
+                Key::Ambiguous(pkgs.iter().map(|p| Self::full(p, service)).collect())
+            }
+        }
+    }
+}
+
+/// Ai phục vụ mỗi khoá: mọi component đăng ký server cho nó. Một service có
+/// thể có nhiều server (proxy của etcd cũng đăng ký `KV`), và trùng không làm
+/// cạnh biến mất (TM-15).
+pub type Servers = BTreeMap<String, BTreeSet<String>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn py(src: &str) -> Rpc {
+        scan(&Lang::Python.tokens(src), Lang::Python)
+    }
+
+    fn golang(src: &str) -> Rpc {
+        scan(&Lang::Go.tokens(src), Lang::Go)
+    }
+
+    fn names(sites: &[Site]) -> Vec<(String, Origin)> {
+        sites.iter().map(|s| (s.service.clone(), s.origin.clone())).collect()
+    }
+
+    fn stem(s: &str) -> Origin {
+        Origin::Stem(s.into())
+    }
+
+    #[test]
+    fn doc_proto() {
+        let p = read_proto(
+            "syntax = \"proto3\";\npackage etcdserverpb;\noption go_package = \"go.etcd.io/etcd/api/v3/etcdserverpb;pb\";\n\
+             // service Fake {\nmessage M { string service = 1; message N { } }\n\
+             service KV {\n  rpc Range(RangeRequest) returns (RangeResponse) {\n    option (google.api.http) = { post: \"/v3/kv/range\" };\n  }\n  rpc Put(PutRequest) returns (PutResponse) {}\n}\n\
+             service Watch { rpc Watch(stream WatchRequest) returns (stream WatchResponse); }\n",
+        );
+        assert_eq!(p.package, "etcdserverpb");
+        assert_eq!(p.go_package.as_deref(), Some("go.etcd.io/etcd/api/v3/etcdserverpb"));
+        let s: Vec<(&str, Vec<&str>)> =
+            p.services.iter().map(|s| (s.name.as_str(), s.rpcs.iter().map(|(r, _)| r.as_str()).collect())).collect();
+        assert_eq!(s, [("KV", vec!["Range", "Put"]), ("Watch", vec!["Watch"])]);
+        assert_eq!(p.services[0].line, 6);
+        assert_eq!(read_proto("package a.b.c;\n").package, "a.b.c");
+    }
+
+    #[test]
+    fn proto_doi_khang_co_tran() {
+        let deep = format!("service S {{ {} rpc A(B) returns (C); }}", "{".repeat(200_000));
+        let start = std::time::Instant::now();
+        let p = read_proto(&deep);
+        assert_eq!(p.services.len(), 1);
+        assert!(p.services[0].rpcs.is_empty(), "rpc lồng trong ngoặc khác không phải rpc của service");
+        let many: String = (0..2000).map(|i| format!("service S{i} {{}}\n")).collect();
+        let p = read_proto(&many);
+        assert!(p.truncated && p.services.len() == MAX_SERVICES);
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn python_client_server() {
+        let r = py("import grpc\nfrom vllm.grpc import rpc_pb2_grpc\nimport a.b.other_pb2_grpc as og\n\
+                    from a.c.inf_pb2_grpc import InferenceStub as Inf, add_ControlServicer_to_server\n\
+                    stub = rpc_pb2_grpc.KVStub(channel)\nx = og.WatchStub(ch)\ny = Inf(ch)\n\
+                    add_ControlServicer_to_server(impl, server)\nrpc_pb2_grpc.add_KVServicer_to_server(impl, s)\n\
+                    q = torch.ao.quantization.QuantStub()\nz = MarkingStub()\n");
+        assert_eq!(
+            names(&r.calls),
+            [
+                ("KV".into(), stem("vllm.grpc.rpc")),
+                ("Watch".into(), stem("a.b.other")),
+                ("Inference".into(), stem("a.c.inf")),
+                // Không rõ module: ghi lại, bảng tra `.proto` quyết (không có
+                // `.proto` nào khai `Quant` thì không phải gRPC).
+                ("Quant".into(), Origin::Unknown),
+                ("Marking".into(), Origin::Unknown),
+            ]
+        );
+        assert_eq!(names(&r.serves), [("Control".into(), stem("a.c.inf")), ("KV".into(), stem("vllm.grpc.rpc"))]);
+    }
+
+    #[test]
+    fn python_import_tuong_doi_noi_dong_va_sao() {
+        let kv = |m: &str| ("KV".to_string(), stem(m));
+        assert_eq!(names(&py("from ..gen.kv_pb2_grpc import KVStub\nKVStub(ch)\n").calls), [kv("..gen.kv")]);
+        assert_eq!(names(&py("from ..gen import kv_pb2_grpc as pb\npb.KVStub(ch)\n").calls), [kv("..gen.kv")]);
+        assert_eq!(names(&py("from . import kv_pb2_grpc\nkv_pb2_grpc.KVStub(ch)\n").calls), [kv(".kv")]);
+        assert_eq!(names(&py("from app.gen.kv_pb2_grpc import \\\n    KVStub\nKVStub(ch)\n").calls), [kv("app.gen.kv")]);
+        assert_eq!(names(&py("from app.gen.kv_pb2_grpc import (\n    KVStub,\n)\nKVStub(ch)\n").calls), [kv("app.gen.kv")]);
+        assert_eq!(names(&py("from app.gen.kv_pb2_grpc import *\nKVStub(ch)\n").calls), [kv("app.gen.kv")]);
+        assert_eq!(names(&py("import app.gen.kv_pb2_grpc \\\n    as g\ng.KVStub(ch)\n").calls), [kv("app.gen.kv")]);
+        // Gọi qua biến: nhắc tới là đủ, không cần dấu ngoặc.
+        assert_eq!(names(&py("from app.gen import kv_pb2_grpc\nS = kv_pb2_grpc.KVStub\ns = S(ch)\n").calls), [kv("app.gen.kv")]);
+        let r = py("from app.gen import kv_pb2_grpc as g\nreg = g.add_KVServicer_to_server\nreg(impl, s)\n");
+        assert_eq!(names(&r.serves), [kv("app.gen.kv")]);
+    }
+
+    #[test]
+    fn python_generic_va_cai_dat() {
+        let r = py("import grpc\nfrom app.gen import kv_pb2_grpc\n\
+                    class Impl(kv_pb2_grpc.KVServicer):\n    pass\n\
+                    h = grpc.method_handlers_generic_handler(\"shop.v1.KV\", handlers)\n\
+                    m = ch.unary_unary(\"/shop.v1.KV/Get\")\n");
+        let pkg = || Origin::Package("shop.v1".into());
+        assert_eq!(names(&r.implements), [("KV".into(), stem("app.gen.kv"))]);
+        assert_eq!(names(&r.serves), [("KV".into(), pkg())]);
+        assert_eq!(names(&r.calls), [("KV".into(), pkg())]);
+    }
+
+    #[test]
+    fn python_bo_dinh_nghia_va_ha_tang() {
+        let r = py("class KVStub(object):\n    pass\ndef add_KVServicer_to_server(servicer, server):\n    pass\n\
+                    from grpc_health.v1 import health_pb2_grpc\nhealth_pb2_grpc.add_HealthServicer_to_server(h, s)\n\
+                    s = health_pb2_grpc.HealthStub(ch)\n");
+        assert!(r.is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn go_client_server() {
+        let r = golang("package x\nimport (\n  pb \"go.etcd.io/etcd/api/v3/etcdserverpb\"\n  \"google.golang.org/grpc\"\n  \"example.com/api/v2\"\n)\n\
+                        func f() {\n  kv := pb.NewKVClient(conn)\n  pb.RegisterKVServer(s, impl)\n  pb.RegisterKVHandlerServer(ctx, mux, srv)\n  c := api.NewOrderClient(conn)\n  grpc.NewServer()\n}\n");
+        let go = |p: &str| Origin::GoPackage(p.into());
+        assert_eq!(
+            names(&r.calls),
+            [("KV".into(), go("go.etcd.io/etcd/api/v3/etcdserverpb")), ("Order".into(), go("example.com/api/v2"))]
+        );
+        assert_eq!(names(&r.serves), [("KV".into(), go("go.etcd.io/etcd/api/v3/etcdserverpb"))]);
+        assert_eq!(r.calls[0].line, 8);
+        let r = golang("package x\nimport pb \"a/kvpb\"\ntype s struct { pb.UnimplementedKVServer }\n\
+                        func g(srv int) { srv.RegisterService(&pb.KV_ServiceDesc, 0); f := pb.RegisterKVServer; f(srv, 0)\n\
+                        conn.Invoke(ctx, \"/shop.v1.KV/Range\", in, out) }\n");
+        assert_eq!(names(&r.implements), [("KV".into(), go("a/kvpb"))]);
+        assert_eq!(names(&r.serves), [("KV".into(), go("a/kvpb")), ("KV".into(), go("a/kvpb"))]);
+        assert_eq!(names(&r.calls), [("KV".into(), Origin::Package("shop.v1".into()))]);
+        // Gọi không tiền tố trong package sinh ra: theo tên package của file.
+        let r = golang("package kvpb\nfunc NewKVClient(c int) int { return 0 }\nfunc Dial(c int) int { return NewKVClient(c) }\n");
+        assert_eq!(names(&r.calls), [("KV".into(), Origin::GoName("kvpb".into()))]);
+        // Dot-import: thử cả package của file lẫn package dot-import.
+        let r = golang("package server\nimport . \"a/kvpb\"\nfunc g(s int) { RegisterKVServer(s, 0) }\n");
+        assert_eq!(names(&r.serves), [("KV".into(), Origin::GoName("server".into())), ("KV".into(), go("a/kvpb"))]);
+    }
+
+    #[test]
+    fn ghep_theo_package_roi_theo_ten() {
+        let mut idx = ProtoIndex::default();
+        idx.add("api/rpc.proto", &read_proto("package etcdserverpb;\noption go_package = \"go.etcd.io/api/pb\";\nservice KV {}\n"));
+        idx.add("a/x.proto", &read_proto("package a;\nservice Dup {}\n"));
+        idx.add("b/y.proto", &read_proto("package b;\nservice Dup {}\n"));
+        let site = |service: &str, origin: Origin| Site { service: service.into(), origin, line: 1, shown: String::new() };
+        assert_eq!(idx.key(&site("KV", stem("rpc"))), Key::Found("grpc:etcdserverpb.KV".into()));
+        assert_eq!(idx.key(&site("KV", Origin::GoPackage("go.etcd.io/api/pb".into()))), Key::Found("grpc:etcdserverpb.KV".into()));
+        assert_eq!(idx.key(&site("KV", Origin::Unknown)), Key::Found("grpc:etcdserverpb.KV".into()), "tên duy nhất");
+        assert_eq!(idx.key(&site("Dup", stem("x"))), Key::Found("grpc:a.Dup".into()), "lần được về file");
+        assert_eq!(
+            idx.key(&site("Dup", Origin::Unknown)),
+            Key::Ambiguous(vec!["grpc:a.Dup".into(), "grpc:b.Dup".into()])
+        );
+        assert_eq!(idx.key(&site("VllmEngine", stem("vllm_engine"))), Key::Found("grpc:VllmEngine".into()), "không có .proto");
+        // Module của thư viện ngoài (`etcd3.etcdrpc.rpc_pb2_grpc`) mà repo không
+        // có `rpc.proto`: không ghép vào service cùng tên của repo.
+        idx.add("proto/kv.proto", &read_proto("package shop.v1;\nservice Ext {}\n"));
+        assert_eq!(idx.key(&site("Ext", stem("etcd3.etcdrpc.rpc_ext"))), Key::Found("grpc:Ext".into()));
+        // API có phiên bản: cùng tên file, phân biệt theo đường dẫn module.
+        idx.add("proto/shop/v1/kv2.proto", &read_proto("package shop.v1;\nservice Ver {}\n"));
+        idx.add("proto/shop/v2/kv2.proto", &read_proto("package shop.v2;\nservice Ver {}\n"));
+        assert_eq!(idx.key(&site("Ver", stem("shop.v2.kv2"))), Key::Found("grpc:shop.v2.Ver".into()));
+        assert!(matches!(idx.key(&site("Ver", stem("kv2"))), Key::Ambiguous(_)));
+        assert_eq!(idx.key(&site("Quant", Origin::Unknown)), Key::NotRpc, "XStub không rõ module cần .proto");
+        assert_eq!(idx.key(&site("KVFromKV", Origin::GoPackage("go.etcd.io/x/adapter".into()))), Key::NotRpc, "Go cần .proto");
+        idx.add("order/v1/order.proto", &read_proto("package acme.order.v1;\noption go_package = \"example.com/gen/order/v1;orderv1\";\nservice OrderService {}\n"));
+        assert_eq!(idx.key(&site("OrderService", Origin::GoName("orderv1".into()))), Key::Found("grpc:acme.order.v1.OrderService".into()));
+        assert_eq!(idx.key(&site("OrderService", Origin::GoName("client".into()))), Key::NotRpc, "biến tên `client` không phải package");
+    }
+}

@@ -49,6 +49,14 @@ CROSSINGS = {
     "apex": [("Bottleneck", "Csrc")],
 }
 
+# Lời gọi gRPC: chỗ gọi stub ghép với chỗ đăng ký server theo `package.Service`
+# đọc từ `.proto`. Hai phía không import nhau, nên chỉ phép ghép này thấy cạnh.
+RPC = {
+    # `pb.NewKVClient` của `client/v3` ↔ `pb.RegisterKVServer` của `server/`;
+    # gateway trong `api/` (`etcdserverpb.NewKVClient`) cũng gọi server.
+    "etcd": [("Client", "Server"), ("Api", "Server")],
+}
+
 
 # Tầng hạ tầng phải có ở cả hai phía như cạnh liên ngôn ngữ: `init` sinh ra
 # `link` và `runs` cho nó, và gỡ đi thì `check` phải báo. Tên là tên mà `init`
@@ -155,6 +163,7 @@ def analyse(archctl: str, name: str, src: Path, work: Path, expected: int,
         out["problems"].append(f"luật sinh ra đã có cảnh báo: dòng {w['line']}: {w['msg']}")
 
     crossings(archctl, name, law, root, out)
+    crossings(archctl, name, law, root, out, table=RPC, via="rpc", what="cạnh gRPC")
     deploy(archctl, name, law, root, rep, out)
 
     out["check_ms"] = round(_median_ms(archctl, ["check", *root], rounds))
@@ -164,32 +173,34 @@ def analyse(archctl: str, name: str, src: Path, work: Path, expected: int,
     return out
 
 
-def crossings(archctl: str, name: str, law: Path, root: list, out: dict):
+def crossings(archctl: str, name: str, law: Path, root: list, out: dict,
+              table: dict = CROSSINGS, via: str = "ffi", what: str = "cạnh liên ngôn ngữ"):
     """Cạnh liên ngôn ngữ phải có ở cả hai phía: `init` sinh ra `allow` cho
     nó, và đổi `allow` đó thành `deny` thì `check` phải báo vi phạm qua ranh
     giới ngôn ngữ. `deny` chứ không xoá: component chỉ có đúng một `allow` mà
-    mất nó thì ra khỏi diện kiểm, và `check` im lặng vì lý do khác.
+    mất nó thì ra khỏi diện kiểm, và `check` im lặng vì lý do khác. Cạnh gRPC
+    (`RPC`, `via: rpc`) kiểm cùng một cách.
     """
-    want = CROSSINGS.get(name, [])
+    want = table.get(name, [])
     if not want:
         return
     text = law.read_text()
     edges = set(re.findall(r"^allow\s+(\w+)\s*->\s*(\w+)", text, re.M))
     for a, b in want:
         if (a, b) not in edges:
-            out["problems"].append(f"thiếu cạnh liên ngôn ngữ: luật sinh ra không có {a} -> {b}")
+            out["problems"].append(f"thiếu {what}: luật sinh ra không có {a} -> {b}")
     pattern = "|".join(rf"{a}\s*->\s*{b}\b" for a, b in want)
     law.write_text(re.sub(rf"^allow(\s+(?:{pattern}))", r"deny\1", text, flags=re.M))
     try:
         p, _ = _run(archctl, ["check", "--json", *root])
-        seen = {(v["from"], v["to"]) for v in json.loads(p.stdout)["violations"] if v.get("via") == "ffi"}
+        seen = {(v["from"], v["to"]) for v in json.loads(p.stdout)["violations"] if v.get("via") == via}
     except (json.JSONDecodeError, KeyError):
         seen = set()
     finally:
         law.write_text(text)
     for a, b in want:
         if (a, b) not in seen:
-            out["problems"].append(f"thiếu cạnh liên ngôn ngữ: đổi allow {a} -> {b} thành deny mà check không báo")
+            out["problems"].append(f"thiếu {what}: đổi allow {a} -> {b} thành deny mà check không báo")
 
 
 def deploy(archctl: str, name: str, law: Path, root: list, rep: dict, out: dict):

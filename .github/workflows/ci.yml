@@ -177,13 +177,14 @@ jobs:
       # bước đối chiếu. archctl đã dựng xong ở trên khi còn offline.
       # `--notebook-repo` phá phần notebook, đối chiếu bằng IPython cài qua pip.
       # `--deploy-repo` phá phần compose và Dockerfile, đối chiếu bằng PyYAML và
-      # dockerfile-parse cài qua pip, cũng ghim kèm hash.
+      # dockerfile-parse cài qua pip, cũng ghim kèm hash. `--proto-repo` phá
+      # phần `.proto`, đối chiếu bằng `protoc` của grpcio-tools cài y như vậy.
       # Phần cạnh binding (matplotlib, pytorch-image-models, vllm) cần clang, có
       # sẵn trên image.
       - name: bộ đo đổ được
         env:
           CARGO_NET_OFFLINE: "false"
-        run: python3 bench/sabotage.py --archctl target/release/archctl --rust-repo ripgrep --notebook-repo matplotlib --deploy-repo example-voting-app
+        run: python3 bench/sabotage.py --archctl target/release/archctl --rust-repo ripgrep --notebook-repo matplotlib --deploy-repo example-voting-app --proto-repo vllm
 
       # Phép tự nhất quán ở trên so archctl với chính nó: bộ khám phá và bộ
       # kiểm dùng chung bộ trích, nên một lỗi trong bộ trích làm cả hai sai
@@ -206,11 +207,12 @@ jobs:
       # `bench/ipython-requirements.txt`, chỉ wheel: không file nào khác bản đã
       # ghim, không `setup.py` nào chạy lúc cài. Job chỉ có quyền đọc, không secret.
       # Compose và Dockerfile đối chiếu với PyYAML và dockerfile-parse, cài y như
-      # vậy từ `bench/deploy-requirements.txt`.
+      # vậy từ `bench/deploy-requirements.txt`. File `.proto` đối chiếu với
+      # `protoc` (grpcio-tools), từ `bench/proto-requirements.txt`.
       - name: đối chiếu với parser chuẩn
         env:
           CARGO_NET_OFFLINE: "false"
-        run: python3 bench/oracle.py --archctl target/release/archctl --require clang,node,go,syn,ipython,deploy
+        run: python3 bench/oracle.py --archctl target/release/archctl --require clang,node,go,syn,ipython,deploy,proto
 
   mo-hinh:
     name: kiến trúc mô hình

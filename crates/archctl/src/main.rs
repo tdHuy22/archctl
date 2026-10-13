@@ -401,6 +401,7 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
                 v.file, v.line, v.spec
             ),
             Via::Network | Via::Entry => crate::say!("  {}:{}  {}", v.file, v.line, v.spec),
+            Via::Rpc => crate::say!("  {}:{}  gọi gRPC `{}`", v.file, v.line, v.spec),
         }
         crate::say!("  luật: {}", v.rule);
         crate::say!("  → {}", v.hint);
@@ -626,6 +627,7 @@ fn print_json(hash: &str, report: &Report, law: &[Diag]) {
                     Via::Ffi => "ffi",
                     Via::Network => "network",
                     Via::Entry => "entry",
+                    Via::Rpc => "rpc",
                 }),
                 v.count,
                 json::string(match v.reason {
@@ -931,7 +933,7 @@ fn cmd_scan(args: &[String]) -> ExitCode {
     } else {
         relative_to(&root, &only)
             .into_iter()
-            .filter(|f| scan::is_supported(f) || scan::deploy::touches_deploy(f))
+            .filter(|f| scan::is_supported(f) || scan::deploy::touches_deploy(f) || f.ends_with(".proto"))
             .collect()
     };
     // Cho thẳng tên file thì đọc cả file trong thư mục test hay ví dụ: người
@@ -950,6 +952,20 @@ fn cmd_scan(args: &[String]) -> ExitCode {
     };
 
     let resolver = Resolver::new(&root);
+    // Bảng tra `.proto`: chỗ dò ra mà không phải gRPC (`QuantStub()` không có
+    // `.proto` nào khai `Quant`) thì không in.
+    let mut proto_index = scan::grpc::ProtoIndex::default();
+    for p in arch_core::check::proto_files(&root, &arch_core::read_ignores(&root)) {
+        if let Ok(text) = scan::deploy::read_in(&root, &p, arch_core::check::MAX_FILE_BYTES) {
+            proto_index.add(&p, &scan::grpc::read_proto(&text));
+        }
+    }
+    let rpc_of = |file: &str, list: &[scan::grpc::Site]| -> Vec<scan::grpc::Site> {
+        if scan::grpc::generated_stub_path(file) {
+            return Vec::new();
+        }
+        list.iter().filter(|s| !matches!(proto_index.key(s), scan::grpc::Key::NotRpc)).cloned().collect()
+    };
     let mut json_files: Vec<String> = Vec::new();
     for file in &files {
         let Some(lang) = Lang::for_path(file) else { continue };
@@ -1022,12 +1038,23 @@ fn cmd_scan(args: &[String]) -> ExitCode {
         // Cạnh liên ngôn ngữ, khoá thô như bộ quét thấy: `TORCH_EXTENSION_NAME`
         // còn là `@ext`, chưa thay bằng tên trong `setup.py`.
         let foreign = &scanned.foreign;
+        let (rpc_calls, rpc_serves, rpc_impls) =
+            (rpc_of(file, &scanned.rpc.calls), rpc_of(file, &scanned.rpc.serves), rpc_of(file, &scanned.rpc.implements));
         if !as_json {
             for c in &foreign.calls {
                 say!("  {:>5}  {}  → gọi qua ranh giới ngôn ngữ ({})", c.line, c.shown, c.symbol);
             }
             for c in &foreign.provides {
                 say!("  {:>5}  cung cấp {} cho ngôn ngữ khác", c.line, c.symbol);
+            }
+            for c in &rpc_calls {
+                say!("  {:>5}  {}  → gọi gRPC service {}{}", c.line, c.shown, c.service, origin_text(&c.origin));
+            }
+            for c in &rpc_serves {
+                say!("  {:>5}  {}  → phục vụ gRPC service {}{}", c.line, c.shown, c.service, origin_text(&c.origin));
+            }
+            for c in &rpc_impls {
+                say!("  {:>5}  {}  → cài đặt server gRPC {}{}", c.line, c.shown, c.service, origin_text(&c.origin));
             }
         }
         if as_json {
@@ -1044,25 +1071,112 @@ fn cmd_scan(args: &[String]) -> ExitCode {
                     .collect::<Vec<_>>()
                     .join(",")
             };
+            let sites = |list: &[scan::grpc::Site]| {
+                list.iter()
+                    .map(|c| {
+                        let (kind, value) = match &c.origin {
+                            scan::grpc::Origin::Unknown => ("unknown", ""),
+                            scan::grpc::Origin::Loose => ("loose", ""),
+                            scan::grpc::Origin::Package(v) => ("package", v.as_str()),
+                            scan::grpc::Origin::Stem(v) => ("proto", v.as_str()),
+                            scan::grpc::Origin::GoPackage(v) => ("goPackage", v.as_str()),
+                            scan::grpc::Origin::GoName(v) => ("goName", v.as_str()),
+                        };
+                        format!(
+                            r#"{{"line":{},"service":{},"origin":{},"from":{},"shown":{}}}"#,
+                            c.line,
+                            json::string(&c.service),
+                            json::string(kind),
+                            json::string(value),
+                            json::string(&c.shown)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
             json_files.push(format!(
-                r#"{{"file":{},"lang":{},"imports":[{}],"crossings":{{"calls":[{}],"provides":[{}]}}}}"#,
+                r#"{{"file":{},"lang":{},"imports":[{}],"crossings":{{"calls":[{}],"provides":[{}]}},"rpc":{{"calls":[{}],"serves":[{}],"implements":[{}]}}}}"#,
                 json::string(file),
                 json::string(lang.name()),
                 items.join(","),
                 crossings(&foreign.calls),
-                crossings(&foreign.provides)
+                crossings(&foreign.provides),
+                sites(&rpc_calls),
+                sites(&rpc_serves),
+                sites(&rpc_impls)
             ));
         }
     }
     let deploy = scan_deploy(&root, &resolver, &deploy_files, as_json, verbatim);
+    let proto_files: Vec<String> = if only.is_empty() {
+        arch_core::check::proto_files(&root, &arch_core::read_ignores(&root))
+    } else {
+        files.iter().filter(|f| f.ends_with(".proto")).cloned().collect()
+    };
+    let protos = scan_protos(&root, &proto_files, as_json);
     if as_json {
         say!(
-            r#"{{"root":{},"files":[{}],"deploy":{deploy}}}"#,
+            r#"{{"root":{},"files":[{}],"deploy":{deploy},"protos":[{protos}]}}"#,
             json::string(&root.to_string_lossy()),
             json_files.join(",")
         );
     }
     ExitCode::from(exit::OK)
+}
+
+/// `(từ rpc.proto)`, `(từ go.etcd.io/…/etcdserverpb)`: thứ dùng để ghép với `.proto`.
+fn origin_text(origin: &arch_core::scan::grpc::Origin) -> String {
+    match origin {
+        arch_core::scan::grpc::Origin::Unknown | arch_core::scan::grpc::Origin::Loose => String::new(),
+        arch_core::scan::grpc::Origin::Package(p) => format!(" (package {p})"),
+        arch_core::scan::grpc::Origin::Stem(s) => format!(" (từ {s}.proto)"),
+        arch_core::scan::grpc::Origin::GoPackage(p) => format!(" (từ {p})"),
+        arch_core::scan::grpc::Origin::GoName(p) => format!(" (từ package {p}?)"),
+    }
+}
+
+/// Phần `.proto` của `scan`: package, `go_package`, service và rpc của từng file.
+fn scan_protos(root: &Path, files: &[String], as_json: bool) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for file in files {
+        let text = match arch_core::scan::deploy::read_in(root, file, arch_core::check::MAX_FILE_BYTES) {
+            Ok(t) => t,
+            Err(why) => {
+                if !as_json {
+                    say!("{file} (proto): bỏ qua, {why}");
+                }
+                out.push(format!(r#"{{"file":{},"error":{}}}"#, json::string(file), json::string(&why)));
+                continue;
+            }
+        };
+        let p = arch_core::scan::grpc::read_proto(&text);
+        if !as_json {
+            say!("{file} (proto) package {}", if p.package.is_empty() { "(không có)" } else { p.package.as_str() });
+            for s in &p.services {
+                say!("  {:>5}  service {}  {} rpc", s.line, s.name, s.rpcs.len());
+            }
+            if p.truncated {
+                say!("  ? quá trần service hay rpc; phần sau không đọc");
+            }
+        }
+        let services: Vec<String> = p
+            .services
+            .iter()
+            .map(|s| {
+                let rpcs: Vec<String> = s.rpcs.iter().map(|(n, l)| format!("[{},{l}]", json::string(n))).collect();
+                format!(r#"{{"name":{},"line":{},"rpcs":[{}]}}"#, json::string(&s.name), s.line, rpcs.join(","))
+            })
+            .collect();
+        out.push(format!(
+            r#"{{"file":{},"package":{},"goPackage":{},"services":[{}],"truncated":{}}}"#,
+            json::string(file),
+            json::string(&p.package),
+            p.go_package.as_deref().map_or_else(|| "null".to_string(), json::string),
+            services.join(","),
+            p.truncated
+        ));
+    }
+    out.join(",")
 }
 
 /// Phần triển khai của `scan`: dữ kiện từng file compose và Dockerfile như bộ

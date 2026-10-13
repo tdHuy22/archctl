@@ -177,11 +177,78 @@ Bọc ngoài được bỏ qua: `exec`, `env A=1`, `tini --`, `gosu user`, `uv r
 không đọc (Java, .NET, PHP) và image dựng sẵn (nginx, logstash) thì báo là
 không rõ điểm vào — chỉ khi service đó có `runs`.
 
+## Cạnh gRPC
+
+Client gọi `pb.NewKVClient(conn)`, server đăng ký `pb.RegisterKVServer(s,
+impl)`. Hai bên chỉ cùng import mã sinh ra từ `rpc.proto`, không import nhau,
+nên đồ thị import không thấy lời gọi. archctl dò chỗ gọi stub và chỗ đăng ký
+server, rồi ghép theo tên đầy đủ `package.Service` đọc từ `.proto`:
+
+```
+✗ VI PHẠM  Client -> Server  (không được phép, #accepted)
+  client/v3/retry.go:103  gọi gRPC `pb.NewKVClient (grpc:etcdserverpb.KV)`
+  luật: không có allow nào cho Client -> Server
+```
+
+| Ngôn ngữ | Phía client | Phía server |
+| --- | --- | --- |
+| Python | `XStub` từ module `*_pb2_grpc` (import tuyệt đối hay tương đối, `as`, `import *`, kể cả gán vào biến rồi gọi); `ch.unary_unary("/pkg.X/M")` | `add_XServicer_to_server` (kể cả gán vào biến); `method_handlers_generic_handler("pkg.X", …)` |
+| Go | `pb.NewXClient(conn)` (`pb` là alias import, tên package trong `go_package`, hay gọi không tiền tố trong package sinh ra hoặc qua dot-import); `conn.Invoke(ctx, "/pkg.X/M", …)` | `pb.RegisterXServer(s, impl)`; `s.RegisterService(&pb.X_ServiceDesc, impl)` |
+
+Chỗ nhắc tới cũng tính, không chỉ chỗ gọi: `S = kv_pb2_grpc.KVStub` rồi `S(ch)`
+vẫn là lời gọi. `XStub` không rõ module (re-export qua `__init__.py`,
+`self.pb.KVStub`) chỉ tính khi một `.proto` trong repo khai service `X`: không
+thì `QuantStub()` của PyTorch cũng thành gRPC.
+
+- **Luật.** Cạnh giữa hai component cần `allow`, như import. Khi file luật đã
+  khai `service` và hai component chạy ở hai service khác nhau (theo `runs`),
+  cần thêm `link` giữa hai service: với mỗi service chạy phía client, phải có
+  một service chạy phía server là chính nó, hoặc có `link` tới. Cạnh gRPC
+  không kéo component server vào `runs` của client: server chạy ở process khác.
+- **Ghép.** Lần từ module sinh ra về file `.proto`: `rpc_pb2_grpc` từ
+  `rpc.proto` (cùng tên file ở nhiều thư mục, như API có phiên bản
+  `shop/v1/kv.proto` và `shop/v2/kv.proto`, thì phân biệt theo đường dẫn
+  module `shop.v2.kv_pb2_grpc`), import path của Go khớp `option go_package`.
+  Không lần được thì theo tên service, khi tên đó chỉ có ở một package; có ở
+  nhiều package thì báo "không ghép được" (`--strict` tính). Module sinh ra
+  mà repo không có file `.proto` cùng tên (thư viện ngoài, hay `.proto` để ở
+  repo khác) thì ghép theo tên trần: client và server cùng dùng nó vẫn ghép
+  với nhau (server `VllmEngine` của vllm), nhưng không bị ghép nhầm vào service
+  cùng tên của repo. Go thì phải có `.proto`, vì `NewXClient` cũng là tên hàm
+  thường.
+- **Nhiều server.** Một service có thể có nhiều component phục vụ (proxy của
+  etcd cũng đăng ký `KV`): cạnh tới mọi component đó.
+- **Không tính.** Server đăng ký trong file test hay mock: `*_test.go`,
+  `test_*.py`, `*_test.py`, `conftest.py`, và thư mục `test`, `tests`,
+  `testdata`, `testutil(s)`, `mock`, `mocks`, `grpctesting`. Đó là server giả.
+  Lời gọi tới service mà mọi server đều là server giả thì được báo "không ghép
+  được" (không biết service chạy thật ở đâu). Gateway
+  (`RegisterXHandlerServer`), health, reflection. Lời gọi tới service không có
+  server nào trong repo (collector của OpenTelemetry, API của Google) được
+  coi như import gói ngoài: không vi phạm, không cảnh báo.
+- **Server bị giấu.** Có chỗ cài đặt server (lớp kế thừa `KVServicer`, struct
+  nhúng `UnimplementedKVServer`) mà không thấy chỗ đăng ký nào thì báo "không
+  ghép được": phía server đang được đăng ký theo cách archctl không đọc, và
+  mọi cạnh tới nó sẽ biến mất.
+- **Không thấy.** `getattr(module, "KVStub")`, tên dựng lúc chạy, reflection,
+  mã trong f-string, gọi wrapper nằm ngoài package sinh ra mà không nhắc tên
+  stub.
+- **Hook.** `archctl check client.py` vẫn thấy cạnh: khi file đổi có lời gọi
+  hay chỗ đăng ký gRPC, archctl tìm phía bên kia trong repo một lượt: đọc file
+  Python, Go (tối đa 64 MB cho cả lượt), chỉ lex file có chứa tên cần tìm.
+  Hàm `NewXClient` không phải gRPC (không có `.proto`) thì không đi tìm. Hook
+  với file compose không báo `link` là "không thấy" khi giữa hai service có
+  `allow` (lời gọi gRPC có thể nằm ở file ngoài tập đang xét); lần kiểm cả
+  repo thì báo đủ.
+- **`init --from-code`** sinh `allow` cho cạnh gRPC (một mục riêng trong luật)
+  và `link` giữa service. **`scan`** in chỗ gọi, chỗ đăng ký, và package,
+  service, rpc của từng file `.proto`.
+
 ## Không đọc
 
 - Helm template, overlay của Kustomize, Terraform: không render. Ai cần thì
   khai `verify` gọi `helm template`, `terraform graph`, kube-linter, checkov.
-- Manifest Kubernetes và cạnh gRPC từ `.proto`: đợt sau.
+- Manifest Kubernetes: đợt sau. gRPC từ TypeScript, Rust, Java: đợt sau.
 - Cạnh chỉ có lúc chạy: URL ghép trong mã, service discovery, biến lấy từ
   secret store, `network_mode`.
 

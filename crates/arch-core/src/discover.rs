@@ -43,6 +43,9 @@ pub struct Discovery {
     pub components: Vec<(String, String)>,
     /// Quan hệ phụ thuộc quan sát được trong mã.
     pub edges: Vec<(String, String)>,
+    /// Lời gọi gRPC giữa hai component. Tách khỏi `edges`: phía server chạy ở
+    /// process khác, nên cạnh này không kéo component vào `runs`.
+    pub rpc_edges: Vec<(String, String)>,
     /// Thư mục không thành component vì đã quá số lượng, kèm số file.
     pub skipped: Vec<(String, usize)>,
     pub files: usize,
@@ -125,6 +128,7 @@ pub fn discover(root: &Path, ignores: &[String]) -> Discovery {
     out.components.sort();
 
     out.edges = observe_edges(root, &scans, &owners);
+    out.rpc_edges = observe_rpc(root, ignores, &scans, &owners);
     out.unmapped = files.iter().filter(|f| owners.of_file(f).is_none()).count();
     let deploy_files = check::deploy_files(root, ignores);
     if !deploy_files.is_empty() {
@@ -227,6 +231,19 @@ fn discover_services(root: &Path, deploy_files: &[String], owners: &Owners, out:
             }
         }
     }
+    // Lời gọi gRPC giữa hai service, theo đúng điều `check` đòi: với mỗi
+    // service chạy phía client, nếu không service nào chạy phía server là
+    // chính nó thì cần `link` tới một service chạy phía server.
+    for (client, server) in &out.rpc_edges {
+        let running = |c: &str| out.services.iter().filter(|s| s.runs.iter().any(|r| r == c)).map(|s| s.name.clone()).collect::<Vec<_>>();
+        let targets = running(server);
+        let Some(first) = targets.first() else { continue };
+        for s in running(client) {
+            if !targets.contains(&s) && !links.get(&s).is_some_and(|t| targets.iter().any(|x| t.contains(x))) {
+                links.entry(s).or_default().insert(first.clone());
+            }
+        }
+    }
     out.links = links.into_iter().map(|(from, to)| (from, to.into_iter().collect())).collect();
 }
 
@@ -306,6 +323,8 @@ struct Scanned {
     /// Import có thể đang nạp module mở rộng; cái nào thành lời gọi thì tuỳ
     /// những file khác — xem [`crate::resolve::settle_natives`].
     natives: Vec<NativeImport>,
+    /// Chỗ gọi stub và chỗ đăng ký server gRPC.
+    rpc: crate::scan::grpc::Rpc,
 }
 
 impl Scanned {
@@ -346,6 +365,7 @@ fn scan_files(root: &Path, files: &[String], wanted: impl Fn(&str) -> bool) -> V
                 .filter_map(|c| resolver.bind_extension(file, &c.symbol))
                 .collect(),
             natives: Vec::new(),
+            rpc: scan.rpc,
         };
         for import in scan.imports {
             // Cùng các đích như `check` thấy.
@@ -491,6 +511,45 @@ fn observe_edges(root: &Path, scans: &[Scanned], owners: &Owners) -> Vec<(String
     for (from, key) in ffi_calls {
         if let Some(to) = crate::scan::foreign::provider(&ffi_provides, &key).filter(|o| *o != from) {
             edges.push((from.clone(), to.clone()));
+        }
+    }
+    edges.sort();
+    edges.dedup();
+    edges
+}
+
+/// Lời gọi gRPC giữa hai component, ghép như `check`: theo `package.Service`
+/// đọc từ `.proto`, mọi component đăng ký server cho service đó, bỏ tên nhập
+/// nhằng, bỏ lời gọi tới service không có server trong repo.
+fn observe_rpc(root: &Path, ignores: &[String], scans: &[Scanned], owners: &Owners) -> Vec<(String, String)> {
+    use crate::scan::grpc::{Key, ProtoIndex, read_proto};
+    if scans.iter().all(|s| s.rpc.is_empty()) {
+        return Vec::new();
+    }
+    let mut index = ProtoIndex::default();
+    for p in check::proto_files(root, ignores) {
+        if let Ok(text) = crate::scan::deploy::read_in(root, &p, check::MAX_FILE_BYTES) {
+            index.add(&p, &read_proto(&text));
+        }
+    }
+    let mut servers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let real = |s: &&Scanned| !crate::scan::grpc::generated_stub_path(&s.file);
+    for s in scans.iter().filter(real).filter(|s| !crate::scan::grpc::fake_server_path(&s.file)) {
+        let Some(from) = owners.of_file(&s.file) else { continue };
+        for site in &s.rpc.serves {
+            if let Key::Found(key) = index.key(site) {
+                servers.entry(key).or_default().insert(from.clone());
+            }
+        }
+    }
+    let mut edges = Vec::new();
+    for s in scans.iter().filter(real) {
+        let Some(from) = owners.of_file(&s.file) else { continue };
+        for site in &s.rpc.calls {
+            let Key::Found(key) = index.key(site) else { continue };
+            for to in servers.get(&key).into_iter().flatten().filter(|t| *t != from) {
+                edges.push((from.clone(), to.clone()));
+            }
         }
     }
     edges.sort();
@@ -820,6 +879,14 @@ pub fn render(d: &Discovery, date: &str) -> String {
         out.push_str("\n# Quan hệ quan sát được trong mã. Cái nào không nên tồn tại thì xoá.\n");
         let width = d.edges.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
         for (from, to) in &d.edges {
+            let _ = writeln!(out, "allow {from:<width$} -> {to}   @ai #draft");
+        }
+    }
+    let rpc: Vec<&(String, String)> = d.rpc_edges.iter().filter(|e| !d.edges.contains(e)).collect();
+    if !rpc.is_empty() {
+        out.push_str("\n# Lời gọi gRPC: client gọi stub, server đăng ký service cùng `.proto`.\n");
+        let width = rpc.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
+        for (from, to) in rpc {
             let _ = writeln!(out, "allow {from:<width$} -> {to}   @ai #draft");
         }
     }
