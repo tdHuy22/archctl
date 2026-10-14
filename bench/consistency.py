@@ -58,7 +58,10 @@ RPC = {
     # Online Boutique: client Python `demo_pb2_grpc.ProductCatalogServiceStub`
     # ↔ server Go `pb.RegisterProductCatalogServiceServer`, và ngược lại client
     # Go `pb.NewEmailServiceClient` ↔ server Python `add_EmailServiceServicer_to_server`.
-    "microservices-demo": [("Recommendationservice", "Productcatalogservice"), ("Checkoutservice", "Emailservice")],
+    # Server Node nạp `.proto` lúc chạy: `server.addService(shopProto.CurrencyService.service, …)`
+    # ↔ client Go `pb.NewCurrencyServiceClient`.
+    "microservices-demo": [("Recommendationservice", "Productcatalogservice"), ("Checkoutservice", "Emailservice"),
+                           ("Checkoutservice", "Currencyservice"), ("Checkoutservice", "Paymentservice")],
 }
 
 

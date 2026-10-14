@@ -204,9 +204,19 @@ server, rồi ghép theo tên đầy đủ `package.Service` đọc từ `.proto
 | --- | --- | --- |
 | Python | `XStub` từ module `*_pb2_grpc` (import tuyệt đối hay tương đối, `as`, `import *`, kể cả gán vào biến rồi gọi); `ch.unary_unary("/pkg.X/M")` | `add_XServicer_to_server` (kể cả gán vào biến); `method_handlers_generic_handler("pkg.X", …)` |
 | Go | `pb.NewXClient(conn)` (`pb` là alias import, tên package trong `go_package`, hay gọi không tiền tố trong package sinh ra hoặc qua dot-import); `conn.Invoke(ctx, "/pkg.X/M", …)` | `pb.RegisterXServer(s, impl)`; `s.RegisterService(&pb.X_ServiceDesc, impl)` |
+| Node (JS, TS) | `new proto.pkg.X(addr, creds)` khi nạp `.proto` lúc chạy qua `@grpc/proto-loader`; `new svc.XClient(addr, creds)` của mã sinh grpc-tools | `server.addService(proto.pkg.X.service, impl)`; `server.addService(svc.XService, impl)` |
+| Rust (tonic) | `x_client::XClient`, kể cả `use pb::x_client::{XClient}` rồi `XClient::connect` | `x_server::XServer`, kể cả `use pb::x_server::{X, XServer}` rồi `XServer::new`; `impl X for S` với `X` lấy từ `x_server` là chỗ cài đặt |
 
 Chỗ nhắc tới cũng tính, không chỉ chỗ gọi: `S = kv_pb2_grpc.KVStub` rồi `S(ch)`
-vẫn là lời gọi. `XStub` không rõ module (re-export qua `__init__.py`,
+vẫn là lời gọi. Node nạp `.proto` lúc chạy nên không lần được module: như Go,
+chỉ tính khi một `.proto` trong repo khai service đó; chuỗi thuộc tính
+(`proto.shop.v1.X`) là đuôi của package và thu hẹp theo nó, vì gốc chuỗi có thể
+là biến gán giữa chừng (`const shop = load(def).shop`). Một chữ trần chỉ tính
+khi có đuôi `Client` (`new Foo()` là lớp thường). tonic viết tên service theo UpperCamel
+(`KV` thành `KvServer`), nên Rust ghép không phân biệt hoa thường, và module
+phải cùng tên với struct (`kv_server::KvServer`). File sinh ra
+(`*_grpc_pb.js`; Rust khai `mod x_server` và dùng `tonic::codegen`) không phải
+chỗ dùng. Server trong `#[cfg(test)] mod` của Rust là server giả. `XStub` không rõ module (re-export qua `__init__.py`,
 `self.pb.KVStub`) chỉ tính khi một `.proto` trong repo khai service `X`: không
 thì `QuantStub()` của PyTorch cũng thành gRPC.
 
@@ -229,8 +239,9 @@ thì `QuantStub()` của PyTorch cũng thành gRPC.
 - **Nhiều server.** Một service có thể có nhiều component phục vụ (proxy của
   etcd cũng đăng ký `KV`): cạnh tới mọi component đó.
 - **Không tính.** Server đăng ký trong file test hay mock: `*_test.go`,
-  `test_*.py`, `*_test.py`, `conftest.py`, và thư mục `test`, `tests`,
-  `testdata`, `testutil(s)`, `mock`, `mocks`, `grpctesting`. Đó là server giả.
+  `test_*.py`, `*_test.py`, `conftest.py`, `*.test.js`, `*.spec.ts`,
+  `tests.rs`, `*_test.rs`, và thư mục `test`, `tests`, `testdata`,
+  `testutil(s)`, `mock`, `mocks`, `grpctesting`, `__tests__`. Đó là server giả.
   Lời gọi tới service mà mọi server đều là server giả thì được báo "không ghép
   được" (không biết service chạy thật ở đâu). Gateway
   (`RegisterXHandlerServer`), health, reflection. Lời gọi tới service không có
@@ -245,7 +256,8 @@ thì `QuantStub()` của PyTorch cũng thành gRPC.
   stub.
 - **Hook.** `archctl check client.py` vẫn thấy cạnh: khi file đổi có lời gọi
   hay chỗ đăng ký gRPC, archctl tìm phía bên kia trong repo một lượt: đọc file
-  Python, Go (tối đa 64 MB cho cả lượt), chỉ lex file có chứa tên cần tìm.
+  Python, Go, TS/JS, Rust (tối đa 64 MB cho cả lượt), chỉ lex file có chứa tên
+  cần tìm (so không phân biệt hoa thường).
   Hàm `NewXClient` không phải gRPC (không có `.proto`) thì không đi tìm. Hook
   với file compose không báo `link` là "không thấy" khi giữa hai service có
   `allow` (lời gọi gRPC có thể nằm ở file ngoài tập đang xét); lần kiểm cả
@@ -408,7 +420,9 @@ trường của frontend trỏ tới nó: `check` báo đúng chỗ lệch đó.
 
 - Helm template, overlay của Kustomize, Terraform: không render. Ai cần thì
   khai `verify` gọi `helm template`, `terraform graph`, kube-linter, checkov.
-- Ingress, Istio: đợt sau. gRPC từ TypeScript, Rust, Java: đợt sau.
+- Ingress, Istio: đợt sau. gRPC của Java, C#, C++: đợt sau. Node qua
+  `makeGenericClientConstructor`, nice-grpc, ts-proto; client Node gán vào biến
+  rồi mới `new`.
 - Cổng trong NetworkPolicy, policy của CNI riêng (Cilium, Calico).
 - `$(VAR)` trong lệnh (`command`, `args`), và trong env khi biến lấy từ
   `fieldRef` hay Secret: không thay, không đoán.

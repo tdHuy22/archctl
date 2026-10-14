@@ -682,12 +682,13 @@ fn other_side(
     report: &mut Report,
 ) {
     // Server của service được gọi, hay được cài đặt ở đây mà đăng ký ở file khác.
-    let want_servers: HashSet<String> = calls.iter().chain(impls).map(|c| c.site.service.clone()).collect();
-    let want_callers: HashSet<String> = serves.iter().map(|s| s.site.service.clone()).collect();
+    // So tên không phân biệt hoa thường: Rust viết service `KV` thành `Kv`.
+    let want_servers: HashSet<String> = calls.iter().chain(impls).map(|c| grpc::norm(&c.site.service)).collect();
+    let want_callers: HashSet<String> = serves.iter().map(|s| grpc::norm(&s.site.service)).collect();
     let scanned: HashSet<&str> = files.iter().map(String::as_str).collect();
     let mut budget = MAX_RPC_SEARCH_BYTES;
     for f in source_files(root, ignores) {
-        let Some(lang) = Lang::for_path(&f).filter(|l| matches!(l, Lang::Python | Lang::Go)) else { continue };
+        let Some(lang) = Lang::for_path(&f).filter(|l| !matches!(l, Lang::C)) else { continue };
         if scanned.contains(f.as_str()) {
             continue;
         }
@@ -709,8 +710,8 @@ fn other_side(
         }
         let found = grpc::scan(&lang.tokens(&scan::source_view(&f, &text)), lang);
         let site = |s: &grpc::Site| RpcSite { from: from.clone(), file: f.clone(), lang, site: s.clone() };
-        serves.extend(found.serves.iter().filter(|s| want_servers.contains(&s.service)).map(site));
-        calls.extend(found.calls.iter().filter(|s| want_callers.contains(&s.service)).map(site));
+        serves.extend(found.serves.iter().filter(|s| want_servers.contains(&grpc::norm(&s.service))).map(site));
+        calls.extend(found.calls.iter().filter(|s| want_callers.contains(&grpc::norm(&s.service))).map(site));
     }
 }
 
@@ -731,13 +732,25 @@ fn may_call(doc: &Document, a: &str, b: &str) -> bool {
 fn mentions(text: &str, servers: &HashSet<String>, callers: &HashSet<String>) -> bool {
     let generic = ["generic_handler", "unary_", "stream_", "Invoke", "NewStream"].iter().any(|g| text.contains(g));
     text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).any(|w| {
-        let cut = |p: &str, s: &str| w.strip_prefix(p).and_then(|r| r.strip_suffix(s));
-        [cut("add_", "Servicer_to_server"), cut("Register", "Server"), cut("", "_ServiceDesc")]
-            .into_iter()
-            .flatten()
-            .any(|x| servers.contains(x))
-            || [cut("", "Stub"), cut("New", "Client")].into_iter().flatten().any(|x| callers.contains(x))
-            || (generic && (servers.contains(w) || callers.contains(w)))
+        let cut = |p: &str, s: &str| w.strip_prefix(p).and_then(|r| r.strip_suffix(s)).map(grpc::norm);
+        // Python, Go, mã sinh của Node (`XService`), tonic (`XServer`); Node
+        // nạp `.proto` lúc chạy thì tên service đứng một mình.
+        [
+            cut("add_", "Servicer_to_server"),
+            cut("Register", "Server"),
+            cut("", "_ServiceDesc"),
+            cut("", "Server"),
+            cut("", "Service"),
+            Some(grpc::norm(w)),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|x| servers.contains(&x))
+            || [cut("", "Stub"), cut("New", "Client"), cut("", "Client"), Some(grpc::norm(w))]
+                .into_iter()
+                .flatten()
+                .any(|x| callers.contains(&x))
+            || (generic && (servers.contains(&grpc::norm(w)) || callers.contains(&grpc::norm(w))))
     })
 }
 

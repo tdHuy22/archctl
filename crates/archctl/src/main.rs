@@ -1106,6 +1106,8 @@ fn cmd_scan(args: &[String]) -> ExitCode {
                             scan::grpc::Origin::Stem(v) => ("proto", v.as_str()),
                             scan::grpc::Origin::GoPackage(v) => ("goPackage", v.as_str()),
                             scan::grpc::Origin::GoName(v) => ("goName", v.as_str()),
+                            scan::grpc::Origin::Rust => ("rust", ""),
+                            scan::grpc::Origin::Suffix(v) => ("packageSuffix", v.as_str()),
                         };
                         format!(
                             r#"{{"line":{},"service":{},"origin":{},"from":{},"shown":{}}}"#,
@@ -1157,6 +1159,8 @@ fn origin_text(origin: &arch_core::scan::grpc::Origin) -> String {
         arch_core::scan::grpc::Origin::Stem(s) => format!(" (từ {s}.proto)"),
         arch_core::scan::grpc::Origin::GoPackage(p) => format!(" (từ {p})"),
         arch_core::scan::grpc::Origin::GoName(p) => format!(" (từ package {p}?)"),
+        arch_core::scan::grpc::Origin::Rust => " (tonic, so tên không phân biệt hoa thường)".to_string(),
+        arch_core::scan::grpc::Origin::Suffix(p) => format!(" (package …{p})"),
     }
 }
 

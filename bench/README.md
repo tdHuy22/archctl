@@ -230,8 +230,8 @@ báo thêm một file triển khai không đọc được. `--deploy-repo exampl
 thêm bốn kiểu ở dữ kiện compose và Dockerfile của `scan --json` (mất một
 `depends_on`, lệch dòng một biến môi trường, thêm một tên máy giả, sửa một chỉ
 thị Dockerfile), đối chiếu bằng PyYAML nên cần mạng. Ba kiểu đầu chạy lại trên
-microservices-demo, nơi `link` và `runs` đến từ manifest Kubernetes, cộng hai
-kiểu ở NetworkPolicy (`check` giấu vi phạm do policy cho phép, giấu cảnh báo
+microservices-demo, nơi `link` và `runs` đến từ manifest Kubernetes, cùng kiểu
+`rpc` cho cạnh gRPC khác ngôn ngữ, cộng hai kiểu ở NetworkPolicy (`check` giấu vi phạm do policy cho phép, giấu cảnh báo
 `link` bị chặn). `--k8s-repo microservices-demo` thêm sáu kiểu ở dữ kiện
 manifest, cạnh qua Service và NetworkPolicy (mất một biến môi trường, lệch dòng
 một workload, mất một cạnh, đổi đích một cạnh, mất một peer của policy, đổi một
@@ -239,6 +239,10 @@ workload bị cô lập thành không).
 
 Kiểu `rpc` xoá cạnh gRPC bắt buộc (`consistency.RPC`: etcd `Client -> Server`,
 `Api -> Server`) khỏi cả luật `init` sinh ra lẫn vi phạm `check` báo.
+`consistency.RPC` còn đòi bốn cạnh gRPC khác ngôn ngữ của microservices-demo:
+Python → Go (`Recommendationservice -> Productcatalogservice`), Go → Python
+(`Checkoutservice -> Emailservice`), Go → Node (`Checkoutservice ->
+Currencyservice`, `Checkoutservice -> Paymentservice`).
 `--proto-repo vllm` thêm hai kiểu ở dữ kiện `.proto` của `scan --json` (mất một
 `rpc`, lệch dòng một `service`), đối chiếu bằng `protoc` của grpcio-tools nên
 cần mạng. CI chạy bước này sau bộ đo, với `--rust-repo ripgrep

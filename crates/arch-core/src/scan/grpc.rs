@@ -141,6 +141,15 @@ pub enum Origin {
     /// generic, `"shop.v1.KV"` của `method_handlers_generic_handler`. Giữ
     /// package.
     Package(String),
+    /// Node: chuỗi thuộc tính sau đối tượng nạp `.proto` (`shop.v1` trong
+    /// `new p.shop.v1.KV`). Gốc của chuỗi có thể là biến gán giữa chừng
+    /// (`const shop = load(def).shop`), nên chuỗi chỉ là đuôi của package:
+    /// khớp package trong `.proto` bằng nó hay kết thúc bằng `.` + nó.
+    Suffix(String),
+    /// Rust (tonic): tên struct viết theo UpperCamel của tên service
+    /// (`KV` → `KvServer`), ghép không phân biệt hoa thường với `.proto`. Như
+    /// Go, chỉ tin khi một `.proto` trong repo khai service đó.
+    Rust,
 }
 
 /// Một chỗ gọi stub hay đăng ký server.
@@ -189,15 +198,228 @@ fn infrastructure(module: &str, service: &str) -> bool {
 /// và chuỗi `"/pkg.KV/Get"`, không phải chỗ dùng.
 pub fn generated_stub_path(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
-    name.ends_with("_pb2_grpc.py") || name.ends_with("_grpc.pb.go")
+    name.ends_with("_pb2_grpc.py")
+        || name.ends_with("_grpc.pb.go")
+        || name.ends_with("_grpc_pb.js")
+        || name.ends_with("_grpc_pb.ts")
+        || name.ends_with("_grpc_pb.d.ts")
 }
 
 pub fn scan(toks: &[Token], lang: Lang) -> Rpc {
     match lang {
         Lang::Python => python(toks),
         Lang::Go => go(toks),
-        _ => Rpc::default(),
+        Lang::TypeScript => node(toks),
+        Lang::Rust => rust(toks),
+        Lang::C => Rpc::default(),
     }
+}
+
+/// Tên để so không phân biệt hoa thường và gạch dưới: `KV`, `Kv`, `kv`.
+pub fn norm(service: &str) -> String {
+    service.chars().filter(|c| *c != '_').flat_map(char::to_lowercase).collect()
+}
+
+/// Service hạ tầng của gRPC theo tên: health check, reflection.
+fn infrastructure_name(service: &str) -> bool {
+    matches!(service, "Health" | "ServerReflection" | "Channelz")
+}
+
+/// Node: `@grpc/grpc-js` nạp `.proto` lúc chạy qua `@grpc/proto-loader`
+/// (`server.addService(proto.pkg.X.service, impl)`, `new proto.pkg.X(addr,
+/// creds)`), hay mã sinh của grpc-tools (`addService(svc.XService, impl)`,
+/// `new svc.XClient(addr, creds)`). Tên đi qua đối tượng nạp lúc chạy nên
+/// không lần được về module; như Go, chỉ tin khi `.proto` trong repo khai
+/// service đó; chuỗi thuộc tính (`proto.shop.v1.KV`) thu hẹp theo package.
+fn node(toks: &[Token]) -> Rpc {
+    let word = |i: usize| match toks.get(i).map(|t| &t.tok) {
+        Some(Tok::Word(w)) => Some(w.as_str()),
+        _ => None,
+    };
+    let punct = |i: usize, c: char| matches!(toks.get(i).map(|t| &t.tok), Some(Tok::Punct(p)) if *p == c);
+    // `a.b.C` bắt đầu ở `start`: các chữ, và chỉ số của chữ cuối.
+    let chain = |start: usize| -> (Vec<&str>, usize) {
+        let mut out = Vec::new();
+        let mut k = start;
+        while let Some(w) = word(k) {
+            out.push(w);
+            if punct(k + 1, '.') && word(k + 2).is_some() {
+                k += 2;
+            } else {
+                break;
+            }
+        }
+        (out, k)
+    };
+    let upper = |s: &str| s.chars().next().is_some_and(char::is_uppercase);
+    let mut out = Rpc::default();
+    for (i, tok) in toks.iter().enumerate() {
+        match word(i) {
+            Some("addService") if punct(i + 1, '(') => {
+                let (c, _) = chain(i + 2);
+                let n = c.len();
+                // `proto.pkg.X.service` (nạp lúc chạy) hay `svc.XService` (mã sinh).
+                let (service, pkg) = if n >= 2 && c[n - 1] == "service" && upper(c[n - 2]) {
+                    (c[n - 2].to_string(), (n >= 4).then(|| c[1..n - 2].join(".")))
+                } else if let Some(s) = c.last().and_then(|w| w.strip_suffix("Service")).filter(|s| upper(s)) {
+                    (s.to_string(), None)
+                } else {
+                    continue;
+                };
+                if infrastructure_name(&service) {
+                    continue;
+                }
+                let origin = pkg.map_or(Origin::Unknown, Origin::Suffix);
+                out.serves.push(Site { service, origin, line: tok.line, shown: format!("addService({})", c.join(".")) });
+            }
+            Some("new") => {
+                let (c, last) = chain(i + 1);
+                let n = c.len();
+                if n == 0 || !punct(last + 1, '(') {
+                    continue;
+                }
+                // `new svc.XClient(…)`, `new XClient(…)` (mã sinh), hay
+                // `new proto.pkg.X(…)` (nạp lúc chạy; một chữ trần thì không:
+                // `new Foo()` là lớp thường).
+                let (service, pkg) = if let Some(s) = c[n - 1].strip_suffix("Client").filter(|s| upper(s)) {
+                    (s.to_string(), None)
+                } else if n >= 2 && upper(c[n - 1]) {
+                    (c[n - 1].to_string(), (n >= 3).then(|| c[1..n - 1].join(".")))
+                } else {
+                    continue;
+                };
+                if infrastructure_name(&service) {
+                    continue;
+                }
+                let origin = pkg.map_or(Origin::Unknown, Origin::Suffix);
+                out.calls.push(Site { service, origin, line: tok.line, shown: format!("new {}", c.join(".")) });
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Rust (tonic): module sinh ra `x_server`, `x_client` theo snake_case của tên
+/// service, struct `XServer`, `XClient` theo UpperCamel. Tính cả chỗ nhắc tới
+/// (`use pb::kv_server::KvServer`, `use pb::kv_server::{Kv, KvServer}` rồi
+/// `KvServer::new`), như Python, Go. `impl Kv for S` với `Kv` lấy từ
+/// `kv_server` là chỗ cài đặt server. Mã trong `#[cfg(test)] mod` là server
+/// giả. File sinh ra (khai `mod x_server` và dùng `tonic::codegen`) chứa định
+/// nghĩa, không phải chỗ dùng.
+fn rust(toks: &[Token]) -> Rpc {
+    let word = |i: usize| match toks.get(i).map(|t| &t.tok) {
+        Some(Tok::Word(w)) => Some(w.as_str()),
+        _ => None,
+    };
+    let punct = |i: usize, c: char| matches!(toks.get(i).map(|t| &t.tok), Some(Tok::Punct(p)) if *p == c);
+    // Lexer gộp `a::b::C` thành một từ.
+    let segs = |i: usize| word(i).map(|w| w.split("::").filter(|s| !s.is_empty()).collect::<Vec<_>>()).unwrap_or_default();
+    let generated = (0..toks.len()).any(|i| segs(i).windows(2).any(|w| w == ["tonic", "codegen"]))
+        && (0..toks.len()).any(|i| {
+            word(i) == Some("mod") && word(i + 1).is_some_and(|m| m.ends_with("_server") || m.ends_with("_client"))
+        });
+    if generated {
+        return Rpc::default();
+    }
+    // Token nằm trong `#[cfg(test)] mod … { … }`.
+    let mut in_test = vec![false; toks.len()];
+    let mut i = 0;
+    while i < toks.len() {
+        let attr = punct(i, '#') && punct(i + 1, '[') && word(i + 2) == Some("cfg") && punct(i + 3, '(') && word(i + 4) == Some("test");
+        if !attr {
+            i += 1;
+            continue;
+        }
+        let Some(open) = (i..toks.len().min(i + 64)).find(|&j| punct(j, '{')) else { break };
+        if !(i..open).any(|j| word(j) == Some("mod")) {
+            i = open;
+            continue;
+        }
+        let mut depth = 0usize;
+        let mut j = open;
+        while j < toks.len() {
+            if punct(j, '{') {
+                depth += 1;
+            } else if punct(j, '}') {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            in_test[j] = true;
+            j += 1;
+        }
+        i = j + 1;
+    }
+    // Module và struct phải cùng tên service: `kv_server::KvServer`.
+    let same = |prefix: &str, service: &str| norm(prefix) == norm(service);
+    // Tên mà `use` lấy từ `x_server`, `x_client`: tên trong file → (vai, service).
+    #[derive(Clone, Copy, PartialEq)]
+    enum Role {
+        Serve,
+        Implement,
+        Call,
+    }
+    let classify = |module: &str, item: &str| -> Option<(Role, String)> {
+        if let Some(prefix) = module.strip_suffix("_server") {
+            if let Some(service) = item.strip_suffix("Server").filter(|s| same(prefix, s)) {
+                return Some((Role::Serve, service.to_string()));
+            }
+            if same(prefix, item) {
+                return Some((Role::Implement, item.to_string()));
+            }
+        } else if let Some(prefix) = module.strip_suffix("_client")
+            && let Some(service) = item.strip_suffix("Client").filter(|s| same(prefix, s))
+        {
+            return Some((Role::Call, service.to_string()));
+        }
+        None
+    };
+    let mut imported: HashMap<String, (Role, String)> = HashMap::new();
+    for (name, path) in super::rustlang::uses(toks) {
+        let parts: Vec<&str> = path.split("::").collect();
+        if let [.., module, item] = parts.as_slice()
+            && let Some(found) = classify(module, item)
+        {
+            imported.insert(name, found);
+        }
+    }
+    let mut out = Rpc::default();
+    for (i, tok) in toks.iter().enumerate() {
+        if in_test[i] {
+            continue;
+        }
+        let parts = segs(i);
+        let mut found: Vec<(Role, String, String)> = Vec::new();
+        for pair in parts.windows(2) {
+            if let Some((role, service)) = classify(pair[0], pair[1]) {
+                // `impl pb::kv_server::Kv for S`: chỉ khi `Kv` là đoạn cuối.
+                if role != Role::Implement || (parts.last() == Some(&pair[1]) && word(i + 1) == Some("for")) {
+                    found.push((role, service, format!("{}::{}", pair[0], pair[1])));
+                }
+            }
+        }
+        // Tên đã `use`: `KvServer::new(…)`, `impl Kv for S`.
+        if let Some(first) = parts.first()
+            && let Some((role, service)) = imported.get(*first)
+            && (*role != Role::Implement || (parts.len() == 1 && word(i + 1) == Some("for")))
+        {
+            found.push((*role, service.clone(), (*first).to_string()));
+        }
+        for (role, service, shown) in found {
+            if infrastructure_name(&service) {
+                continue;
+            }
+            let site = Site { service, origin: Origin::Rust, line: tok.line, shown };
+            match role {
+                Role::Serve => out.serves.push(site),
+                Role::Implement => out.implements.push(site),
+                Role::Call => out.calls.push(site),
+            }
+        }
+    }
+    out
 }
 
 /// `rpc_pb2_grpc` → `rpc`.
@@ -544,12 +766,16 @@ fn go(toks: &[Token]) -> Rpc {
 pub fn fake_server_path(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
     let dirs = path.rsplit_once('/').map_or("", |(d, _)| d);
+    let script = |n: &str| [".js", ".ts", ".mjs", ".cjs"].iter().any(|e| n.ends_with(e));
     name.ends_with("_test.go")
         || name.starts_with("test_")
         || name.ends_with("_test.py")
         || name == "conftest.py"
+        || name == "tests.rs"
+        || name.ends_with("_test.rs")
+        || (script(name) && (name.contains(".test.") || name.contains(".spec.")))
         || dirs.split('/').any(|d| {
-            matches!(d, "test" | "tests" | "testdata" | "testutil" | "testutils" | "mock" | "mocks" | "grpctesting")
+            matches!(d, "test" | "tests" | "testdata" | "testutil" | "testutils" | "mock" | "mocks" | "grpctesting" | "__tests__")
         })
 }
 
@@ -562,6 +788,9 @@ const MAX_SUFFIX_CANDIDATES: usize = 64;
 #[derive(Debug, Clone, Default)]
 pub struct ProtoIndex {
     by_service: HashMap<String, Known>,
+    /// Tên service không phân biệt hoa thường → tên trong `.proto`: Rust viết
+    /// `KV` thành `Kv`.
+    by_norm: HashMap<String, BTreeSet<String>>,
     /// Tên mọi file `.proto` (không đuôi), kể cả file không có service.
     stems: std::collections::HashSet<String>,
     count: usize,
@@ -604,6 +833,7 @@ impl ProtoIndex {
                 return;
             }
             self.count += 1;
+            self.by_norm.entry(norm(&s.name)).or_default().insert(s.name.clone());
             let k = self.by_service.entry(s.name.clone()).or_default();
             k.packages.insert(proto.package.clone());
             k.by_stem.entry(stem.clone()).or_default().push((dotted.clone(), proto.package.clone()));
@@ -625,6 +855,14 @@ impl ProtoIndex {
     }
 
     pub fn key(&self, site: &Site) -> Key {
+        if site.origin == Origin::Rust {
+            let names = self.by_norm.get(&norm(&site.service)).map(|n| n.iter().collect::<Vec<_>>()).unwrap_or_default();
+            return match names.as_slice() {
+                [] => Key::NotRpc,
+                [one] => self.key(&Site { service: (*one).clone(), origin: Origin::Unknown, ..site.clone() }),
+                many => Key::Ambiguous(many.iter().flat_map(|n| self.by_service[*n].packages.iter().map(|p| Self::full(p, n))).collect()),
+            };
+        }
         let service = site.service.as_str();
         let empty = Known::default();
         let known = self.by_service.get(service).unwrap_or(&empty);
@@ -636,6 +874,16 @@ impl ProtoIndex {
         };
         match &site.origin {
             Origin::Package(pkg) => Key::Found(Self::full(pkg, service)),
+            Origin::Suffix(tail) => {
+                let dotted = format!(".{tail}");
+                let hits: BTreeSet<String> =
+                    known.packages.iter().filter(|p| *p == tail || p.ends_with(&dotted)).cloned().collect();
+                match hits.len() {
+                    0 => by_name(Key::NotRpc),
+                    1 => Key::Found(Self::full(hits.first().map_or("", String::as_str), service)),
+                    _ => Key::Ambiguous(hits.iter().map(|p| Self::full(p, service)).collect()),
+                }
+            }
             Origin::GoName(name) => {
                 known.by_go_name.get(name).and_then(|set| Self::one(set, service)).unwrap_or(Key::NotRpc)
             }
@@ -643,7 +891,8 @@ impl ProtoIndex {
                 Some(k) => k,
                 None => by_name(Key::NotRpc),
             },
-            Origin::Unknown => by_name(Key::NotRpc),
+            // `Rust` đã đổi về tên trong `.proto` ở trên.
+            Origin::Unknown | Origin::Rust => by_name(Key::NotRpc),
             Origin::Loose => by_name(Key::Found(Self::full("", service))),
             Origin::Stem(module) => {
                 let last = module.rsplit('.').next().unwrap_or(module);

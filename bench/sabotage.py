@@ -128,6 +128,8 @@ K8S_BENCH_MODES = {m: DEPLOY_MODES[m] for m in ("deploy-gen", "deploy-link", "de
 K8S_BENCH_MODES |= {
     "deploy-policy": "mà check không báo policy",
     "deploy-blocked": "thiếu cảnh báo NetworkPolicy",
+    # cạnh gRPC khác ngôn ngữ: Python ↔ Go, Go → Node
+    "rpc": RPC_MODES["rpc"],
 }
 # phá dữ kiện manifest và cạnh qua Service trong `scan --json` → dòng `oracle.py` phải in ra
 K8S_ORACLE_MODES = {

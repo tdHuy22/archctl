@@ -9,7 +9,21 @@ Cập nhật 2026-10-14.
 
 ### Đã xong, có bằng chứng
 
-- **NetworkPolicy đối chiếu `link`, việc A của đợt 3** (2026-10-14, chưa commit;
+- **gRPC của Node và Rust, việc B của đợt 3** (2026-10-14, commit ngay sau `c5ae95d`). Node:
+  `addService(proto.X.service)`, `new proto.X(addr)` (nạp `.proto` lúc chạy) và mã
+  sinh `XService`/`XClient`; chuỗi thuộc tính là đuôi package (`Origin::Suffix`).
+  Rust/tonic: `x_server::XServer`, `x_client::XClient`, cả `use` có ngoặc nhọn rồi
+  tên trần, `impl X for`; ghép không phân biệt hoa thường (`KV` ↔ `KvServer`);
+  `#[cfg(test)] mod` là server giả. Hook tìm phía bên kia cả TS/JS, Rust. Online
+  Boutique thêm cạnh Go → Node (Checkout → Currency, Payment) vào
+  `consistency.RPC`; kiểu phá `rpc` chạy cả trên microservices-demo. Threat model
+  TM-26..28 đã có. Review opus: 5 mục (import ngoặc nhọn của tonic không dò, package
+  Node từ gốc tuỳ ý, `tonic::codegen` bỏ cả file, `health*` quá rộng, server giả
+  trong `#[cfg(test)]`), sửa hết, có test. Biên nhận trên mã cuối (gồm cả việc A):
+  `cargo test` (601), clippy, `cargo +1.88 check`, bộ đo 30 repo 0 bất nhất 1050/1050,
+  oracle khớp hết, sabotage 58/58, `verify` 3/3, `check --strict` 0.
+
+- **NetworkPolicy đối chiếu `link`, việc A của đợt 3** (2026-10-14, commit `c5ae95d`;
   bạn chốt "theo đề xuất hết"). `scan/k8s.rs` đọc NetworkPolicy (podSelector,
   namespaceSelector, `matchExpressions`, ingress, egress, `policyTypes` mặc định
   theo `SetDefaults_NetworkPolicy`); `deploy.rs` tính từng workload bị cô lập
@@ -354,12 +368,11 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-1. Việc B của đợt 3: gRPC của Node (`@grpc/proto-loader`, `addService`, mã sinh
-   `*_grpc_pb.js`) và Rust (`tonic`: `x_server::XServer`, `x_client::XClient`,
-   tên ghép không phân biệt hoa thường); hook tìm phía bên kia cả file TS/JS, Rust;
-   bộ đo Online Boutique (Checkout → Currency, Payment là server Node), vllm (server Rust).
-2. Chờ bạn cho commit việc A (NetworkPolicy); bản diff riêng của A lưu ở scratchpad
-   `np-A.patch` để tách commit.
+1. Việc C (bạn chọn 2026-10-14): lối vào từ ngoài cụm. Ingress, Istio `Gateway` và
+   `VirtualService` cho biết service nào lộ ra Internet; dự kiến `link Internet ->
+   Frontend` với `Internet` là service đặc biệt, không thêm từ khoá. Hướng D (cạnh
+   mạng từ mã) để sau.
+2. Chưa push `c5ae95d` và commit B lên GitHub.
 
 **Đã quyết (2026-10-11): cạnh binding Python ↔ native tự viết.** Đã tìm theo
 skill reuse-best. Không công cụ tĩnh nào phủ cả PyO3, pybind11, nanobind
@@ -581,6 +594,6 @@ không có `link` là vi phạm, có `link` mà cụm chặn là cảnh báo (`-
 - [x] NetworkPolicy đối chiếu `link`: đọc policy (podSelector, namespaceSelector,
   ingress, egress), cho phép rõ mà thiếu `link` là vi phạm, `link` bị chặn là cảnh
   báo; `init` sinh `link` theo policy; `scan`; bộ đo (Online Boutique), oracle, sabotage; tài liệu.
-- [ ] gRPC của Node (`@grpc/proto-loader`, `addService`) và Rust (`tonic`); bộ đo
+- [x] gRPC của Node (`@grpc/proto-loader`, `addService`) và Rust (`tonic`); bộ đo
   Online Boutique (currency, payment), vllm; oracle, sabotage; tài liệu.
 

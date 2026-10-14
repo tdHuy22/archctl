@@ -15,6 +15,11 @@ impl Repo {
         Repo(root)
     }
 
+    fn remove_file(&self, rel: &str) -> &Self {
+        std::fs::remove_file(self.0.join(rel)).unwrap();
+        self
+    }
+
     fn write(&self, rel: &str, body: &str) -> &Self {
         let path = self.0.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -346,3 +351,110 @@ fn module_ngoai_khong_ghep_nham() {
     assert!(!report.unresolved.iter().any(|u| u.reason == UnresolvedReason::Rpc), "{:?}", report.unresolved);
 }
 
+
+/// Server Node nạp `.proto` lúc chạy, client Go: cạnh Checkout → Currency của
+/// Online Boutique.
+#[test]
+fn node_server_go_client() {
+    let r = Repo::new("node");
+    r.write("protos/demo.proto", "syntax = \"proto3\";\npackage hipstershop;\noption go_package = \"example.com/genproto\";\nservice CurrencyService { rpc Convert(A) returns (B); }\nservice PaymentService { rpc Charge(A) returns (B); }\n")
+        .write("genproto/demo_grpc.pb.go", "package hipstershop\nfunc NewCurrencyServiceClient(cc int) int { return 0 }\n")
+        .write(
+            "checkout/main.go",
+            "package main\nimport pb \"example.com/genproto\"\nfunc f(c int) { _ = pb.NewCurrencyServiceClient(c) }\n",
+        )
+        .write(
+            "currency/server.js",
+            "const grpc = require('@grpc/grpc-js');\nconst shopProto = load('demo.proto').hipstershop;\nconst healthProto = load('health.proto').grpc.health.v1;\nserver.addService(shopProto.CurrencyService.service, {convert});\nserver.addService(healthProto.Health.service, {check});\n",
+        )
+        .write(
+            "payment/index.ts",
+            "import * as svc from './gen/demo_grpc_pb';\nserver.addService(svc.PaymentServiceService, impl);\nconst c = new Foo(1);\nconst d = new widgets.Gadget(2);\n",
+        )
+        .write("web/pay.js", "const client = new proto.hipstershop.PaymentService('pay:50051', creds);\n")
+        .write(
+            ".arch/system.arch",
+            "component Checkout at checkout/**\ncomponent Currency at currency/**\ncomponent Payment at payment/**\ncomponent Web at web/**\ncomponent Gen at genproto/**\nallow Checkout -> Gen\nallow Web -> Gen\n",
+        );
+    let mut v = rpc(&r.report());
+    v.sort();
+    assert_eq!(v, ["NoAllow Checkout -> Currency checkout/main.go:3", "NoAllow Web -> Payment web/pay.js:1"]);
+    // Hook chỉ có file server Node: vẫn tìm ra client Go.
+    assert_eq!(rpc(&r.partial(&["currency/server.js"])), ["NoAllow Checkout -> Currency checkout/main.go:3"]);
+}
+
+/// tonic: `KV` trong `.proto` thành `kv_server::KvServer`; client Python gọi
+/// server Rust. Có `impl kv_server::Kv for` mà không đăng ký thì báo.
+#[test]
+fn rust_tonic_server_python_client() {
+    let r = shop("rust");
+    r.write(
+        "srv/src/main.rs",
+        "use pb::kv_server::KvServer;\nfn main() { let s = KvServer::new(Impl); }\nimpl pb::kv_server::Kv for Impl {}\n",
+    )
+    .write("gen/src/lib.rs", "pub mod kv_server { use tonic::codegen::*; pub struct KvServer; }\npub mod kv_client { pub struct KvClient; }\n")
+    .remove_file("app/server/s.py");
+    let arch = std::fs::read_to_string(r.0.join(".arch/system.arch")).unwrap();
+    r.write(".arch/system.arch", &format!("{arch}component Srv at srv/**\ncomponent RGen at gen/**\n"));
+    assert_eq!(rpc(&r.report()), ["NoAllow Client -> Srv app/client/c.py:4"]);
+    // Hook chỉ có file client Python: tìm ra server Rust dù tên viết khác hoa thường.
+    assert_eq!(rpc(&r.partial(&["app/client/c.py"])), ["NoAllow Client -> Srv app/client/c.py:4"]);
+    // Bỏ chỗ đăng ký, giữ chỗ cài đặt: phía server bị giấu thì báo.
+    r.write("srv/src/main.rs", "impl pb::kv_server::Kv for Impl {}\n");
+    let rep = r.report();
+    assert!(rep.unresolved.iter().any(|u| u.file == "srv/src/main.rs"), "{:?}", rep.unresolved);
+}
+
+/// Rust: struct `XServer` không đi cùng module `x_server`, hay không có
+/// `.proto` khai service đó, thì không phải gRPC.
+#[test]
+fn rust_khong_phai_grpc_thi_khong_ghep() {
+    let r = shop("rust-gia");
+    r.write("srv/src/main.rs", "use http::api_server::ApiServer;\nuse a::other_server::KvServer;\nfn f() { ApiServer::new(); }\n")
+        .remove_file("app/server/s.py");
+    let arch = std::fs::read_to_string(r.0.join(".arch/system.arch")).unwrap();
+    r.write(".arch/system.arch", &format!("{arch}component Srv at srv/**\n"));
+    assert!(rpc(&r.report()).is_empty(), "{:?}", rpc(&r.report()));
+}
+
+/// Dạng chuẩn của tonic: import có ngoặc nhọn, `impl Kv for` trần; file viết
+/// tay dùng `tonic::codegen` vẫn là chỗ dùng; server giả trong `#[cfg(test)]`
+/// không tính; `HealthRecords` không phải health check.
+#[test]
+fn rust_cac_dang_thuong_gap() {
+    for (name, src, want) in [
+        ("brace", "use pb::kv_server::{Kv, KvServer};\nfn main() { let s = KvServer::new(Impl); }\nimpl Kv for Impl {}\n", true),
+        ("codegen", "use tonic::codegen::InterceptedService;\nuse pb::kv_server::KvServer;\nfn main() { KvServer::new(Impl); }\n", true),
+        ("cfg-test", "fn real() {}\n#[cfg(test)]\nmod tests {\n    use pb::kv_server::KvServer;\n    fn t() { KvServer::new(Mock); }\n}\n", false),
+    ] {
+        let r = shop(&format!("rust-{name}"));
+        r.write("srv/src/main.rs", src).remove_file("app/server/s.py");
+        let arch = std::fs::read_to_string(r.0.join(".arch/system.arch")).unwrap();
+        r.write(".arch/system.arch", &format!("{arch}component Srv at srv/**\n"));
+        let got = rpc(&r.report());
+        assert_eq!(!got.is_empty(), want, "{name}: {got:?}");
+    }
+    let r = shop("rust-health");
+    r.write("proto/kv.proto", "syntax = \"proto3\";\npackage shop.v1;\nservice HealthRecords { rpc Get(A) returns (B); }\n")
+        .write("app/gen/kv_pb2_grpc.py", "class HealthRecordsStub(object):\n    pass\n")
+        .write("app/client/c.py", "from app.gen import kv_pb2_grpc\n\ndef get(ch):\n    return kv_pb2_grpc.HealthRecordsStub(ch)\n")
+        .write("srv/src/main.rs", "use pb::health_records_server::HealthRecordsServer;\n")
+        .remove_file("app/server/s.py");
+    let arch = std::fs::read_to_string(r.0.join(".arch/system.arch")).unwrap();
+    r.write(".arch/system.arch", &format!("{arch}component Srv at srv/**\n"));
+    assert_eq!(rpc(&r.report()), ["NoAllow Client -> Srv app/client/c.py:4"]);
+}
+
+/// Node: gốc chuỗi thuộc tính là biến gán giữa chừng (`const shop =
+/// load(def).shop`): chuỗi là đuôi của package, đối chiếu với `.proto`.
+#[test]
+fn node_package_la_duoi_cua_chuoi() {
+    let r = Repo::new("node-duoi");
+    r.write("proto/kv.proto", "syntax = \"proto3\";\npackage shop.v1;\nservice KV { rpc Get(A) returns (B); }\n")
+        .write("srv/s.js", "server.addService(p.shop.v1.KV.service, impl);\n")
+        .write("web/c.js", "const shop = load(def).shop;\nconst c = new shop.v1.KV('kv:1', creds);\nconst d = new a.b.Widget(1);\n")
+        .write(".arch/system.arch", "component Srv at srv/**\ncomponent Web at web/**\nallow Web -> Srv\n");
+    assert!(rpc(&r.report()).is_empty(), "{:?}", rpc(&r.report()));
+    r.write(".arch/system.arch", "component Srv at srv/**\ncomponent Web at web/**\ncomponent X at x/**\nallow Web -> X\n");
+    assert_eq!(rpc(&r.report()), ["NoAllow Web -> Srv web/c.js:2"]);
+}

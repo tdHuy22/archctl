@@ -33,6 +33,14 @@ pub fn extract(toks: &[Token]) -> Vec<Import> {
         .collect()
 }
 
+/// `(tên, đường dẫn)` cho mọi tên mà một `use` đưa vào phạm vi, kể cả `use`
+/// trong thân hàm hay `mod` lồng, sau khi bung ngoặc nhọn: `use
+/// pb::kv_server::{Kv, KvServer}` cho `(Kv, pb::kv_server::Kv)` và `(KvServer,
+/// pb::kv_server::KvServer)`.
+pub(crate) fn uses(toks: &[Token]) -> Vec<(String, String)> {
+    leaves(toks).into_iter().filter_map(|l| Some((l.name?, l.path))).collect()
+}
+
 /// `(tên, đường dẫn)` cho mỗi tên mà file này đưa vào phạm vi bằng `use` hoặc
 /// `extern crate`.
 pub fn bindings(toks: &[Token]) -> Vec<(String, String)> {

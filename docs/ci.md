@@ -127,7 +127,9 @@ chứ không lặng lẽ bỏ qua. Hai mươi bốn trong bốn mươi hai kiể
 notebook, bốn ở cạnh Python ↔ native, bốn ở compose và Dockerfile, sáu ở
 manifest Kubernetes, cạnh qua Service và NetworkPolicy, hai ở `.proto`. Chín
 kiểu khác nhắm vào phần hạ tầng của chính bộ đo (bốn trên compose, năm trên
-manifest Kubernetes gồm hai ở NetworkPolicy), một kiểu vào cạnh gRPC bắt buộc. Phần Rust cũng cần `syn`, nên bước
+manifest Kubernetes gồm hai ở NetworkPolicy), một kiểu vào cạnh gRPC bắt buộc (chạy
+trên etcd, và trên microservices-demo cho cạnh khác ngôn ngữ: Python ↔ Go, Go →
+Node). Phần Rust cũng cần `syn`, nên bước
 sabotage mở mạng giống bước đối chiếu.
 
 ## Kiến trúc mô hình chạy thật
