@@ -760,3 +760,132 @@ fn mot_policy_nhieu_peer_va_nhieu_service_khong_lam_treo() {
     // Mỗi cặp service một vi phạm: 30 × 29.
     assert_eq!(rep.violations.len(), 30 * 29);
 }
+
+/// Lối vào từ Internet: mỗi dạng cấu hình lộ Db ra ngoài phải đòi `link Internet -> Db`.
+#[test]
+fn moi_dang_lo_ra_ngoai_deu_doi_link_internet() {
+    let svc = |extra: &str| format!("---\napiVersion: v1\nkind: Service\nmetadata: {{name: db-ext}}\nspec:\n  selector: {{app: db}}\n{extra}");
+    let ingress_v1 = "---\napiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata: {name: web}\nspec:\n  rules:\n  - http:\n      paths:\n      - path: /\n        backend: {service: {name: db, port: {number: 5432}}}\n";
+    let ingress_beta = "---\napiVersion: extensions/v1beta1\nkind: Ingress\nmetadata: {name: web}\nspec:\n  backend: {serviceName: db, servicePort: 5432}\n";
+    let ingress_default = "---\napiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata: {name: web}\nspec:\n  defaultBackend: {service: {name: db}}\n";
+    let httproute = "---\napiVersion: gateway.networking.k8s.io/v1\nkind: HTTPRoute\nmetadata: {name: r}\nspec:\n  parentRefs: [{name: public-gw}]\n  rules:\n  - backendRefs: [{name: db, port: 5432}]\n";
+    let vs = "---\napiVersion: networking.istio.io/v1beta1\nkind: VirtualService\nmetadata: {name: v}\nspec:\n  gateways: [public-gw]\n  hosts: ['*']\n  tcp:\n  - route: [{destination: {host: db.default.svc.cluster.local}}]\n";
+    for (name, extra) in [
+        ("lb", svc("  type: LoadBalancer\n")),
+        ("nodeport", svc("  type: NodePort\n")),
+        ("externalips", svc("  externalIPs: [203.0.113.7]\n")),
+        ("ingress", ingress_v1.to_string()),
+        ("ingress-beta", ingress_beta.to_string()),
+        ("ingress-default", ingress_default.to_string()),
+        ("httproute", httproute.to_string()),
+        ("virtualservice", vs.to_string()),
+    ] {
+        let r = shop(&format!("lo-{name}"));
+        r.write("k8s/expose.yaml", &extra);
+        let rep = r.report();
+        assert_eq!(
+            rep.violations.iter().map(|v| format!("{} -> {}", v.from, v.to)).collect::<Vec<_>>(),
+            ["Internet -> Db"],
+            "{name}: {:?}",
+            violations(&rep)
+        );
+        // Có `link Internet -> Db` thì không còn vi phạm, và link được thấy.
+        r.rules(
+            "component Api at api/**\ncomponent Worker at worker/**\n\
+             service Api from k8s:api runs Api\nservice Worker from k8s:worker runs Worker\nservice Db from k8s:db\n\
+             link Api -> Db, Worker\nlink Internet -> Db\n",
+        );
+        let rep = r.report();
+        assert!(rep.violations.is_empty() && rep.links_unseen.is_empty(), "{name}: {:?} {:?}", violations(&rep), rep.links_unseen);
+    }
+}
+
+#[test]
+fn duong_trong_cum_khong_phai_loi_vao() {
+    let r = shop("trong-cum");
+    r.write(
+        "k8s/mesh.yaml",
+        "apiVersion: gateway.networking.k8s.io/v1\nkind: HTTPRoute\nmetadata: {name: r}\nspec:\n  parentRefs: [{kind: Service, name: db}]\n  rules:\n  - backendRefs: [{name: db}]\n---\napiVersion: networking.istio.io/v1beta1\nkind: VirtualService\nmetadata: {name: v}\nspec:\n  gateways: [mesh]\n  http:\n  - route: [{destination: {host: db}}]\n---\napiVersion: v1\nkind: Service\nmetadata: {name: db-internal}\nspec:\n  type: ClusterIP\n  selector: {app: db}\n",
+    );
+    let rep = r.report();
+    assert!(rep.violations.is_empty(), "{:?}", violations(&rep));
+    // `link Internet -> Db` mà không gì lộ Db: link không thấy trong cấu hình.
+    r.rules(
+        "component Api at api/**\ncomponent Worker at worker/**\n\
+         service Api from k8s:api runs Api\nservice Worker from k8s:worker runs Worker\nservice Db from k8s:db\n\
+         link Api -> Db, Worker\nlink Internet -> Db\n",
+    );
+    let rep = r.report();
+    assert_eq!(rep.links_unseen.iter().map(|(f, t, _)| format!("{f}->{t}")).collect::<Vec<_>>(), ["Internet->Db"]);
+}
+
+#[test]
+fn pod_dung_mang_may_chu_la_lo_ra_ngoai() {
+    for (name, spec) in [("hostnetwork", "      hostNetwork: true\n"), ("hostport", "")] {
+        let r = shop(&format!("host-{name}"));
+        let ports = if name == "hostport" { ", ports: [{containerPort: 5432, hostPort: 5432}]" } else { "" };
+        r.write(
+            "k8s/db.yaml",
+            &format!("apiVersion: apps/v1\nkind: StatefulSet\nmetadata: {{name: db}}\nspec:\n  template:\n    metadata:\n      labels: {{app: db}}\n    spec:\n{spec}      containers:\n      - {{name: pg, image: postgres:16{ports}}}\n---\napiVersion: v1\nkind: Service\nmetadata: {{name: db}}\nspec:\n  selector: {{app: db}}\n"),
+        );
+        let found: Vec<String> = r.report().violations.iter().map(|v| format!("{} -> {}", v.from, v.to)).collect();
+        assert_eq!(found, ["Internet -> Db"], "{name}");
+    }
+}
+
+#[test]
+fn luat_internet_sai_bi_bao() {
+    for (text, want) in [
+        ("service Internet\n", "tên dành riêng"),
+        ("service A\nlink A -> Internet\n", "chỉ đứng ở đầu"),
+    ] {
+        let (_, diags) = arch_core::load(text);
+        assert!(diags.iter().any(|d| d.msg.contains(want)), "{text}: {diags:#?}");
+    }
+    let (_, diags) = arch_core::load("service A\nlink Internet -> A\n");
+    assert!(!arch_core::diag::has_errors(&diags), "{diags:#?}");
+}
+
+/// Các ca reviewer tìm: route khác namespace, `hostNetwork: True`, host ngoài
+/// cụm của VirtualService, `delegate`, route lặp một Service hàng nghìn lần.
+#[test]
+fn loi_vao_cac_ca_kho() {
+    let internet = |r: &Repo| -> Vec<String> {
+        r.report().violations.iter().filter(|v| v.from == "Internet").map(|v| v.to.clone()).collect()
+    };
+    let ns_db = "apiVersion: apps/v1\nkind: StatefulSet\nmetadata: {name: db, namespace: data}\nspec:\n  template:\n    metadata:\n      labels: {app: db}\n    spec:\n      containers:\n      - {name: pg, image: postgres:16}\n---\napiVersion: v1\nkind: Service\nmetadata: {name: db, namespace: data}\nspec:\n  selector: {app: db}\n";
+    // HTTPRoute ở namespace hạ tầng trỏ sang Service ở `data`.
+    let r = shop("route-ns");
+    r.write("k8s/db.yaml", ns_db).write(
+        "k8s/route.yaml",
+        "apiVersion: gateway.networking.k8s.io/v1\nkind: HTTPRoute\nmetadata: {name: r, namespace: edge}\nspec:\n  parentRefs: [{name: public-gw}]\n  rules:\n  - backendRefs: [{name: db, namespace: data}]\n",
+    );
+    assert_eq!(internet(&r), ["Db"]);
+    // `hostNetwork: True` cũng là đúng với Kubernetes.
+    let r = shop("host-hoa");
+    r.write("k8s/db.yaml", &std::fs::read_to_string(r.0.join("k8s/db.yaml")).unwrap().replace("    spec:\n      containers:", "    spec:\n      hostNetwork: True\n      containers:"));
+    assert_eq!(internet(&r), ["Db"]);
+    // Host ngoài cụm không phải Service `db`.
+    let r = shop("vs-ngoai");
+    r.write("k8s/vs.yaml", "apiVersion: networking.istio.io/v1beta1\nkind: VirtualService\nmetadata: {name: v}\nspec:\n  gateways: [public-gw]\n  http:\n  - route: [{destination: {host: db.example.com}}]\n");
+    assert!(internet(&r).is_empty(), "{:?}", internet(&r));
+    // `delegate` sang VirtualService con không gắn gateway.
+    let r = shop("vs-delegate");
+    r.write("k8s/vs.yaml", "apiVersion: networking.istio.io/v1beta1\nkind: VirtualService\nmetadata: {name: root}\nspec:\n  gateways: [public-gw]\n  http:\n  - delegate: {name: child}\n---\napiVersion: networking.istio.io/v1beta1\nkind: VirtualService\nmetadata: {name: child}\nspec:\n  http:\n  - route: [{destination: {host: db}}]\n");
+    assert_eq!(internet(&r), ["Db"]);
+    // Một route lặp một Service hàng chục nghìn lần, trước 3 000 workload.
+    let r = Repo::new("route-lap");
+    let mut wl = String::new();
+    for i in 0..3000 {
+        wl.push_str(&format!("---\napiVersion: apps/v1\nkind: Deployment\nmetadata: {{name: w{i}}}\nspec:\n  template:\n    metadata: {{labels: {{app: x}}}}\n    spec: {{containers: [{{name: c, image: x}}]}}\n"));
+    }
+    let refs: String = (0..40_000).map(|_| "  - {name: web}\n").collect();
+    r.write("k8s/w.yaml", &wl)
+        .write("k8s/s.yaml", "apiVersion: v1\nkind: Service\nmetadata: {name: web}\nspec: {selector: {app: x}}\n")
+        .write("k8s/r.yaml", &format!("apiVersion: gateway.networking.k8s.io/v1\nkind: HTTPRoute\nmetadata: {{name: r}}\nspec:\n  parentRefs: [{{name: gw}}]\n  rules:\n  - backendRefs:\n{refs}"))
+        .rules("service W from k8s:w0\n");
+    let t = std::time::Instant::now();
+    let rep = r.partial(&["k8s/r.yaml"]);
+    assert!(t.elapsed().as_secs_f64() < 5.0, "{:?}", t.elapsed());
+    assert!(!rep.violations.is_empty() || !rep.deploy_unread.is_empty());
+}

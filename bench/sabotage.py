@@ -130,6 +130,8 @@ K8S_BENCH_MODES |= {
     "deploy-blocked": "thiếu cảnh báo NetworkPolicy",
     # cạnh gRPC khác ngôn ngữ: Python ↔ Go, Go → Node
     "rpc": RPC_MODES["rpc"],
+    # lối vào từ Internet
+    "deploy-internet": "gỡ link Internet",
 }
 # phá dữ kiện manifest và cạnh qua Service trong `scan --json` → dòng `oracle.py` phải in ra
 K8S_ORACLE_MODES = {
@@ -139,6 +141,7 @@ K8S_ORACLE_MODES = {
     "k8s-target": "thừa cạnh:",
     "k8s-policy": "thiếu:",
     "k8s-guard": "lệch NetworkPolicy",
+    "k8s-exposed": "thiếu lối vào từ Internet",
 }
 
 # phá dữ kiện `.proto` trong `scan --json` → dòng `oracle.py` phải in ra
@@ -191,6 +194,12 @@ def sabotage_k8s(rep: dict, mode: str):
     """Làm hỏng dữ kiện manifest đầu tiên đúng loại, hay cạnh qua Service đầu
     tiên, trong `scan --json`."""
     dep = rep.get("deploy", {})
+    if mode == "k8s-exposed":
+        for s in dep.get("services", []):
+            if s["key"].startswith("k8s:") and s.get("exposed"):
+                s["exposed"] = []
+                return
+        return
     if mode == "k8s-guard":
         for s in dep.get("services", []):
             if s["key"].startswith("k8s:") and s.get("ingress", {}).get("isolated"):
@@ -328,6 +337,8 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
             rep["violations"] = [v for v in rep["violations"] if not v.get("spec", "").startswith("NetworkPolicy")]
         elif mode == "deploy-blocked":
             rep["linksBlocked"] = []
+        elif mode == "deploy-internet":
+            rep["violations"] = [v for v in rep["violations"] if v["from"] != "Internet"]
         out = json.dumps(rep)
     elif mode == "diff" and args[:1] == ["diff"]:
         out = "kiến trúc a → b\n"

@@ -306,6 +306,10 @@ fn discover_services(root: &Path, deploy_files: &[String], owners: &Owners, out:
                     links.entry(dsl.clone()).or_default().insert((*to).to_string());
                 }
             }
+            // Lộ ra ngoài: `link Internet -> …`.
+            if !svc.exposed.is_empty() {
+                links.entry(crate::model::INTERNET.to_string()).or_default().insert(dsl.clone());
+            }
             // Đường NetworkPolicy cho phép rõ: `check` đòi `link` cho chúng.
             for (guard, inbound) in [(&svc.ingress, true), (&svc.egress, false)] {
                 for g in guard.grants.iter().flat_map(|g| g.iter()) {

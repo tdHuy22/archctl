@@ -57,7 +57,7 @@ const MAX_K8S_STEPS: usize = 500_000;
 const MAX_K8S_EDGES: usize = 20_000;
 
 fn facts(s: &compose::Service) -> usize {
-    s.env.len() + s.env_files.len() + s.depends_on.len() + s.links.len() + s.binds.len() + s.aliases.len()
+    s.env.len() + s.env_files.len() + s.depends_on.len() + s.links.len() + s.binds.len() + s.aliases.len() + s.ports.len()
 }
 
 /// Thư mục mà file compose trong đó không phải là triển khai của sản phẩm.
@@ -176,6 +176,18 @@ pub struct Svc {
     /// NetworkPolicy cho workload này: ai được gọi vào, nó được gọi ra đâu.
     pub ingress: Guard,
     pub egress: Guard,
+    /// Chỗ cấu hình lộ service này ra ngoài: cổng compose, Service
+    /// `LoadBalancer`, Ingress, route… Cần `link Internet -> …`.
+    pub exposed: Vec<Exposure>,
+}
+
+/// Một chỗ lộ ra ngoài, để báo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Exposure {
+    pub file: String,
+    pub line: usize,
+    /// Như cấu hình viết, không có giá trị biến môi trường nào.
+    pub shown: String,
 }
 
 /// Một chiều (vào hay ra) của NetworkPolicy đối với một workload.
@@ -827,6 +839,7 @@ fn project(shared: &Shared<'_>, dir: &str, records: &[Record], out: &mut Deploy)
             built: None,
             ingress: Guard::default(),
             egress: Guard::default(),
+            exposed: Vec::new(),
         };
         let mut seen: HashSet<(String, String, usize)> = HashSet::new();
         let mut push_edge = |to: &str, file: &str, line: usize, shown: String| {
@@ -898,6 +911,12 @@ fn project(shared: &Shared<'_>, dir: &str, records: &[Record], out: &mut Deploy)
             }
         }
         for r in mine {
+            // Cổng publish ra mọi giao diện mạng của máy: lộ ra ngoài.
+            svc.exposed.extend(r.s.ports.iter().filter(|p| !p.local).map(|p| Exposure {
+                file: r.file.clone(),
+                line: p.line,
+                shown: if p.shown.starts_with("network_mode") { p.shown.clone() } else { format!("ports: {}", p.shown) },
+            }));
             starts(shared, r, &mut svc, &mut out.unread);
         }
         if svc.code && svc.starts.iter().all(|s| s.entries.is_empty()) && svc.unknown.is_none() {
@@ -938,6 +957,7 @@ pub fn load_dockerfile(root: &Path, path: &str) -> Result<Svc, Unread> {
         built: Some(path.to_string()),
         ingress: Guard::default(),
         egress: Guard::default(),
+        exposed: Vec::new(),
     };
     let Some(target) = built.df.target(None) else {
         svc.unknown = Some("Dockerfile không có `FROM`".into());
@@ -1021,6 +1041,7 @@ struct Cluster {
     workloads: Vec<Placed<k8s::Workload>>,
     services: Vec<Placed<k8s::Service>>,
     policies: Vec<Placed<k8s::NetPolicy>>,
+    routes: Vec<Placed<k8s::Route>>,
     config_maps: Vec<Placed<k8s::ConfigMap>>,
     namespaces: HashSet<String>,
 }
@@ -1192,6 +1213,102 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
 
     let guards = network_policies(&cluster, &steps);
 
+    // Lối vào từ ngoài cụm → workload (TM-29). Mỗi workload giữ tối đa 8 chỗ
+    // để báo; mỗi lần gắn tính vào ngân sách bước chung (TM-31).
+    let mut exposures: HashMap<usize, Vec<Exposure>> = HashMap::new();
+    let mut expose = |wi: usize, file: &str, line: usize, shown: &dyn Fn() -> String| -> bool {
+        if !Shared::spend(&steps, 1) {
+            steps_over.set(true);
+            return false;
+        }
+        let list = exposures.entry(wi).or_default();
+        if list.len() < 8 {
+            list.push(Exposure { file: file.to_string(), line, shown: shown() });
+        }
+        true
+    };
+    for (wi, w) in cluster.workloads.iter().enumerate() {
+        if let Some(how) = &w.item.host {
+            expose(wi, &w.file, w.item.line, &|| format!("{} `{}`: {how}", w.item.kind, w.item.name));
+        }
+    }
+    'services: for (si, s) in cluster.services.iter().enumerate() {
+        if let Some(how) = &s.item.exposed {
+            for &wi in select(si).iter() {
+                if !expose(wi, &s.file, s.item.line, &|| format!("Service `{}` {how}", s.item.name)) {
+                    break 'services;
+                }
+            }
+        }
+    }
+    // Service theo tên từ một route: cùng namespace, ưu tiên cùng thư mục.
+    let services_named = |name: &str, ns: Option<&str>, dir: &str| -> Vec<usize> {
+        let all: Vec<usize> = svc_by_name
+            .get(&name.to_ascii_lowercase())
+            .map(|v| v.iter().copied().filter(|&si| same_ns(cluster.services[si].item.namespace.as_deref(), ns)).collect())
+            .unwrap_or_default();
+        let same: Vec<usize> = all.iter().copied().filter(|&si| cluster.services[si].dir == dir).collect();
+        if same.is_empty() { all } else { same }
+    };
+    // `destination.host` trong cụm: `svc`, `svc.ns`, `svc.ns.svc…`. Tên miền
+    // khác (`db.example.com`) là ngoài cụm.
+    let in_cluster = |host: &str, ns: Option<&str>| -> Option<(String, Option<String>)> {
+        let l: Vec<&str> = host.split('.').collect();
+        match l.as_slice() {
+            [svc] => Some((svc.to_string(), ns.map(str::to_string))),
+            [svc, n] => Some((svc.to_string(), Some(n.to_string()))),
+            [svc, n, "svc", ..] => Some((svc.to_string(), Some(n.to_string()))),
+            _ => None,
+        }
+    };
+    // VirtualService theo tên, để lần theo `delegate`.
+    let mut vs_by_name: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (ri, r) in cluster.routes.iter().enumerate() {
+        if r.item.kind == "VirtualService" {
+            vs_by_name.entry(r.item.name.as_str()).or_default().push(ri);
+        }
+    }
+    'routes: for route in cluster.routes.iter().filter(|r| r.item.public) {
+        let r = &route.item;
+        let ns = r.namespace.as_deref();
+        // Đích của route, gộp trùng: một route có thể lặp một Service hàng nghìn lần.
+        let mut targets: BTreeMap<usize, usize> = BTreeMap::new();
+        for (name, ref_ns, line) in &r.services {
+            for si in services_named(name, ref_ns.as_deref().or(ns), &route.dir) {
+                targets.entry(si).or_insert(*line);
+            }
+        }
+        // Host của chính nó và của VirtualService nó `delegate` sang (một tầng).
+        let mut hosts: Vec<(&str, Option<&str>, usize)> = r.hosts.iter().map(|(h, l)| (h.as_str(), ns, *l)).collect();
+        for (name, dns, line) in &r.delegates {
+            let dns = dns.as_deref().or(ns);
+            for &ci in vs_by_name.get(name.as_str()).map_or(&[][..], Vec::as_slice) {
+                let child = &cluster.routes[ci].item;
+                if same_ns(child.namespace.as_deref(), dns) {
+                    hosts.extend(child.hosts.iter().map(|(h, _)| (h.as_str(), child.namespace.as_deref().or(dns), *line)));
+                }
+            }
+        }
+        let mut seen_hosts: HashSet<&str> = HashSet::new();
+        for (host, hns, line) in hosts {
+            if !seen_hosts.insert(host) {
+                continue;
+            }
+            let Some((svc_name, svc_ns)) = in_cluster(host, hns) else { continue };
+            for si in services_named(&svc_name, svc_ns.as_deref(), &route.dir) {
+                targets.entry(si).or_insert(line);
+            }
+        }
+        for (si, line) in targets {
+            let service = &cluster.services[si].item.name;
+            for &wi in select(si).iter() {
+                if !expose(wi, &route.file, line, &|| format!("{} `{}` → Service `{service}`", r.kind, r.name)) {
+                    break 'routes;
+                }
+            }
+        }
+    }
+
     let mut over = false;
     for (wi, placed) in cluster.workloads.iter().enumerate() {
         // Hết ngân sách thì dừng hẳn và báo một lần: đọc tiếp nửa vời là bỏ
@@ -1218,6 +1335,7 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
             built: None,
             ingress: guards.get(&wi).map(|g| g.0.clone()).unwrap_or_default(),
             egress: guards.get(&wi).map(|g| g.1.clone()).unwrap_or_default(),
+            exposed: exposures.remove(&wi).unwrap_or_default(),
         };
         // Tên máy → Service → workload.
         let resolve_once = |host: &str| -> Vec<usize> {
@@ -1572,8 +1690,9 @@ fn read_manifests(
             .map(|w| w.labels.len() + w.containers.iter().map(|c| 1 + c.env.len() + c.refs.len() + c.env_from.len()).sum::<usize>())
             .sum::<usize>()
             + file.services.iter().map(|s| 1 + s.selector.len()).sum::<usize>()
-            + file.config_maps.iter().map(|m| 1 + m.keys().count()).sum::<usize>();
-        objects += file.workloads.len() + file.services.len() + file.config_maps.len() + file.policies.len();
+            + file.config_maps.iter().map(|m| 1 + m.keys().count()).sum::<usize>()
+            + file.routes.iter().map(|r| 1 + r.services.len() + r.hosts.len() + r.delegates.len()).sum::<usize>();
+        objects += file.workloads.len() + file.services.len() + file.config_maps.len() + file.policies.len() + file.routes.len();
         if objects > MAX_K8S_OBJECTS || !Shared::spend(&shared.facts, facts) || !Shared::spend(&shared.bytes, file.size) {
             out.unread.push(Unread {
                 file: (*f).clone(),
@@ -1611,6 +1730,9 @@ fn read_manifests(
         }
         for p in file.policies {
             c.policies.push(Placed { file: (*f).clone(), dir: dir.clone(), item: p });
+        }
+        for r in file.routes {
+            c.routes.push(Placed { file: (*f).clone(), dir: dir.clone(), item: r });
         }
     }
     c

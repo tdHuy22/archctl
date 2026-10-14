@@ -416,11 +416,49 @@ Trên Online Boutique, component `network-policies` chặn mọi đường vào
 (deny-all) mà không mở đường cho `shoppingassistantservice`, trong khi biến môi
 trường của frontend trỏ tới nó: `check` báo đúng chỗ lệch đó.
 
+## Lối vào từ Internet
+
+```
+link Internet -> Frontend
+```
+
+`Internet` là tên dành riêng: lộ một service ra ngoài là một cạnh mạng từ
+`Internet`, và như mọi `link`, không có `link` là cấm. Không khai `service
+Internet` được, và `Internet` chỉ đứng ở đầu `link` (gọi ra dịch vụ ngoài thì
+khai `service` cho dịch vụ đó).
+
+```
+✗ VI PHẠM  Internet -> Db  (cạnh mạng không có link, #accepted)
+  k8s/db.yaml:12  Service `db-ext` type: LoadBalancer
+  → thêm `link Internet -> Db`, hoặc bỏ lối vào này
+```
+
+Thứ tính là lộ ra ngoài:
+
+| Nguồn | Dạng |
+| --- | --- |
+| compose | `ports:` publish ra mọi giao diện mạng (`"8080:80"`, `"80"`, dạng dài không có `host_ip`), `network_mode: host`. Cổng gắn vào `127.0.0.1`, `localhost`, `::1` (kể cả `${BIND:-127.0.0.1}`) và `expose:` thì không |
+| Service | `type: LoadBalancer`, `NodePort`, hay có `externalIPs` |
+| Ingress | `rules[].http.paths[].backend`, `defaultBackend` (v1), `backend.serviceName` (v1beta1) |
+| Gateway API | `HTTPRoute`, `GRPCRoute`, `TCPRoute`, `TLSRoute`, `UDPRoute` qua `backendRefs`; route chỉ gắn vào Service (mesh, GAMMA) thì không |
+| Istio | `VirtualService` gắn với một `Gateway` khác `mesh`, qua `destination.host` |
+| Pod | `hostNetwork: true`, `hostPort` |
+
+Từ Service, route tới workload đi qua selector như cạnh mạng. Có `link Internet
+-> X` mà không cấu hình nào lộ X thì là "link không thấy trong cấu hình",
+`--strict` tính. Route trỏ tới Service không có trong repo thì như gói ngoài.
+`init --from-code` sinh `link Internet -> …` cho mọi service lộ ra; `export`,
+`serve` vẽ một nút `Internet`.
+
+Chưa xét: NetworkPolicy chặn đường từ ingress controller (phải biết pod của nó
+nằm đâu), `Gateway` của Gateway API không có listener nào, cổng của
+`LoadBalancer` bị `loadBalancerSourceRanges` thu hẹp.
+
 ## Không đọc
 
 - Helm template, overlay của Kustomize, Terraform: không render. Ai cần thì
   khai `verify` gọi `helm template`, `terraform graph`, kube-linter, checkov.
-- Ingress, Istio: đợt sau. gRPC của Java, C#, C++: đợt sau. Node qua
+- gRPC của Java, C#, C++: đợt sau. Node qua
   `makeGenericClientConstructor`, nice-grpc, ts-proto; client Node gán vào biến
   rồi mới `new`.
 - Cổng trong NetworkPolicy, policy của CNI riêng (Cilium, Calico).

@@ -33,6 +33,38 @@ pub struct Service {
     /// Tên khác mà service khác dùng để gọi service này: `hostname`,
     /// `container_name`, alias trong `networks`.
     pub aliases: Vec<String>,
+    /// Cổng publish ra máy chủ (`ports:`), và `network_mode: host`.
+    pub ports: Vec<Port>,
+}
+
+/// Một cổng publish: như file viết (không có giá trị biến môi trường nào), dòng,
+/// và có chỉ mở cho máy cục bộ không (`127.0.0.1:8080:80`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Port {
+    pub shown: String,
+    pub line: usize,
+    pub local: bool,
+}
+
+/// Địa chỉ chỉ máy cục bộ mới tới được.
+fn loopback(host: &str) -> bool {
+    let h = host.trim_matches(['[', ']']);
+    h == "localhost" || h == "::1" || h.starts_with("127.")
+}
+
+/// `ports:` dạng chuỗi: `"80"`, `"8080:80"`, `"127.0.0.1:8080:80"`,
+/// `"[::1]:8080:80/tcp"`. Chỉ có cổng container thì Docker vẫn publish một cổng
+/// máy ngẫu nhiên trên mọi giao diện, nên không phải cục bộ.
+fn port_local(spec: &str) -> bool {
+    let spec = if spec.contains("${") { defaults(spec) } else { spec.to_string() };
+    let spec = spec.split('/').next().unwrap_or(&spec).to_string();
+    if let Some(rest) = spec.strip_prefix('[') {
+        return rest.split_once(']').is_some_and(|(h, _)| loopback(h));
+    }
+    // `host:published:target`; IPv6 không ngoặc (`::1:6000:6000`): mọi phần
+    // trước hai phần cuối là địa chỉ, như Docker tách.
+    let parts: Vec<&str> = spec.split(':').collect();
+    parts.len() >= 3 && loopback(&parts[..parts.len() - 2].join(":"))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -172,7 +204,7 @@ pub fn parse(text: &str) -> Result<File, yaml::Error> {
                 msg: format!("quá {} MB dữ liệu sau khi trải alias trong một file", MAX_COPIED >> 20),
             });
         }
-        let facts = s.env.len() + s.env_files.len() + s.depends_on.len() + s.links.len() + s.binds.len() + s.aliases.len();
+        let facts = s.env.len() + s.env_files.len() + s.depends_on.len() + s.links.len() + s.binds.len() + s.aliases.len() + s.ports.len();
         budget = budget.checked_sub(facts).ok_or_else(|| yaml::Error {
             line,
             msg: format!("quá {MAX_FACTS} mục (env, depends_on, volumes…) trong một file"),
@@ -254,6 +286,23 @@ fn service(name: &str, line: usize, n: Node<'_>, b: &mut Budget) -> Service {
                 s.links.push((b.own(target), item.line()));
             }
         }
+    }
+    for p in n.get("ports").into_iter().flat_map(Node::items) {
+        let (shown, local) = match p.as_str() {
+            Some(spec) => (b.own(spec), port_local(spec)),
+            // Dạng dài: `{target: 80, published: 8080, host_ip: 127.0.0.1}`.
+            None => {
+                let field = |k: &str| p.get(k).and_then(Node::as_str).unwrap_or("");
+                let host = field("host_ip");
+                let local = !host.is_empty() && loopback(&if host.contains("${") { defaults(host) } else { host.to_string() });
+                let shown = format!("{}{}:{}", if host.is_empty() { String::new() } else { format!("{host}:") }, field("published"), field("target"));
+                (b.own(&shown), local)
+            }
+        };
+        s.ports.push(Port { shown, line: p.line(), local });
+    }
+    if let Some(m) = n.get("network_mode").filter(|m| m.as_str() == Some("host")) {
+        s.ports.push(Port { shown: "network_mode: host".into(), line: m.line(), local: false });
     }
     if let Some(vols) = n.get("volumes") {
         for item in vols.items() {
@@ -477,6 +526,7 @@ impl Service {
             + strs(&self.depends_on)
             + strs(&self.links)
             + self.binds.iter().map(|b| b.host.len() + b.container.len()).sum::<usize>()
+            + self.ports.iter().map(|p| p.shown.len() + 8).sum::<usize>()
             + self.aliases.iter().map(String::len).sum::<usize>()
     }
 }
@@ -504,6 +554,7 @@ pub fn inherit(child: &mut Service, base: &Service) {
     child.depends_on.extend(base.depends_on.iter().cloned());
     child.links.extend(base.links.iter().cloned());
     child.binds.extend(base.binds.iter().cloned());
+    child.ports.extend(base.ports.iter().cloned());
 }
 
 #[cfg(test)]

@@ -1432,6 +1432,7 @@ fn judge_deploy(
     // Đường NetworkPolicy cho phép mà thiếu `link`: báo một lần cho mỗi cặp
     // service, ở chỗ đầu tiên thấy.
     let mut granted: HashSet<(String, String)> = HashSet::new();
+    let mut exposed_reported: HashSet<String> = HashSet::new();
     let mut walked: HashSet<(String, bool, usize)> = HashSet::new();
     let mut grant_steps = 0usize;
     let linked_pairs: HashSet<(&str, &str)> = doc
@@ -1450,6 +1451,26 @@ fn judge_deploy(
         for v in found {
             // Patch Kustomize đè lên workload này mà archctl không áp (TM-21).
             report.deploy_unread.extend(v.patched.iter().cloned());
+            // Lộ ra ngoài: cạnh từ `Internet`, cần `link Internet -> …` (TM-29).
+            if let Some(e) = v.exposed.first() {
+                let internet = crate::model::INTERNET;
+                seen.insert((internet.to_string(), s.name.clone()));
+                if !linked_pairs.contains(&(internet, s.name.as_str())) && exposed_reported.insert(s.name.clone()) {
+                    report.violations.push(Violation {
+                        from: internet.to_string(),
+                        to: s.name.clone(),
+                        file: e.file.clone(),
+                        line: e.line,
+                        spec: e.shown.clone(),
+                        via: Via::Network,
+                        count: v.exposed.len(),
+                        reason: Reason::NotLinked,
+                        rule: format!("service {} lộ ra Internet mà không có `link {internet} -> {}`", s.name, s.name),
+                        status: Status::Accepted,
+                        hint: format!("thêm `link {internet} -> {}`, hoặc bỏ lối vào này", s.name),
+                    });
+                }
+            }
             // NetworkPolicy cho phép rõ một đường tới service khác: cũng là cạnh
             // mạng, cần `link` (TM-24). Mỗi bộ luật của một policy duyệt một lần
             // cho mỗi service, mỗi cặp service một vi phạm, có ngân sách: một
@@ -1630,7 +1651,10 @@ fn judge_deploy(
     }
 
     for l in doc.links.iter().filter(|l| l.meta.status.is_enforced()) {
-        let has_config = |name: &str| matched.iter().any(|(s, f)| s.name == name && !f.is_empty());
+        // `Internet` không có cấu hình riêng: lối vào nằm ở cấu hình của đích.
+        let has_config = |name: &str| {
+            name == crate::model::INTERNET || matched.iter().any(|(s, f)| s.name == name && !f.is_empty())
+        };
         if !has_config(&l.from) {
             continue;
         }

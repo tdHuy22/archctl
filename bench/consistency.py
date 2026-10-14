@@ -71,7 +71,9 @@ RPC = {
 DEPLOY = {
     # `depends_on` của compose, và tên service trong biến môi trường.
     "example-voting-app": {
-        "links": [("Vote", "Redis"), ("Result", "Db"), ("Worker", "Db"), ("Worker", "Redis")],
+        # `ports: ["8080:80"]` của vote, result: lộ ra Internet.
+        "links": [("Vote", "Redis"), ("Result", "Db"), ("Worker", "Db"), ("Worker", "Redis"),
+                  ("Internet", "Vote"), ("Internet", "Result")],
         # `vote/Dockerfile` stage `dev`: `python app.py` trong `vote/`.
         "runs": [("Vote", "Vote")],
     },
@@ -84,8 +86,10 @@ DEPLOY = {
     # Manifest Kubernetes: `PRODUCT_CATALOG_SERVICE_ADDR: "productcatalogservice:3550"`
     # → Service `productcatalogservice` → selector `app: productcatalogservice`.
     "microservices-demo": {
+        # `frontend-external` là `LoadBalancer`, cộng VirtualService của Istio: lộ ra Internet.
         "links": [("Checkoutservice", "Productcatalogservice"), ("Frontend", "Cartservice"),
-                  ("Recommendationservice", "Productcatalogservice"), ("Cartservice", "RedisCart")],
+                  ("Recommendationservice", "Productcatalogservice"), ("Cartservice", "RedisCart"),
+                  ("Internet", "Frontend")],
         # image `emailservice` → skaffold `context: src/emailservice` →
         # `ENTRYPOINT ["python", "email_server.py"]`; Go dựng bằng `go build`.
         "runs": [("Emailservice", "Emailservice"), ("Checkoutservice", "Checkoutservice")],

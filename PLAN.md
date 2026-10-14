@@ -9,6 +9,24 @@ Cập nhật 2026-10-14.
 
 ### Đã xong, có bằng chứng
 
+- **Lối vào từ Internet, việc C của đợt 3** (2026-10-14, commit ngay sau `781b0e9`; bạn chốt "làm
+  theo đề xuất", trang https://claude.ai/artifact/CwipwvTdGjT9rjhrg8Q8Hf). `Internet` là
+  tên dành riêng: `link Internet -> X` cho X lộ ra ngoài; khai `service Internet` hay
+  `link X -> Internet` là lỗi. Lộ ra ngoài gồm Ingress (rules, `defaultBackend`), route
+  Gateway API (backendRef có `namespace`), VirtualService gắn gateway khác `mesh` (cả
+  `delegate`), Service `LoadBalancer`/`NodePort`/`externalIPs`, `hostNetwork` (mọi cách
+  viết true của YAML), `hostPort`, cổng compose (chuỗi, dạng dài, `network_mode: host`;
+  trừ loopback cả IPv6). Thiếu `link` là vi phạm, mỗi service một mục; có `link` mà
+  không gì lộ ra là cảnh báo `--strict` tính. `init` sinh link, `export`/`serve` vẽ nút
+  Internet. Bộ đo: link Internet cho voting app, Online Boutique trong
+  `consistency.DEPLOY`; oracle `k8s_truth.py` tính lại tập lộ ra ngoài; 2 kiểu phá mới
+  (44). Threat model TM-29..31 đã có. Review opus: 6 mục (route lặp một Service làm
+  hook chạy 78 s, backendRef khác namespace, `hostNetwork: True`, `::1:6000:6000`, host
+  ngoài cụm và `delegate` của VirtualService, cạnh vi phạm trên `serve`), sửa hết, có
+  test. Biên nhận trên mã cuối: `cargo test` (608), clippy, `cargo +1.88 check`, bộ đo
+  30 repo 0 bất nhất 1050/1050, oracle khớp hết, sabotage 59 ca 0 trượt, `verify` 3/3,
+  `check --strict` 0.
+
 - **gRPC của Node và Rust, việc B của đợt 3** (2026-10-14, commit ngay sau `c5ae95d`). Node:
   `addService(proto.X.service)`, `new proto.X(addr)` (nạp `.proto` lúc chạy) và mã
   sinh `XService`/`XClient`; chuỗi thuộc tính là đuôi package (`Origin::Suffix`).
@@ -368,11 +386,9 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-1. Việc C (bạn chọn 2026-10-14): lối vào từ ngoài cụm. Ingress, Istio `Gateway` và
-   `VirtualService` cho biết service nào lộ ra Internet; dự kiến `link Internet ->
-   Frontend` với `Internet` là service đặc biệt, không thêm từ khoá. Hướng D (cạnh
-   mạng từ mã) để sau.
-2. Chưa push `c5ae95d` và commit B lên GitHub.
+1. Chưa push `c5ae95d`, `781b0e9` và commit việc C lên GitHub; nên qua nhánh thử, CI
+   xanh rồi mới lên `main`.
+2. Hướng D (cạnh mạng từ mã: biến môi trường trong mã ↔ tên máy trong manifest) chờ bạn chốt.
 
 **Đã quyết (2026-10-11): cạnh binding Python ↔ native tự viết.** Đã tìm theo
 skill reuse-best. Không công cụ tĩnh nào phủ cả PyO3, pybind11, nanobind
@@ -596,4 +612,7 @@ không có `link` là vi phạm, có `link` mà cụm chặn là cảnh báo (`-
   báo; `init` sinh `link` theo policy; `scan`; bộ đo (Online Boutique), oracle, sabotage; tài liệu.
 - [x] gRPC của Node (`@grpc/proto-loader`, `addService`) và Rust (`tonic`); bộ đo
   Online Boutique (currency, payment), vllm; oracle, sabotage; tài liệu.
+- [x] Lối vào từ Internet (việc C): `link Internet -> X`; Ingress, Gateway API, Istio,
+  Service `LoadBalancer`/`NodePort`/`externalIPs`, `hostNetwork`/`hostPort`, cổng
+  compose; bộ đo (Online Boutique, voting app), oracle, sabotage; tài liệu.
 

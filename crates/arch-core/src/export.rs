@@ -60,6 +60,11 @@ pub fn mermaid(doc: &Document, opts: &Options) -> String {
             let _ = writeln!(out, "    {}([\"{}{runs}\"])", svc_id(&s.name), s.name);
         }
         out.push_str("  end\n");
+        // Lối vào từ ngoài: nằm ngoài khối triển khai.
+        let internet = crate::model::INTERNET;
+        if doc.links.iter().any(|l| l.from == internet) {
+            let _ = writeln!(out, "  {}((\"{internet}\"))", svc_id(internet));
+        }
     }
 
     out.push_str(&edges(doc, &scope, opts.violations));

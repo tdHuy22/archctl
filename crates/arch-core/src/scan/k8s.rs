@@ -31,6 +31,9 @@ pub struct File {
     /// Tên trong các tài liệu `kind: Namespace`.
     pub namespaces: Vec<String>,
     pub policies: Vec<NetPolicy>,
+    /// Đường từ ngoài cụm vào: Ingress, route của Gateway API, VirtualService
+    /// của Istio gắn với một Gateway.
+    pub routes: Vec<Route>,
     /// Byte đã chép ra khỏi cây YAML, để bên nạp tính trần chung.
     pub size: usize,
 }
@@ -46,6 +49,9 @@ pub struct Workload {
     pub containers: Vec<Container>,
     /// `kubectl.kubernetes.io/default-container`: container chính của pod.
     pub default_container: Option<String>,
+    /// Pod dùng mạng của máy chủ (`hostNetwork: true`) hay mở `hostPort`: lộ
+    /// ra ngoài cụm. Cách viết, để in.
+    pub host: Option<String>,
 }
 
 impl Workload {
@@ -103,7 +109,33 @@ pub struct Service {
     /// `type: ExternalName`: tên máy mà Service này là bí danh (viết thường,
     /// bỏ dấu chấm cuối). Có thể trỏ tới một Service khác trong cụm.
     pub external: Option<String>,
+    /// Service mở ra ngoài cụm: `type: LoadBalancer`, `NodePort`, hay có
+    /// `externalIPs`. Cách viết, để in.
+    pub exposed: Option<String>,
 }
+
+/// Một đường từ ngoài cụm vào.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Route {
+    pub kind: String,
+    pub name: String,
+    pub namespace: Option<String>,
+    pub line: usize,
+    /// Service đích (Ingress, Gateway API): tên, namespace nếu backendRef ghi
+    /// riêng (route ở namespace hạ tầng trỏ sang namespace ứng dụng), dòng.
+    pub services: Vec<(String, Option<String>, usize)>,
+    /// Tên máy đích (`destination.host` của VirtualService), kèm dòng.
+    pub hosts: Vec<(String, usize)>,
+    /// Lối vào từ ngoài (gắn Gateway khác `mesh`). VirtualService chỉ cho
+    /// `mesh` vẫn được giữ, vì một VirtualService gắn Gateway có thể
+    /// `delegate` sang nó.
+    pub public: bool,
+    /// `http[].delegate` của VirtualService: tên, namespace, dòng.
+    pub delegates: Vec<(String, Option<String>, usize)>,
+}
+
+/// Loại route của Gateway API.
+const GATEWAY_ROUTES: &[&str] = &["HTTPRoute", "GRPCRoute", "TCPRoute", "TLSRoute", "UDPRoute"];
 
 #[derive(Debug, Clone, Default)]
 pub struct ConfigMap {
@@ -321,6 +353,84 @@ fn object(n: Node<'_>, r: &mut Reader, out: &mut File) -> Result<(), yaml::Error
             let name = name_of(r);
             out.namespaces.push(name);
         }
+        "Ingress" => {
+            let spec = n.get("spec");
+            let mut services = Vec::new();
+            // `networking.k8s.io/v1`: `backend.service.name`; `v1beta1`:
+            // `backend.serviceName`. `defaultBackend` (v1), `backend` (v1beta1).
+            let mut backend = |b: Option<Node<'_>>, r: &mut Reader| {
+                let Some(b) = b else { return };
+                let name = b.get("service").and_then(|s| s.get("name")).or_else(|| b.get("serviceName"));
+                if let Some(nm) = name.and_then(Node::as_str)
+                    && r.fact(1)
+                {
+                    services.push((r.b.own(nm), None, b.line()));
+                }
+            };
+            backend(spec.and_then(|s| s.get("defaultBackend")), r);
+            backend(spec.and_then(|s| s.get("backend")), r);
+            for rule in spec.and_then(|s| s.get("rules")).into_iter().flat_map(Node::items) {
+                for p in rule.get("http").and_then(|h| h.get("paths")).into_iter().flat_map(Node::items) {
+                    backend(p.get("backend"), r);
+                }
+            }
+            let route = Route { kind: r.b.own(kind), name: name_of(r), namespace: ns_of(r), line, services, public: true, ..Route::default() };
+            out.routes.push(route);
+        }
+        k if GATEWAY_ROUTES.contains(&k) => {
+            let spec = n.get("spec");
+            // Route gắn vào Service (GAMMA, mesh) là đường trong cụm, không phải lối vào.
+            let parents: Vec<Node<'_>> = spec.and_then(|s| s.get("parentRefs")).into_iter().flat_map(Node::items).collect();
+            let mesh = !parents.is_empty() && parents.iter().all(|p| p.get("kind").and_then(Node::as_str) == Some("Service"));
+            if !mesh {
+                let mut services = Vec::new();
+                for rule in spec.and_then(|s| s.get("rules")).into_iter().flat_map(Node::items) {
+                    for b in rule.get("backendRefs").into_iter().flat_map(Node::items) {
+                        let kind_ok = b.get("kind").and_then(Node::as_str).is_none_or(|k| k == "Service");
+                        if kind_ok
+                            && let Some(nm) = b.get("name").and_then(Node::as_str)
+                            && r.fact(1)
+                        {
+                            let ns = r.text(b.get("namespace"));
+                            services.push((r.b.own(nm), ns, b.line()));
+                        }
+                    }
+                }
+                let route = Route { kind: r.b.own(k), name: name_of(r), namespace: ns_of(r), line, services, public: true, ..Route::default() };
+                out.routes.push(route);
+            }
+        }
+        "VirtualService" => {
+            let spec = n.get("spec");
+            // Không ghi `gateways` hay chỉ `mesh`: đường trong cụm.
+            let gateways: Vec<&str> = spec.and_then(|s| s.get("gateways")).into_iter().flat_map(Node::items).filter_map(Node::as_str).collect();
+            let public = gateways.iter().any(|g| *g != "mesh");
+            let mut hosts = Vec::new();
+            let mut delegates = Vec::new();
+            for proto in ["http", "tcp", "tls"] {
+                for rule in spec.and_then(|s| s.get(proto)).into_iter().flat_map(Node::items) {
+                    if !r.fact(1) {
+                        break;
+                    }
+                    if let Some(d) = rule.get("delegate")
+                        && let Some(nm) = d.get("name").and_then(Node::as_str)
+                    {
+                        let ns = r.text(d.get("namespace"));
+                        delegates.push((r.b.own(nm), ns, d.line()));
+                    }
+                    for d in rule.get("route").into_iter().flat_map(Node::items) {
+                        if let Some(h) = d.get("destination").and_then(|x| x.get("host"))
+                            && let Some(host) = h.as_str()
+                            && r.fact(1)
+                        {
+                            hosts.push((r.b.own(&host.trim_end_matches('.').to_ascii_lowercase()), h.line()));
+                        }
+                    }
+                }
+            }
+            let route = Route { kind: r.b.own(kind), name: name_of(r), namespace: ns_of(r), line, hosts, public, delegates, ..Route::default() };
+            out.routes.push(route);
+        }
         "NetworkPolicy" => {
             let spec = n.get("spec");
             let types: Vec<&str> = spec
@@ -366,14 +476,22 @@ fn object(n: Node<'_>, r: &mut Reader, out: &mut File) -> Result<(), yaml::Error
         "Service" => {
             let spec = n.get("spec");
             // `ExternalName` không chọn pod nào: nó là bí danh của một tên máy.
-            let (selector, external) = match spec.and_then(|s| s.get("type")).and_then(Node::as_str) {
+            let kind = spec.and_then(|s| s.get("type")).and_then(Node::as_str);
+            let (selector, external) = match kind {
                 Some("ExternalName") => {
                     let host = r.text(spec.and_then(|s| s.get("externalName")));
                     (Vec::new(), host.map(|h| h.trim_end_matches('.').to_ascii_lowercase()))
                 }
                 _ => (r.pairs(spec.and_then(|s| s.get("selector"))), None),
             };
-            let s = Service { name: name_of(r), namespace: ns_of(r), line, selector, external };
+            let exposed = match kind {
+                Some(k @ ("LoadBalancer" | "NodePort")) => Some(format!("type: {k}")),
+                _ if spec.and_then(|s| s.get("externalIPs")).is_some_and(|e| e.items().next().is_some()) => {
+                    Some("externalIPs".to_string())
+                }
+                _ => None,
+            };
+            let s = Service { name: name_of(r), namespace: ns_of(r), line, selector, external, exposed };
             out.services.push(s);
         }
         "ConfigMap" => {
@@ -402,14 +520,24 @@ fn object(n: Node<'_>, r: &mut Reader, out: &mut File) -> Result<(), yaml::Error
                         .and_then(|m| m.get("annotations"))
                         .and_then(|a| a.get("kubectl.kubernetes.io/default-container")),
                 ),
+                host: None,
             };
             for (key, init) in [("initContainers", true), ("containers", false)] {
                 for c in spec.get(key).into_iter().flat_map(Node::items) {
                     if !r.fact(1) {
                         break;
                     }
+                    if w.host.is_none()
+                        && c.get("ports").into_iter().flat_map(Node::items).any(|p| p.get("hostPort").is_some())
+                    {
+                        w.host = Some("hostPort".to_string());
+                    }
                     w.containers.push(container(c, init, r));
                 }
+            }
+            // YAML 1.1 như Kubernetes đọc: `true`, `True`, `yes`, `on`, `y`.
+            if spec.get("hostNetwork").and_then(Node::as_str).is_some_and(truthy) {
+                w.host = Some("hostNetwork: true".to_string());
             }
             out.workloads.push(w);
         }
@@ -432,6 +560,11 @@ fn generic_pod(n: Node<'_>) -> bool {
     let spec = n.get("spec");
     has(spec.and_then(|s| s.get("template")))
         || has(spec.and_then(|s| s.get("jobTemplate")).and_then(|j| j.get("spec")).and_then(|s| s.get("template")))
+}
+
+/// Giá trị đúng của YAML 1.1 (thư viện YAML của Kubernetes).
+fn truthy(v: &str) -> bool {
+    matches!(v.to_ascii_lowercase().as_str(), "true" | "yes" | "on" | "y")
 }
 
 fn selector(n: Option<Node<'_>>, r: &mut Reader) -> Selector {

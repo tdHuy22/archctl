@@ -27,6 +27,12 @@ fn check_services(doc: &Document, diags: &mut Vec<Diag>) {
     let mut seen: HashMap<&str, usize> = HashMap::new();
     let mut sources: HashMap<String, usize> = HashMap::new();
     for s in &doc.services {
+        if s.name == INTERNET {
+            diags.push(
+                Diag::error(s.meta.line, format!("`{INTERNET}` là tên dành riêng cho lối vào từ ngoài, không khai `service` cho nó được"))
+                    .with_hint(format!("viết `link {INTERNET} -> <Service>` để cho service đó lộ ra ngoài")),
+            );
+        }
         if let Some(first) = seen.insert(s.name.as_str(), s.meta.line) {
             diags.push(Diag::error(
                 s.meta.line,
@@ -81,7 +87,16 @@ fn check_services(doc: &Document, diags: &mut Vec<Diag>) {
     }
 
     for link in &doc.links {
+        if link.to.iter().any(|t| t == INTERNET) {
+            diags.push(
+                Diag::error(link.meta.line, format!("`{INTERNET}` chỉ đứng ở đầu `link`: nó là lối vào từ ngoài"))
+                    .with_hint("gọi ra dịch vụ ngoài thì khai `service` cho dịch vụ đó"),
+            );
+        }
         for name in std::iter::once(&link.from).chain(&link.to) {
+            if name == INTERNET {
+                continue;
+            }
             if doc.service(name).is_none() {
                 diags.push(
                     Diag::error(link.meta.line, format!("`link` trỏ tới service `{name}` chưa khai báo"))

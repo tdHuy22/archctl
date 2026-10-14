@@ -254,6 +254,10 @@ impl Service {
     }
 }
 
+/// Tên dành riêng cho lối vào từ ngoài: `link Internet -> Frontend` là
+/// Frontend được lộ ra Internet. Không khai `service` cho nó được.
+pub const INTERNET: &str = "Internet";
+
 /// Cạnh mạng được phép giữa hai service. Như `allow`: không có `link` là cấm.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Link {

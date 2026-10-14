@@ -56,6 +56,13 @@ fn node_names(doc: &Document) -> Vec<String> {
         .chain(doc.stores.iter().map(|s| s.name.clone()))
         .chain(doc.apis.iter().map(|a| a.name.clone()))
         .chain(doc.services.iter().map(|s| format!("{SERVICE_PREFIX}{}", s.name)))
+        // Lối vào từ ngoài: một nút khi có `link Internet -> …`.
+        .chain(
+            doc.links
+                .iter()
+                .any(|l| l.from == crate::model::INTERNET)
+                .then(|| format!("{SERVICE_PREFIX}{}", crate::model::INTERNET)),
+        )
         .collect();
     names.sort();
     names.dedup();
@@ -87,9 +94,16 @@ fn edge_list(doc: &Document, nodes: &[String]) -> Vec<(String, String)> {
             edges.insert((from.clone(), c.clone()));
         }
     }
+    // Chỉ cạnh giữa hai nút có thật: `link` tới service chưa khai là lỗi của
+    // file luật, không được làm sơ đồ đổ.
+    let node = |name: &str| format!("{SERVICE_PREFIX}{name}");
+    let has = |n: &String| nodes.iter().any(|x| x == n);
     for l in &doc.links {
         for to in l.to.iter().filter(|t| **t != l.from) {
-            edges.insert((format!("{SERVICE_PREFIX}{}", l.from), format!("{SERVICE_PREFIX}{to}")));
+            let (a, b) = (node(&l.from), node(to));
+            if has(&a) && has(&b) {
+                edges.insert((a, b));
+            }
         }
     }
     edges.into_iter().collect()
@@ -363,6 +377,13 @@ mod tests {
         let p = place(&d, &Saved::new());
         assert_eq!(p["A"].x, p["B"].x);
         assert_ne!(p["A"].y, p["B"].y, "không được chồng lên nhau");
+    }
+
+    #[test]
+    fn loi_vao_internet_co_nut_rieng() {
+        let d = doc("service A\nlink Internet -> A");
+        let p = place(&d, &Saved::new());
+        assert!(p["svc:Internet"].x < p["svc:A"].x, "lối vào đứng trước service nó mở");
     }
 
     #[test]

@@ -386,6 +386,18 @@ fn model_json(root: &Path) -> String {
         };
         nodes.push(node_json(&svc(&s.name), "service", &sub, &s.meta, &places));
     }
+    // Lối vào từ ngoài: một nút riêng khi có `link Internet -> …`.
+    // Cả khi chưa có link nào mà đã có vi phạm từ Internet: cạnh đỏ cần nút.
+    let internet = arch_core::model::INTERNET;
+    if let Some(meta) = doc
+        .links
+        .iter()
+        .find(|l| l.from == internet)
+        .map(|l| l.meta.clone())
+        .or_else(|| report.violations.iter().any(|v| v.from == internet).then(Default::default))
+    {
+        nodes.push(node_json(&svc(internet), "service", "lối vào từ ngoài", &meta, &places));
+    }
 
     let edges: Vec<String> = doc
         .rules

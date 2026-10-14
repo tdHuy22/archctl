@@ -1317,8 +1317,13 @@ fn scan_deploy(
                                 .iter()
                                 .map(|b| format!("[{},{},{}]", quoted(&b.host), quoted(&b.container), b.line))
                                 .collect();
+                            let ports: Vec<String> = s
+                                .ports
+                                .iter()
+                                .map(|p| format!("[{},{},{}]", quoted(&p.shown), p.line, p.local))
+                                .collect();
                             format!(
-                                r#"{{"name":{},"line":{},"image":{},"build":{build},"command":{},"entrypoint":{},"workingDir":{},"dependsOn":{},"links":{},"env":[{}],"envFiles":{},"binds":[{}],"extends":{},"aliases":{}}}"#,
+                                r#"{{"name":{},"line":{},"image":{},"build":{build},"command":{},"entrypoint":{},"workingDir":{},"dependsOn":{},"links":{},"env":[{}],"envFiles":{},"binds":[{}],"extends":{},"aliases":{},"ports":[{}]}}"#,
                                 quoted(&s.name),
                                 s.line,
                                 maybe(s.image.as_deref()),
@@ -1332,6 +1337,7 @@ fn scan_deploy(
                                 binds.join(","),
                                 s.extends.as_ref().map_or_else(|| "null".to_string(), |e| quoted(&e.service)),
                                 list(&s.aliases),
+                                ports.join(","),
                             )
                         })
                         .collect();
@@ -1419,6 +1425,9 @@ fn scan_deploy(
             for u in &svc.patched {
                 say!("  ? {} — {}", u.file, u.why);
             }
+            for e in &svc.exposed {
+                say!("  lộ ra Internet  ({}:{} {})", e.file, e.line, e.shown);
+            }
         }
         let edges: Vec<String> = svc
             .edges
@@ -1466,8 +1475,13 @@ fn scan_deploy(
             keys.dedup();
             format!(r#"{{"isolated":{},"any":{},"pods":{}}}"#, g.isolated, any, json::strings(keys.iter().map(String::as_str)))
         };
+        let exposed: Vec<String> = svc
+            .exposed
+            .iter()
+            .map(|e| format!(r#"{{"file":{},"line":{},"shown":{}}}"#, json::string(&e.file), e.line, json::string(&e.shown)))
+            .collect();
         services.push(format!(
-            r#"{{"key":{},"file":{},"line":{},"code":{},"edges":[{}],"starts":[{}],"unknown":{},"patched":[{}],"ingress":{},"egress":{}}}"#,
+            r#"{{"key":{},"file":{},"line":{},"code":{},"edges":[{}],"starts":[{}],"unknown":{},"patched":[{}],"ingress":{},"egress":{},"exposed":[{}]}}"#,
             json::string(&key),
             json::string(&svc.file),
             svc.line,
@@ -1478,6 +1492,7 @@ fn scan_deploy(
             patched.join(","),
             guard(&svc.ingress),
             guard(&svc.egress),
+            exposed.join(","),
         ));
     }
     if !as_json {
@@ -1554,6 +1569,7 @@ fn scan_k8s_file(
                 && f.services.is_empty()
                 && f.config_maps.is_empty()
                 && f.policies.is_empty()
+                && f.routes.is_empty()
                 && f.unknown.is_empty()) =>
         {
             f
@@ -1609,13 +1625,14 @@ fn scan_k8s_file(
                 })
                 .collect();
             format!(
-                r#"{{"kind":{},"name":{},"namespace":{},"line":{},"labels":{},"containers":[{}]}}"#,
+                r#"{{"kind":{},"name":{},"namespace":{},"line":{},"labels":{},"containers":[{}],"host":{}}}"#,
                 json::string(&w.kind),
                 json::string(&w.name),
                 maybe(w.namespace.as_deref()),
                 w.line,
                 pairs(&w.labels),
-                containers.join(",")
+                containers.join(","),
+                maybe(w.host.as_deref())
             )
         })
         .collect();
@@ -1624,11 +1641,12 @@ fn scan_k8s_file(
         .iter()
         .map(|s| {
             format!(
-                r#"{{"name":{},"namespace":{},"line":{},"selector":{}}}"#,
+                r#"{{"name":{},"namespace":{},"line":{},"selector":{},"exposed":{}}}"#,
                 json::string(&s.name),
                 maybe(s.namespace.as_deref()),
                 s.line,
-                pairs(&s.selector)
+                pairs(&s.selector),
+                maybe(s.exposed.as_deref())
             )
         })
         .collect();
@@ -1696,13 +1714,40 @@ fn scan_k8s_file(
             )
         })
         .collect();
+    let targets = |v: &[(String, usize)]| {
+        format!("[{}]", v.iter().map(|(n, l)| format!("[{},{l}]", json::string(n))).collect::<Vec<_>>().join(","))
+    };
+    let refs = |v: &[(String, Option<String>, usize)]| {
+        format!(
+            "[{}]",
+            v.iter().map(|(n, ns, l)| format!("[{},{},{l}]", json::string(n), maybe(ns.as_deref()))).collect::<Vec<_>>().join(",")
+        )
+    };
+    let routes: Vec<String> = f
+        .routes
+        .iter()
+        .map(|r| {
+            format!(
+                r#"{{"kind":{},"name":{},"namespace":{},"line":{},"public":{},"services":{},"hosts":{},"delegates":{}}}"#,
+                json::string(&r.kind),
+                json::string(&r.name),
+                maybe(r.namespace.as_deref()),
+                r.line,
+                r.public,
+                refs(&r.services),
+                targets(&r.hosts),
+                refs(&r.delegates)
+            )
+        })
+        .collect();
     Some(format!(
-        r#"{{"file":{},"kind":"k8s","workloads":[{}],"services":[{}],"configMaps":[{}],"policies":[{}],"unknown":[{}]}}"#,
+        r#"{{"file":{},"kind":"k8s","workloads":[{}],"services":[{}],"configMaps":[{}],"policies":[{}],"routes":[{}],"unknown":[{}]}}"#,
         json::string(file),
         workloads.join(","),
         services.join(","),
         maps.join(","),
         policies.join(","),
+        routes.join(","),
         unknown.join(",")
     ))
 }

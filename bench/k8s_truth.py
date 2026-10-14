@@ -147,6 +147,71 @@ def policy_of(doc):
             "egress": rules("egress", "to") if has("Egress", "egress") else None}
 
 
+ROUTES = ("HTTPRoute", "GRPCRoute", "TCPRoute", "TLSRoute", "UDPRoute")
+
+
+def service_exposed(doc):
+    """Service mở ra ngoài cụm: `type: LoadBalancer`, `NodePort`, hay có `externalIPs`."""
+    kind = scalar(get(doc, "spec", "type"))
+    if kind in ("LoadBalancer", "NodePort"):
+        return f"type: {kind}"
+    return "externalIPs" if items(get(doc, "spec", "externalIPs")) else None
+
+
+def truthy(v):
+    """Giá trị đúng của YAML 1.1, như thư viện YAML của Kubernetes đọc."""
+    return v is not None and v.lower() in ("true", "yes", "on", "y")
+
+
+def workload_host(spec, containers):
+    if truthy(scalar(get(spec, "hostNetwork"))):
+        return "hostNetwork: true"
+    if any(get(p, "hostPort") is not None for c in containers for p in items(get(c, "ports"))):
+        return "hostPort"
+    return None
+
+
+def route_of(kind, doc):
+    """`{"services": [(tên, ns|None, dòng)], "hosts": [(máy, dòng)], "public": bool,
+    "delegates": [(tên, ns|None, dòng)]}` của một lối vào; None khi không phải
+    (route của Gateway API chỉ gắn Service). VirtualService chỉ cho `mesh` vẫn
+    trả về, `public` sai, vì có thể là đích của `delegate`."""
+    spec = get(doc, "spec")
+    if kind == "Ingress":
+        out = []
+        for b in [get(spec, "defaultBackend"), get(spec, "backend")] + \
+                 [get(p, "backend") for r in items(get(spec, "rules")) for p in items(get(r, "http", "paths"))]:
+            if b is None:
+                continue
+            nm = scalar(get(b, "service", "name")) or scalar(get(b, "serviceName"))
+            if nm is not None:
+                out.append((nm, None, line(b)))
+        return {"services": out, "hosts": [], "public": True, "delegates": []}
+    if kind in ROUTES:
+        parents = items(get(spec, "parentRefs"))
+        if parents and all(scalar(get(p, "kind")) == "Service" for p in parents):
+            return None
+        svcs = [(scalar(get(b, "name")), scalar(get(b, "namespace")), line(b))
+                for r in items(get(spec, "rules")) for b in items(get(r, "backendRefs"))
+                if scalar(get(b, "name")) is not None and (scalar(get(b, "kind")) or "Service") == "Service"]
+        return {"services": svcs, "hosts": [], "public": True, "delegates": []}
+    if kind == "VirtualService":
+        gws = [scalar(g) for g in items(get(spec, "gateways"))]
+        hosts, delegates = [], []
+        for proto in ("http", "tcp", "tls"):
+            for r in items(get(spec, proto)):
+                d = get(r, "delegate")
+                if scalar(get(d, "name")) is not None:
+                    delegates.append((scalar(get(d, "name")), scalar(get(d, "namespace")), line(d)))
+                for dest in items(get(r, "route")):
+                    h = get(dest, "destination", "host")
+                    if scalar(h) is not None:
+                        hosts.append((scalar(h).rstrip(".").lower(), line(h)))
+        return {"services": [], "hosts": hosts, "public": any(g != "mesh" for g in gws if g is not None),
+                "delegates": delegates}
+    return None
+
+
 def compact(x):
     return json.dumps(x, separators=(",", ":"), ensure_ascii=False)
 
@@ -170,6 +235,13 @@ def manifest_facts(text):
         if kind == "Service":
             sel = [] if scalar(get(doc, "spec", "type")) == "ExternalName" else pairs(get(doc, "spec", "selector"))
             out.append((at, f"Service {name} ns={ns} selector={json.dumps(sel)}"))
+            if service_exposed(doc):
+                out.append((at, f"Service {name} exposed={service_exposed(doc)}"))
+        elif (route := route_of(kind, doc)) is not None and route["public"]:
+            out.append((at, f"{kind} {name} ns={ns}"))
+            out += [(l, f"{name}.backend {s} ns={rns}") for s, rns, l in route["services"]]
+            out += [(l, f"{name}.host {h}") for h, l in route["hosts"]]
+            out += [(l, f"{name}.delegate {d} ns={dns}") for d, dns, l in route["delegates"]]
         elif kind == "NetworkPolicy":
             pol = policy_of(doc)
             out.append((at, f"NetworkPolicy {name} ns={ns} pods={compact(pol['pods'])} "
@@ -189,6 +261,9 @@ def manifest_facts(text):
             if spec is None:
                 continue
             out.append((at, f"{kind} {name} ns={ns} labels={json.dumps(pairs(get(meta, 'labels')))}"))
+            how = workload_host(spec, [c for key in ("initContainers", "containers") for c in items(get(spec, key))])
+            if how:
+                out.append((at, f"{name}.host {how}"))
             for key, init in (("initContainers", True), ("containers", False)):
                 for c in items(get(spec, key)):
                     cname = scalar(get(c, "name")) or ""
@@ -418,7 +493,7 @@ def edges_main(root):
                         patch_files.add(full)
 
     files = [f for f in listed if not aside(f)] + sorted(f for f in reached if f not in listed or aside(f))
-    workloads, services, maps, policies = [], [], [], []
+    workloads, services, maps, policies, routes = [], [], [], [], []
     for f in dict.fromkeys(files):
         name = f.rsplit("/", 1)[-1]
         if not f.endswith((".yaml", ".yml", ".json")):
@@ -447,6 +522,8 @@ def edges_main(root):
             obj = {"file": f, "dir": dir_of(f), "name": scalar(get(doc, "metadata", "name")) or "", "ns": meta_ns}
             if kind == "NetworkPolicy":
                 policies.append({**obj, **policy_of(doc)})
+            if kind is not None and (route := route_of(kind, doc)) is not None:
+                routes.append({**obj, "kind": kind, **route})
             if kind == "Service":
                 external = None
                 if scalar(get(doc, "spec", "type")) == "ExternalName":
@@ -454,7 +531,8 @@ def edges_main(root):
                     external = (scalar(get(doc, "spec", "externalName")) or "").rstrip(".").lower() or None
                 else:
                     sel = pairs(get(doc, "spec", "selector"))
-                services.append({**obj, "selector": [tuple(p) for p in sel], "external": external})
+                services.append({**obj, "selector": [tuple(p) for p in sel], "external": external,
+                                 "exposed": service_exposed(doc)})
             elif kind == "ConfigMap":
                 maps.append({**obj, "data": [(k, line(kn), scalar(v) or "") for k, kn, v in entries(get(doc, "data"))]})
             elif kind in WORKLOADS:
@@ -466,6 +544,7 @@ def edges_main(root):
                     continue
                 obj["labels"] = {tuple(p) for p in pairs(get(meta, "labels"))}
                 obj["kind"] = kind
+                obj["host"] = workload_host(spec, containers)
                 obj["containers"] = containers
                 workloads.append(obj)
 
@@ -606,7 +685,36 @@ def edges_main(root):
                 g[base] = g[base] or t["ns"] == pol["ns"]
                 g[base + 1] = g[base + 1] or any_
                 g[base + 2] |= pods
-    print(json.dumps({"edges": {k: sorted(v) for k, v in out.items()},
+    # Lối vào từ ngoài cụm: workload nào lộ ra.
+    exposed = {key_of(w["dir"], w["name"]) for w in workloads if w["host"]}
+    for s in services:
+        if s["exposed"]:
+            exposed |= {key_of(w["dir"], w["name"]) for w in select(s)}
+    def in_cluster(host, ns):
+        l = host.split(".")
+        if len(l) == 1:
+            return l[0], ns
+        if len(l) == 2 or l[2] == "svc":
+            return l[0], l[1]
+        return None
+
+    for r in routes:
+        if not r["public"]:
+            continue
+        targets = [s for name, rns, _ in r["services"] for s in find(name.lower(), rns or r["ns"], r["dir"])]
+        entry_hosts = [(h, r["ns"]) for h, _ in r["hosts"]]
+        for name, dns, _ in r["delegates"]:
+            dns = dns or r["ns"]
+            for child in routes:
+                if child["kind"] == "VirtualService" and child["name"] == name and same_ns(child["ns"], dns):
+                    entry_hosts += [(h, child["ns"] or dns) for h, _ in child["hosts"]]
+        for host, hns in entry_hosts:
+            hit = in_cluster(host, hns)
+            if hit:
+                targets += find(hit[0], hit[1], r["dir"])
+        for s in targets:
+            exposed |= {key_of(w["dir"], w["name"]) for w in select(s)}
+    print(json.dumps({"exposed": sorted(exposed), "edges": {k: sorted(v) for k, v in out.items()},
                       "guards": {k: [g[0], g[1], sorted(g[2]), g[3], g[4], sorted(g[5])] for k, g in guards.items()}},
                      ensure_ascii=False))
 

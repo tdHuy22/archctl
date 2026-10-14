@@ -758,6 +758,8 @@ def archctl_deploy(archctl, root, files):
                     facts.append((at, f"{name}.extends {s['extends']}"))
                 for a in s["aliases"]:
                     facts.append((at, f"{name}.alias {a}"))
+                for shown, line, local in s.get("ports", []):
+                    facts.append((line, f"{name}.port {shown} local={local}"))
         out[f["file"]] = collections.Counter(facts)
     return out
 
@@ -810,6 +812,15 @@ def archctl_k8s(archctl, root, files):
                                      f"target={a['target']}"))
         for s in f.get("services", []):
             facts.append((s["line"], f"Service {s['name']} ns={s['namespace']} selector={json.dumps(s['selector'])}"))
+            if s.get("exposed"):
+                facts.append((s["line"], f"Service {s['name']} exposed={s['exposed']}"))
+        for r in f.get("routes", []):
+            if not r["public"]:
+                continue
+            facts.append((r["line"], f"{r['kind']} {r['name']} ns={r['namespace']}"))
+            facts += [(l, f"{r['name']}.backend {n} ns={ns}") for n, ns, l in r["services"]]
+            facts += [(l, f"{r['name']}.host {h}") for h, l in r["hosts"]]
+            facts += [(l, f"{r['name']}.delegate {d} ns={ns}") for d, ns, l in r["delegates"]]
         compact = lambda x: json.dumps(x, separators=(",", ":"), ensure_ascii=False)
         for pol in f.get("policies", []):
             name = pol["name"]
@@ -829,6 +840,8 @@ def archctl_k8s(archctl, root, files):
         for w in f.get("workloads", []):
             name = w["name"]
             facts.append((w["line"], f"{w['kind']} {name} ns={w['namespace']} labels={json.dumps(w['labels'])}"))
+            if w.get("host"):
+                facts.append((w["line"], f"{name}.host {w['host']}"))
             for c in w["containers"]:
                 cn = c["name"]
                 facts.append((c["line"], f"{name}.container {cn} init={c['init']} image={c['image']}"))
@@ -843,6 +856,7 @@ def archctl_k8s(archctl, root, files):
         out[f["file"]] = collections.Counter(facts)
     edges = collections.defaultdict(set)
     guards = {}
+    exposed = {s["key"] for s in rep["services"] if s["key"].startswith("k8s:") and s.get("exposed")}
     for s in rep["services"]:
         if not s["key"].startswith("k8s:"):
             continue
@@ -852,7 +866,7 @@ def archctl_k8s(archctl, root, files):
             host = e["shown"].split(" → ", 1)[1].rsplit(":", 1)[0] if ":" in e["shown"].split(" → ", 1)[1] \
                 else e["shown"].split(" → ", 1)[1]
             edges[f"{s['key']}\t{e['file']}:{e['line']}\t{host}"].add(e["target"])
-    return out, edges, guards
+    return out, edges, guards, exposed
 
 
 def k8s_truth(python, root, files):
@@ -874,7 +888,7 @@ def k8s_truth(python, root, files):
     if p.returncode != 0:
         bench.die(f"thước đo Kubernetes hỏng: {p.stderr.strip()[-400:]}")
     res = json.loads(p.stdout)
-    return out, {k: set(v) for k, v in res["edges"].items()}, res["guards"]
+    return out, {k: set(v) for k, v in res["edges"].items()}, res["guards"], set(res["exposed"])
 
 
 PROTO_REQUIREMENTS = HERE / "proto-requirements.txt"
@@ -1214,8 +1228,14 @@ def main():
         yamls = yaml_files(root) if dep_python else []
         if yamls:
             kt = Tally("K8s")
-            have_all, have_edges, have_guards = archctl_k8s(archctl, root, yamls)
-            want_all, want_edges, want_guards = k8s_truth(dep_python, root, yamls)
+            have_all, have_edges, have_guards, have_exposed = archctl_k8s(archctl, root, yamls)
+            want_all, want_edges, want_guards, want_exposed = k8s_truth(dep_python, root, yamls)
+            # Lối vào từ ngoài cụm: tập workload lộ ra.
+            kt.imports += len(want_exposed)
+            for key in sorted(want_exposed - have_exposed):
+                kt.note(f"{key} thiếu lối vào từ Internet")
+            for key in sorted(have_exposed - want_exposed):
+                kt.note(f"{key} thừa lối vào từ Internet")
             for file, want in want_all.items():
                 if isinstance(want, str):
                     if want.startswith("ERR") and file in have_all:

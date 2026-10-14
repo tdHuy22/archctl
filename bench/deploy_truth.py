@@ -169,7 +169,36 @@ def compose_facts(text):
         for a in aliases:
             if a is not None:
                 out.append((at, f"{name}.alias {a}"))
+        # Cổng publish: cục bộ khi gắn vào loopback (theo tài liệu Docker).
+        for item in items(get(svc, "ports")):
+            text_ = scalar(item)
+            if text_ is not None:
+                out.append((line(item), f"{name}.port {text_} local={port_local(text_)}"))
+            else:
+                host = scalar(get(item, "host_ip")) or ""
+                shown = f"{host + ':' if host else ''}{scalar(get(item, 'published')) or ''}:{scalar(get(item, 'target')) or ''}"
+                out.append((line(item), f"{name}.port {shown} local={bool(host) and loopback(expand(host))}"))
+        mode = get(svc, "network_mode")
+        if scalar(mode) == "host":
+            out.append((line(mode), f"{name}.port network_mode: host local=False"))
     return out
+
+
+def expand(value):
+    return re.sub(r"\$\{[^}:-]*:?-([^}]*)\}", r"\1", value)
+
+
+def loopback(host):
+    h = host.strip("[]")
+    return h in ("localhost", "::1") or h.startswith("127.")
+
+
+def port_local(spec):
+    spec = expand(spec).split("/")[0]
+    if spec.startswith("["):
+        return loopback(spec[1:].split("]")[0])
+    parts = spec.split(":")
+    return len(parts) >= 3 and loopback(":".join(parts[:-2]))
 
 
 def blank_continuations(text):

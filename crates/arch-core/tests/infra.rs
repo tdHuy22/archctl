@@ -614,3 +614,26 @@ fn dockerfile_qua_nhieu_stage_duoc_bao() {
     let report = r.report();
     assert!(report.deploy_unread.iter().any(|u| u.file == "Dockerfile" && u.why.contains("stage")), "{:?}", report.deploy_unread);
 }
+
+/// Cổng compose publish ra mọi giao diện là lối vào từ Internet; cổng chỉ mở
+/// cho máy cục bộ thì không.
+#[test]
+fn cong_compose_la_loi_vao() {
+    for (name, ports, want) in [
+        ("hai-cong", "    ports: [\"8080:80\"]\n", true),
+        ("chi-container", "    ports: [\"80\"]\n", true),
+        ("cuc-bo", "    ports: [\"127.0.0.1:8080:80\", \"[::1]:9000:9000\", \"::1:6000:6000\"]\n", false),
+        ("bien-cuc-bo", "    ports: [\"${BIND:-127.0.0.1}:8080:80\"]\n", false),
+        ("dang-dai-cuc-bo", "    ports:\n      - {target: 80, published: 8080, host_ip: 127.0.0.1}\n", false),
+        ("dang-dai", "    ports:\n      - {target: 80, published: 8080}\n", true),
+        ("host", "    network_mode: host\n", true),
+        ("expose", "    expose: [\"80\"]\n", false),
+    ] {
+        let r = Repo::new(&format!("cong-{name}"));
+        r.write("compose.yaml", &format!("services:\n  web:\n    image: nginx\n{ports}"))
+            .write(".arch/system.arch", "service Web from compose:web\n");
+        let rep = check(&r.0, &r.doc(), &[]);
+        let got: Vec<String> = rep.violations.iter().map(|v| format!("{} -> {}", v.from, v.to)).collect();
+        assert_eq!(!got.is_empty(), want, "{name}: {got:?}");
+    }
+}
