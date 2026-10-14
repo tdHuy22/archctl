@@ -122,12 +122,12 @@ bước trước khi còn offline, và crate tải về chỉ vào trình đọc
 cứng bằng `=`. IPython, PyYAML và dockerfile-parse cài bằng pip vào venv riêng,
 mọi gói ghim `==` kèm sha256; grpcio-tools (`protoc`) cũng vậy. `--require
 clang,node,go,syn,ipython,deploy,proto` để ngày thiếu một cái thì bước này đỏ
-chứ không lặng lẽ bỏ qua. Hai mươi hai trong ba mươi tám kiểu phá của
+chứ không lặng lẽ bỏ qua. Hai mươi bốn trong bốn mươi hai kiểu phá của
 `sabotage.py` nhắm vào bước này: ba ở import Python, ba ở import Rust, hai ở
-notebook, bốn ở cạnh Python ↔ native, bốn ở compose và Dockerfile, bốn ở
-manifest Kubernetes và cạnh qua Service, hai ở `.proto`. Bảy kiểu khác nhắm vào
-phần hạ tầng của chính bộ đo (bốn trên compose, ba lặp lại trên manifest
-Kubernetes), một kiểu vào cạnh gRPC bắt buộc. Phần Rust cũng cần `syn`, nên bước
+notebook, bốn ở cạnh Python ↔ native, bốn ở compose và Dockerfile, sáu ở
+manifest Kubernetes, cạnh qua Service và NetworkPolicy, hai ở `.proto`. Chín
+kiểu khác nhắm vào phần hạ tầng của chính bộ đo (bốn trên compose, năm trên
+manifest Kubernetes gồm hai ở NetworkPolicy), một kiểu vào cạnh gRPC bắt buộc. Phần Rust cũng cần `syn`, nên bước
 sabotage mở mạng giống bước đối chiếu.
 
 ## Kiến trúc mô hình chạy thật

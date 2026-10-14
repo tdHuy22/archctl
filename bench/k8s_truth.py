@@ -114,6 +114,43 @@ def pairs(node):
     return [[k, scalar(v) or ""] for k, _, v in entries(node)]
 
 
+def selector(node):
+    """`{"labels": [[k, v]], "exprs": [[k, op, [v]]]}` như archctl in."""
+    labels = pairs(get(node, "matchLabels"))
+    exprs = [[scalar(get(e, "key")) or "", scalar(get(e, "operator")) or "",
+              [scalar(v) for v in items(get(e, "values")) if scalar(v) is not None]]
+             for e in items(get(node, "matchExpressions"))]
+    return {"labels": labels, "exprs": exprs}
+
+
+def policy_of(doc):
+    """NetworkPolicy theo tài liệu Kubernetes: không ghi `policyTypes` thì luôn
+    cô lập Ingress, cô lập Egress khi có mục `egress`."""
+    spec = get(doc, "spec")
+    types = [scalar(t) for t in items(get(spec, "policyTypes"))]
+    def has(direction, key):
+        # `SetDefaults_NetworkPolicy`: Egress chỉ khi danh sách `egress` không rỗng.
+        return direction in types if types else (direction == "Ingress" or bool(items(get(spec, key))))
+    def rules(key, side):
+        out = []
+        for rule in items(get(spec, key)):
+            peers = []
+            for p in items(get(rule, side)):
+                pods, nss = get(p, "podSelector"), get(p, "namespaceSelector")
+                peers.append({"line": line(p), "pods": selector(pods) if pods is not None else None,
+                              "namespaces": selector(nss) if nss is not None else None,
+                              "ip": get(p, "ipBlock") is not None})
+            out.append({"line": line(rule), "peers": peers})
+        return out
+    return {"pods": selector(get(spec, "podSelector")),
+            "ingress": rules("ingress", "from") if has("Ingress", "ingress") else None,
+            "egress": rules("egress", "to") if has("Egress", "egress") else None}
+
+
+def compact(x):
+    return json.dumps(x, separators=(",", ":"), ensure_ascii=False)
+
+
 def generic_pod(doc):
     for tpl in (get(doc, "spec", "template"), get(doc, "spec", "jobTemplate", "spec", "template")):
         if isinstance(get(tpl, "spec", "containers"), yaml.SequenceNode):
@@ -133,6 +170,16 @@ def manifest_facts(text):
         if kind == "Service":
             sel = [] if scalar(get(doc, "spec", "type")) == "ExternalName" else pairs(get(doc, "spec", "selector"))
             out.append((at, f"Service {name} ns={ns} selector={json.dumps(sel)}"))
+        elif kind == "NetworkPolicy":
+            pol = policy_of(doc)
+            out.append((at, f"NetworkPolicy {name} ns={ns} pods={compact(pol['pods'])} "
+                            f"ingress={pol['ingress'] is not None} egress={pol['egress'] is not None}"))
+            for side in ("ingress", "egress"):
+                for rule in pol[side] or []:
+                    out.append((rule["line"], f"{name}.{side}.rule"))
+                    for p in rule["peers"]:
+                        out.append((p["line"], f"{name}.{side}.peer pods={compact(p['pods'])} "
+                                               f"namespaces={compact(p['namespaces'])} ip={p['ip']}"))
         elif kind == "ConfigMap":
             out.append((at, f"ConfigMap {name} ns={ns}"))
             for k, kn, _ in entries(get(doc, "data")):
@@ -371,7 +418,7 @@ def edges_main(root):
                         patch_files.add(full)
 
     files = [f for f in listed if not aside(f)] + sorted(f for f in reached if f not in listed or aside(f))
-    workloads, services, maps = [], [], []
+    workloads, services, maps, policies = [], [], [], []
     for f in dict.fromkeys(files):
         name = f.rsplit("/", 1)[-1]
         if not f.endswith((".yaml", ".yml", ".json")):
@@ -398,6 +445,8 @@ def edges_main(root):
             if kind == "Namespace":
                 namespaces.add(scalar(get(doc, "metadata", "name")) or "")
             obj = {"file": f, "dir": dir_of(f), "name": scalar(get(doc, "metadata", "name")) or "", "ns": meta_ns}
+            if kind == "NetworkPolicy":
+                policies.append({**obj, **policy_of(doc)})
             if kind == "Service":
                 external = None
                 if scalar(get(doc, "spec", "type")) == "ExternalName":
@@ -499,7 +548,67 @@ def edges_main(root):
                     targets.discard(src)
                     if targets:
                         out.setdefault(f"{src}\t{file}:{l}\t{host}", set()).update(targets)
-    print(json.dumps({k: sorted(v) for k, v in out.items()}, ensure_ascii=False))
+    # NetworkPolicy: mỗi workload bị cô lập chiều nào, cho phép rõ ai.
+    NAME = "kubernetes.io/metadata.name"
+
+    def matches(sel, labels):
+        lab = dict(labels)
+        if not set(map(tuple, sel["labels"])) <= labels:
+            return False
+        for k, op, values in sel["exprs"]:
+            v = lab.get(k)
+            ok = {"In": v is not None and v in values, "NotIn": v is None or v not in values,
+                  "Exists": v is not None, "DoesNotExist": v is None}.get(op, False)
+            if not ok:
+                return False
+        return True
+
+    def empty(sel):
+        return not sel["labels"] and not sel["exprs"]
+
+    guards = {key_of(w["dir"], w["name"]): [False, False, set(), False, False, set()] for w in workloads}
+    for pol in policies:
+        targets = [w for w in workloads if same_ns(pol["ns"], w["ns"]) and matches(pol["pods"], w["labels"])]
+        for side, base in (("ingress", 0), ("egress", 3)):
+            if pol[side] is None:
+                continue
+            any_, pods = False, set()
+            for rule in pol[side]:
+                if not rule["peers"]:
+                    any_ = True
+                for p in rule["peers"]:
+                    if p["pods"] is None and p["namespaces"] is None:
+                        continue
+                    nss = p["namespaces"]
+                    if nss is None:
+                        scope = ("same", pol["ns"])
+                    elif empty(nss):
+                        scope = ("any", None)
+                    elif not nss["exprs"] and len(nss["labels"]) == 1 and nss["labels"][0][0] == NAME:
+                        scope = ("names", [nss["labels"][0][1]])
+                    elif not nss["labels"] and len(nss["exprs"]) == 1 and nss["exprs"][0][0] == NAME and nss["exprs"][0][1] == "In":
+                        scope = ("names", nss["exprs"][0][2])
+                    else:
+                        scope = ("unknown", None)
+                    sel = p["pods"] or {"labels": [], "exprs": []}
+                    if empty(sel):
+                        any_ = True
+                        continue
+                    for w in workloads:
+                        kind_, val = scope
+                        ok = (same_ns(val, w["ns"]) if kind_ == "same" else
+                              (w["ns"] is None or w["ns"] in val) if kind_ == "names" else True)
+                        if ok and matches(sel, w["labels"]):
+                            pods.add(key_of(w["dir"], w["name"]))
+            for t in targets:
+                g = guards[key_of(t["dir"], t["name"])]
+                # Cô lập chỉ khi biết chắc cùng namespace (cả hai cùng ghi hay cùng không).
+                g[base] = g[base] or t["ns"] == pol["ns"]
+                g[base + 1] = g[base + 1] or any_
+                g[base + 2] |= pods
+    print(json.dumps({"edges": {k: sorted(v) for k, v in out.items()},
+                      "guards": {k: [g[0], g[1], sorted(g[2]), g[3], g[4], sorted(g[5])] for k, g in guards.items()}},
+                     ensure_ascii=False))
 
 
 if __name__ == "__main__":

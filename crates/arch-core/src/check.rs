@@ -204,6 +204,9 @@ pub struct Report {
     /// `link` có hiệu lực mà không cấu hình nào cho thấy cạnh đó:
     /// `(nguồn, đích, dòng trong file luật)`.
     pub links_unseen: Vec<(String, String, usize)>,
+    /// `link` có hiệu lực mà NetworkPolicy chặn mọi đường giữa hai service:
+    /// `(nguồn, đích, dòng trong file luật)`.
+    pub links_blocked: Vec<(String, String, usize)>,
     /// Đã đọc cấu hình triển khai của repo trong lần kiểm này.
     pub deploy_checked: bool,
 }
@@ -1322,6 +1325,9 @@ pub fn deploy_options(doc: &Document) -> deploy::Options {
     opts
 }
 
+/// Bước xét đường NetworkPolicy cho phép (service × workload được cho phép).
+const MAX_GRANT_STEPS: usize = 2_000_000;
+
 /// Đối chiếu cấu hình triển khai với `service` và `link`.
 /// Đầu câu `rule` của vi phạm cạnh mạng tới service compose chưa khai.
 const UNDECLARED: &str = "service compose ";
@@ -1410,6 +1416,17 @@ fn judge_deploy(
 
     // Cặp service có lời gọi gRPC cũng là `link` được thấy.
     let mut seen: std::collections::BTreeSet<(String, String)> = rpc_links.clone();
+    // Đường NetworkPolicy cho phép mà thiếu `link`: báo một lần cho mỗi cặp
+    // service, ở chỗ đầu tiên thấy.
+    let mut granted: HashSet<(String, String)> = HashSet::new();
+    let mut walked: HashSet<(String, bool, usize)> = HashSet::new();
+    let mut grant_steps = 0usize;
+    let linked_pairs: HashSet<(&str, &str)> = doc
+        .links
+        .iter()
+        .filter(|l| l.meta.status.is_enforced())
+        .flat_map(|l| l.to.iter().map(move |t| (l.from.as_str(), t.as_str())))
+        .collect();
     // Import của từng file điểm vào, đọc một lần dù hàng nghìn service cùng
     // chạy nó (TM-8).
     let mut targets: HashMap<String, Targets> = HashMap::new();
@@ -1420,6 +1437,47 @@ fn judge_deploy(
         for v in found {
             // Patch Kustomize đè lên workload này mà archctl không áp (TM-21).
             report.deploy_unread.extend(v.patched.iter().cloned());
+            // NetworkPolicy cho phép rõ một đường tới service khác: cũng là cạnh
+            // mạng, cần `link` (TM-24). Mỗi bộ luật của một policy duyệt một lần
+            // cho mỗi service, mỗi cặp service một vi phạm, có ngân sách: một
+            // policy 5 000 peer chọn hàng chục service là bậc hai (TM-23).
+            for (guard, inbound) in [(&v.ingress, true), (&v.egress, false)] {
+                for rules in &guard.grants {
+                    if !walked.insert((s.name.clone(), inbound, std::rc::Rc::as_ptr(rules) as usize)) {
+                        continue;
+                    }
+                    for g in rules.iter() {
+                    let deploy::Grant::Pods { keys, policy, file, line } = g else { continue };
+                    for k in keys.iter() {
+                        grant_steps += 1;
+                        if grant_steps > MAX_GRANT_STEPS {
+                            break;
+                        }
+                        let Some(o) = declared(k) else { continue };
+                        if o.name == s.name {
+                            continue;
+                        }
+                        let (from, to) = if inbound { (&o.name, &s.name) } else { (&s.name, &o.name) };
+                        seen.insert((from.clone(), to.clone()));
+                        if !linked_pairs.contains(&(from.as_str(), to.as_str())) && granted.insert((from.clone(), to.clone())) {
+                            report.violations.push(Violation {
+                                from: from.clone(),
+                                to: to.clone(),
+                                file: file.clone(),
+                                line: *line,
+                                spec: format!("NetworkPolicy `{policy}` cho phép"),
+                                via: Via::Network,
+                                count: 1,
+                                reason: Reason::NotLinked,
+                                rule: format!("NetworkPolicy cho phép {from} -> {to} mà không có link nào"),
+                                status: Status::Accepted,
+                                hint: hint_for(doc, from, to, Reason::NotLinked, Via::Network),
+                            });
+                        }
+                    }
+                    }
+                }
+            }
             // Cạnh mạng.
             for e in &v.edges {
                 // Cạnh tới service compose hay workload chưa khai: không có
@@ -1566,6 +1624,40 @@ fn judge_deploy(
         for t in &l.to {
             if has_config(t) && !seen.contains(&(l.from.clone(), t.clone())) && !(report.partial && may_call(doc, &l.from, t)) {
                 report.links_unseen.push((l.from.clone(), t.clone(), l.meta.line));
+            }
+        }
+    }
+
+    if grant_steps > MAX_GRANT_STEPS {
+        report.deploy_unread.push(deploy::Unread {
+            file: "NetworkPolicy".into(),
+            why: format!("quá {MAX_GRANT_STEPS} bước xét đường policy cho phép; phần còn lại không xét"),
+        });
+    }
+
+    // `link` mà NetworkPolicy chặn mọi đường giữa các workload của hai bên:
+    // luật nói một đằng, cụm làm một nẻo. Chỉ xét workload Kubernetes.
+    let workloads = |name: &str| -> Vec<&Svc> {
+        matched
+            .iter()
+            .filter(|(s, _)| s.name == name)
+            .flat_map(|(_, f)| f.iter().copied())
+            .filter(|v| matches!(v.key, Key::K8s { .. }))
+            .collect()
+    };
+    for l in doc.links.iter().filter(|l| l.meta.status.is_enforced()) {
+        let from = workloads(&l.from);
+        if from.is_empty() {
+            continue;
+        }
+        for t in &l.to {
+            let to = workloads(t);
+            if to.is_empty() {
+                continue;
+            }
+            let open = from.iter().any(|a| to.iter().any(|b| b.ingress.allows(&a.key) && a.egress.allows(&b.key)));
+            if !open {
+                report.links_blocked.push((l.from.clone(), t.clone(), l.meta.line));
             }
         }
     }

@@ -93,7 +93,7 @@ sót. Và phải có các cạnh đã biết (`DEPLOY` trong [consistency.py](co
 | --- | --- | --- |
 | example-voting-app | `link Vote -> Redis`, `Result -> Db`, `Worker -> Db, Redis`; `Vote` trong `runs` của service Vote | `not_linked`, `not_run` |
 | open-webui | `link OpenWebui -> Ollama`; `Routers` trong `runs` của OpenWebui | `not_linked`, `not_run` |
-| microservices-demo | `link Checkoutservice -> Productcatalogservice`, `Frontend -> Cartservice`, `Recommendationservice -> Productcatalogservice`, `Cartservice -> RedisCart`; `Emailservice`, `Checkoutservice` trong `runs` của service cùng tên | `not_linked`, `not_run` |
+| microservices-demo | `link Checkoutservice -> Productcatalogservice`, `Frontend -> Cartservice`, `Recommendationservice -> Productcatalogservice`, `Cartservice -> RedisCart`; `Emailservice`, `Checkoutservice` trong `runs` của service cùng tên; `link Frontend -> Checkoutservice` mà NetworkPolicy `checkoutservice` cho phép; đúng một `link` bị NetworkPolicy chặn: `Frontend -> Shoppingassistantservice` | `not_linked` (có vi phạm nêu tên policy), `not_run`, cảnh báo `linksBlocked` |
 
 Repo mà các phần không import lẫn nhau (ba ứng dụng riêng của voting app) không
 có component nào vào diện kiểm; nó vẫn đạt vì tầng hạ tầng có cái để kiểm.
@@ -163,9 +163,10 @@ bộ trích, nên một lỗi trong bộ trích làm cả hai sai giống nhau m
 - Kubernetes: dữ kiện mà `scan --json` đọc từ mọi file YAML có dáng manifest và
   `skaffold.yaml` (workload, nhãn, container, image, `command`, `args`, khoá env,
   tham chiếu ConfigMap, Service và selector, khoá ConfigMap) được đọc lại bằng
-  PyYAML; mọi cạnh qua Service (nguồn, dòng, tên máy → tập workload đích) được
-  tính lại độc lập theo luật DNS và selector của tài liệu Kubernetes
-  ([k8s_truth.py](k8s_truth.py)). Cùng venv và cùng `--require deploy`.
+  PyYAML; mọi cạnh qua Service (nguồn, dòng, tên máy → tập workload đích) và
+  kết quả NetworkPolicy của từng workload (cô lập chiều nào, cho phép rõ ai)
+  được tính lại độc lập theo tài liệu Kubernetes ([k8s_truth.py](k8s_truth.py)).
+  Cùng venv và cùng `--require deploy`.
 
 Python, notebook, binding, hạ tầng, C/C++, Go và Rust đòi khớp cả tên lẫn số dòng: thiếu, thừa hay lệch dòng đều
 là lệch. Thiếu clang, Node hay Go thì phần đó in `BỎ QUA`; `--require
@@ -229,10 +230,12 @@ báo thêm một file triển khai không đọc được. `--deploy-repo exampl
 thêm bốn kiểu ở dữ kiện compose và Dockerfile của `scan --json` (mất một
 `depends_on`, lệch dòng một biến môi trường, thêm một tên máy giả, sửa một chỉ
 thị Dockerfile), đối chiếu bằng PyYAML nên cần mạng. Ba kiểu đầu chạy lại trên
-microservices-demo, nơi `link` và `runs` đến từ manifest Kubernetes.
-`--k8s-repo microservices-demo` thêm bốn kiểu ở dữ kiện manifest và cạnh qua
-Service (mất một biến môi trường, lệch dòng một workload, mất một cạnh, đổi đích
-một cạnh).
+microservices-demo, nơi `link` và `runs` đến từ manifest Kubernetes, cộng hai
+kiểu ở NetworkPolicy (`check` giấu vi phạm do policy cho phép, giấu cảnh báo
+`link` bị chặn). `--k8s-repo microservices-demo` thêm sáu kiểu ở dữ kiện
+manifest, cạnh qua Service và NetworkPolicy (mất một biến môi trường, lệch dòng
+một workload, mất một cạnh, đổi đích một cạnh, mất một peer của policy, đổi một
+workload bị cô lập thành không).
 
 Kiểu `rpc` xoá cạnh gRPC bắt buộc (`consistency.RPC`: etcd `Client -> Server`,
 `Api -> Server`) khỏi cả luật `init` sinh ra lẫn vi phạm `check` báo.
@@ -240,7 +243,7 @@ Kiểu `rpc` xoá cạnh gRPC bắt buộc (`consistency.RPC`: etcd `Client -> S
 `rpc`, lệch dòng một `service`), đối chiếu bằng `protoc` của grpcio-tools nên
 cần mạng. CI chạy bước này sau bộ đo, với `--rust-repo ripgrep
 --notebook-repo matplotlib --deploy-repo example-voting-app --k8s-repo
-microservices-demo --proto-repo vllm`: ba mươi tám kiểu phá.
+microservices-demo --proto-repo vllm`: bốn mươi hai kiểu phá.
 
 Nó có mặt vì bộ đo này từng nằm ngoài git, và lúc đưa vào, đọc lại thì bốn
 phép kiểm không kiểm gì: một cái chỉ xét file có tồn tại vì vế sau của `or`

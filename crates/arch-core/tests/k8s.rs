@@ -616,3 +616,147 @@ fn cung_ten_may_lap_lai_va_patch_nhan_workload_khong_lam_treo() {
     assert!(t.elapsed().as_secs_f64() < 5.0, "{:?}", t.elapsed());
     assert!(!rep.violations.is_empty() || !rep.deploy_unread.is_empty());
 }
+
+fn policy(name: &str, target: &str, body: &str) -> String {
+    format!("apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata: {{name: {name}}}\nspec:\n  podSelector: {target}\n{body}")
+}
+
+#[test]
+fn networkpolicy_cho_phep_ma_thieu_link_la_vi_pham() {
+    let r = shop("np-grant");
+    // Worker chỉ nhận từ Api; Db nhận từ Worker — đường mà env không cho thấy.
+    r.write(
+        "k8s/np.yaml",
+        &format!(
+            "{}---\n{}",
+            policy("worker", "{matchLabels: {app: worker}}", "  ingress:\n  - from:\n    - podSelector: {matchLabels: {app: api}}\n"),
+            policy("db", "{matchLabels: {app: db}}", "  ingress:\n  - from:\n    - podSelector:\n        matchExpressions: [{key: app, operator: In, values: [worker, api]}]\n")
+        ),
+    );
+    let rep = r.report();
+    let found = violations(&rep);
+    assert_eq!(found, ["NotLinked Worker -> Db k8s/np.yaml:17"], "{found:?}");
+    assert!(rep.violations[0].spec.starts_with("NetworkPolicy `db`"));
+    assert!(rep.links_blocked.is_empty() && rep.links_unseen.is_empty(), "{:?} {:?}", rep.links_blocked, rep.links_unseen);
+    // `init` sinh `link` cho đường policy cho phép.
+    let found = arch_core::discover::discover(&r.0, &[]);
+    assert!(found.links.iter().any(|(f, t)| f == "Worker" && t.contains(&"Db".to_string())), "{:?}", found.links);
+}
+
+#[test]
+fn link_bi_networkpolicy_chan_thi_canh_bao() {
+    let r = shop("np-block");
+    // Chặn mọi đường vào mọi pod, rồi chỉ mở Api -> Db.
+    r.write(
+        "k8s/np.yaml",
+        &format!(
+            "{}---\n{}",
+            policy("deny-all", "{}", "  policyTypes: [Ingress]\n"),
+            policy("db", "{matchLabels: {app: db}}", "  ingress:\n  - from:\n    - podSelector: {matchLabels: {app: api}}\n")
+        ),
+    );
+    let rep = r.report();
+    assert_eq!(rep.links_blocked.iter().map(|(f, t, _)| format!("{f}->{t}")).collect::<Vec<_>>(), ["Api->Worker"]);
+    assert!(rep.violations.is_empty(), "{:?}", violations(&rep));
+}
+
+#[test]
+fn networkpolicy_khong_ket_luan_thi_khong_bao() {
+    let r = shop("np-mo");
+    r.write(
+        "k8s/np.yaml",
+        &format!(
+            "{}---\n{}---\n{}",
+            // Namespace theo nhãn mà repo không cho biết: không kết luận.
+            policy("worker", "{matchLabels: {app: worker}}", "  ingress:\n  - from:\n    - namespaceSelector: {matchLabels: {team: x}}\n"),
+            // `podSelector: {}` và ipBlock: không nêu workload nào.
+            policy("db", "{matchLabels: {app: db}}", "  ingress:\n  - from:\n    - podSelector: {}\n    - ipBlock: {cidr: 10.0.0.0/8}\n"),
+            // Chỉ chặn chiều ra của pod không ai nhắc tới.
+            policy("egress", "{matchLabels: {app: nobody}}", "  policyTypes: [Egress]\n")
+        ),
+    );
+    let rep = r.report();
+    assert!(rep.violations.is_empty() && rep.links_blocked.is_empty(), "{:?} {:?}", violations(&rep), rep.links_blocked);
+}
+
+#[test]
+fn networkpolicy_chieu_ra_va_namespace_theo_ten() {
+    let r = shop("np-egress");
+    r.write(
+        "k8s/np.yaml",
+        &policy(
+            "api-out",
+            "{matchLabels: {app: api}}",
+            "  policyTypes: [Egress]\n  egress:\n  - to:\n    - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: default}}\n      podSelector: {matchLabels: {app: db}}\n",
+        ),
+    );
+    let rep = r.report();
+    // Api chỉ được gọi ra Db: link Api -> Worker bị chặn, Api -> Db có link nên không vi phạm.
+    assert_eq!(rep.links_blocked.iter().map(|(f, t, _)| format!("{f}->{t}")).collect::<Vec<_>>(), ["Api->Worker"]);
+    assert!(rep.violations.is_empty(), "{:?}", violations(&rep));
+}
+
+#[test]
+fn nhieu_networkpolicy_khong_lam_treo() {
+    let r = Repo::new("np-dos");
+    let mut text = String::new();
+    for i in 0..1500 {
+        text.push_str(&format!("---\napiVersion: apps/v1\nkind: Deployment\nmetadata: {{name: w{i}}}\nspec:\n  template:\n    metadata: {{labels: {{a: b}}}}\n    spec: {{containers: [{{name: c, image: x}}]}}\n"));
+    }
+    r.write("k8s/w.yaml", &text);
+    let mut pol = String::new();
+    for i in 0..1500 {
+        pol.push_str(&format!("---\n{}", policy(&format!("p{i}"), "{matchLabels: {a: b}}", "  ingress:\n  - from:\n    - podSelector: {matchLabels: {a: b}}\n    - podSelector: {matchLabels: {a: b}}\n")));
+    }
+    r.write("k8s/p.yaml", &pol);
+    r.rules("service W from k8s:w0\nservice V from k8s:w1\nlink W -> V\n");
+    let t = std::time::Instant::now();
+    let rep = r.report();
+    assert!(t.elapsed().as_secs_f64() < 5.0, "{:?}", t.elapsed());
+    assert!(!rep.deploy_unread.is_empty() || !rep.violations.is_empty());
+}
+
+/// Ca vàng, kết quả viết tay theo ví dụ trong tài liệu NetworkPolicy của
+/// Kubernetes, không suy từ mã: để thước đo không chỉ chép lại cách hiểu của
+/// chính archctl.
+#[test]
+fn networkpolicy_ca_vang_theo_tai_lieu_kubernetes() {
+    let blocked = |body: &str| -> Vec<String> {
+        let r = shop("np-vang");
+        r.write("k8s/np.yaml", body);
+        let rep = r.report();
+        assert!(rep.violations.is_empty(), "{:?}", violations(&rep));
+        let mut b: Vec<String> = rep.links_blocked.iter().map(|(f, t, _)| format!("{f}->{t}")).collect();
+        b.sort();
+        b
+    };
+    // "Default deny all egress traffic": mọi pod mất chiều ra.
+    assert_eq!(blocked(&policy("default-deny-egress", "{}", "  policyTypes: [Egress]\n")), ["Api->Db", "Api->Worker"]);
+    // "Default deny all ingress traffic".
+    assert_eq!(blocked(&policy("default-deny-ingress", "{}", "  policyTypes: [Ingress]\n")), ["Api->Db", "Api->Worker"]);
+    // "Allow all ingress traffic": `ingress: [{}]`.
+    assert!(blocked(&format!("{}---\n{}", policy("deny", "{}", "  policyTypes: [Ingress]\n"), policy("allow-all", "{}", "  ingress:\n  - {}\n"))).is_empty());
+    // Không ghi policyTypes, `egress: []`: chỉ là policy Ingress, chiều ra vẫn mở.
+    assert!(blocked(&policy("api", "{matchLabels: {app: api}}", "  egress: []\n")).is_empty());
+    // Policy ở namespace `other` không cô lập pod mà namespace không biết.
+    assert!(blocked("apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata: {name: d, namespace: other}\nspec:\n  podSelector: {}\n  policyTypes: [Ingress]\n").is_empty());
+}
+
+#[test]
+fn mot_policy_nhieu_peer_va_nhieu_service_khong_lam_treo() {
+    let r = Repo::new("np-tich");
+    let mut wl = String::new();
+    let mut rules = String::new();
+    for i in 0..30 {
+        wl.push_str(&format!("---\napiVersion: apps/v1\nkind: Deployment\nmetadata: {{name: w{i}}}\nspec:\n  template:\n    metadata: {{labels: {{a: b}}}}\n    spec: {{containers: [{{name: c, image: x}}]}}\n"));
+        rules.push_str(&format!("service S{i} from k8s:w{i}\n"));
+    }
+    let peers: String = (0..5000).map(|_| "    - podSelector: {matchLabels: {a: b}}\n").collect();
+    r.write("k8s/w.yaml", &wl).write("k8s/p.yaml", &policy("p", "{matchLabels: {a: b}}", &format!("  ingress:\n  - from:\n{peers}")));
+    r.rules(&rules);
+    let t = std::time::Instant::now();
+    let rep = r.report();
+    assert!(t.elapsed().as_secs_f64() < 5.0, "{:?}", t.elapsed());
+    // Mỗi cặp service một vi phạm: 30 × 29.
+    assert_eq!(rep.violations.len(), 30 * 29);
+}

@@ -30,6 +30,7 @@ pub struct File {
     pub unknown: Vec<(String, String, usize)>,
     /// Tên trong các tài liệu `kind: Namespace`.
     pub namespaces: Vec<String>,
+    pub policies: Vec<NetPolicy>,
     /// Byte đã chép ra khỏi cây YAML, để bên nạp tính trần chung.
     pub size: usize,
 }
@@ -129,6 +130,63 @@ impl ConfigMap {
     pub fn entries(&self, prefix: &str) -> Vec<Env> {
         self.data.iter().map(|(k, line, v)| compose::env_entry(&format!("{prefix}{k}"), *line, v)).collect()
     }
+}
+
+/// Bộ chọn nhãn: `matchLabels` và `matchExpressions`. Rỗng là mọi pod.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Selector {
+    pub labels: Vec<(String, String)>,
+    /// Khoá, phép (`In`, `NotIn`, `Exists`, `DoesNotExist`), giá trị.
+    pub exprs: Vec<(String, String, Vec<String>)>,
+}
+
+impl Selector {
+    pub fn is_empty(&self) -> bool {
+        self.labels.is_empty() && self.exprs.is_empty()
+    }
+
+    pub fn matches(&self, labels: &[(String, String)]) -> bool {
+        let get = |k: &str| labels.iter().find(|(lk, _)| lk == k).map(|(_, v)| v.as_str());
+        self.labels.iter().all(|pair| labels.contains(pair))
+            && self.exprs.iter().all(|(k, op, values)| match op.as_str() {
+                "In" => get(k).is_some_and(|v| values.iter().any(|x| x == v)),
+                "NotIn" => get(k).is_none_or(|v| !values.iter().any(|x| x == v)),
+                "Exists" => get(k).is_some(),
+                "DoesNotExist" => get(k).is_none(),
+                // Phép lạ: Kubernetes từ chối manifest, nên không khớp gì.
+                _ => false,
+            })
+    }
+}
+
+/// Một nguồn hay đích trong luật của NetworkPolicy.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Peer {
+    /// `podSelector`; `None` là mọi pod (trong các namespace được chọn).
+    pub pods: Option<Selector>,
+    /// `namespaceSelector`; `None` là namespace của chính policy.
+    pub namespaces: Option<Selector>,
+    /// `ipBlock`: địa chỉ, không phải pod.
+    pub ip: bool,
+    pub line: usize,
+}
+
+/// Một luật `ingress` hay `egress`. `peers` rỗng là mọi nguồn (đích).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Rule {
+    pub peers: Vec<Peer>,
+    pub line: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NetPolicy {
+    pub name: String,
+    pub namespace: Option<String>,
+    pub line: usize,
+    pub pods: Selector,
+    /// `None`: policy không cô lập chiều này.
+    pub ingress: Option<Vec<Rule>>,
+    pub egress: Option<Vec<Rule>>,
 }
 
 /// Có thể là manifest: có chữ `apiVersion` và `kind`. Lọc thô trước khi phân
@@ -263,6 +321,48 @@ fn object(n: Node<'_>, r: &mut Reader, out: &mut File) -> Result<(), yaml::Error
             let name = name_of(r);
             out.namespaces.push(name);
         }
+        "NetworkPolicy" => {
+            let spec = n.get("spec");
+            let types: Vec<&str> = spec
+                .and_then(|s| s.get("policyTypes"))
+                .map(|t| t.items().filter_map(Node::as_str).collect())
+                .unwrap_or_default();
+            // Không ghi `policyTypes`: luôn cô lập ingress, cô lập egress khi mục
+            // `egress` là danh sách không rỗng (`SetDefaults_NetworkPolicy` của
+            // Kubernetes); `egress: []` không cô lập gì.
+            let has = |dir: &str, key: &str| {
+                if types.is_empty() {
+                    dir == "Ingress" || spec.and_then(|s| s.get(key)).is_some_and(|e| e.items().next().is_some())
+                } else {
+                    types.contains(&dir)
+                }
+            };
+            let (ingress, egress) = (has("Ingress", "ingress"), has("Egress", "egress"));
+            let pods = selector(spec.and_then(|s| s.get("podSelector")), r);
+            let rules = |key: &str, side: &str, r: &mut Reader| -> Vec<Rule> {
+                let mut out = Vec::new();
+                for rule in spec.and_then(|s| s.get(key)).into_iter().flat_map(Node::items) {
+                    if !r.fact(1) {
+                        break;
+                    }
+                    let mut peers = Vec::new();
+                    for p in rule.get(side).into_iter().flat_map(Node::items) {
+                        if !r.fact(1) {
+                            break;
+                        }
+                        let pods = p.get("podSelector").map(|s| selector(Some(s), r));
+                        let namespaces = p.get("namespaceSelector").map(|s| selector(Some(s), r));
+                        peers.push(Peer { pods, namespaces, ip: p.get("ipBlock").is_some(), line: p.line() });
+                    }
+                    out.push(Rule { peers, line: rule.line() });
+                }
+                out
+            };
+            let ingress = ingress.then(|| rules("ingress", "from", r));
+            let egress = egress.then(|| rules("egress", "to", r));
+            let p = NetPolicy { name: name_of(r), namespace: ns_of(r), line, pods, ingress, egress };
+            out.policies.push(p);
+        }
         "Service" => {
             let spec = n.get("spec");
             // `ExternalName` không chọn pod nào: nó là bí danh của một tên máy.
@@ -332,6 +432,24 @@ fn generic_pod(n: Node<'_>) -> bool {
     let spec = n.get("spec");
     has(spec.and_then(|s| s.get("template")))
         || has(spec.and_then(|s| s.get("jobTemplate")).and_then(|j| j.get("spec")).and_then(|s| s.get("template")))
+}
+
+fn selector(n: Option<Node<'_>>, r: &mut Reader) -> Selector {
+    let Some(n) = n else { return Selector::default() };
+    let mut s = Selector { labels: r.pairs(n.get("matchLabels")), exprs: Vec::new() };
+    for e in n.get("matchExpressions").into_iter().flat_map(Node::items) {
+        if s.exprs.len() >= MAX_LABELS {
+            r.b.over = true;
+        }
+        if r.b.over || !r.fact(1) {
+            break;
+        }
+        let key = r.text(e.get("key")).unwrap_or_default();
+        let op = r.text(e.get("operator")).unwrap_or_default();
+        let values = e.get("values").into_iter().flat_map(Node::items).filter_map(Node::as_str).map(|v| r.b.own(v)).collect();
+        s.exprs.push((key, op, values));
+    }
+    s
 }
 
 fn words(n: Option<Node<'_>>, r: &mut Reader) -> Option<(Vec<String>, usize)> {

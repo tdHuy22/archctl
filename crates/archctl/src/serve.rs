@@ -494,6 +494,9 @@ fn model_json(root: &Path) -> String {
         .chain(report.links_unseen.iter().map(|(from, to, line)| {
             card(format!("link {from} -> {to}"), format!("system.arch:{line} — không cấu hình nào cho thấy cạnh này"))
         }))
+        .chain(report.links_blocked.iter().map(|(from, to, line)| {
+            card(format!("link {from} -> {to} bị chặn"), format!("system.arch:{line} — NetworkPolicy chặn mọi đường giữa hai service"))
+        }))
         .chain(report.services_undeclared.iter().map(|(file, line, name)| {
             card(format!("service {name} chưa khai"), format!("{file}:{line} — thêm `service ... from compose:{name}` hay `from k8s:{name}`"))
         }))

@@ -168,7 +168,8 @@ https://claude.ai/code/artifact/2b26df5d-d6b0-40d0-a398-7e574c7d1387
   thì không. Với C/C++ thì `#include` là điều kiện cần nhưng rất xa điều kiện
   đủ, và đó là lý do có `api`.
 - **Tầng hạ tầng mới đọc docker-compose, Dockerfile, manifest Kubernetes, và
-  gRPC của Python, Go.** Helm, patch Kustomize, Terraform, NetworkPolicy và
+  gRPC của Python, Go; NetworkPolicy được đối chiếu với `link`.** Helm, patch
+  Kustomize, Terraform, Ingress và
   gRPC của TypeScript, Rust, Java thì chưa (template Helm và patch đổi lệnh
   được báo là chưa đọc); cạnh mạng chỉ có lúc chạy (URL ghép trong mã, service
   discovery) thì không thấy — xem [docs/infra.md](docs/infra.md).

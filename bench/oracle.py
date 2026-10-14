@@ -810,6 +810,17 @@ def archctl_k8s(archctl, root, files):
                                      f"target={a['target']}"))
         for s in f.get("services", []):
             facts.append((s["line"], f"Service {s['name']} ns={s['namespace']} selector={json.dumps(s['selector'])}"))
+        compact = lambda x: json.dumps(x, separators=(",", ":"), ensure_ascii=False)
+        for pol in f.get("policies", []):
+            name = pol["name"]
+            facts.append((pol["line"], f"NetworkPolicy {name} ns={pol['namespace']} pods={compact(pol['pods'])} "
+                                       f"ingress={pol['ingress'] is not None} egress={pol['egress'] is not None}"))
+            for side in ("ingress", "egress"):
+                for rule in pol[side] or []:
+                    facts.append((rule["line"], f"{name}.{side}.rule"))
+                    for p in rule["peers"]:
+                        facts.append((p["line"], f"{name}.{side}.peer pods={compact(p['pods'])} "
+                                                 f"namespaces={compact(p['namespaces'])} ip={p['ip']}"))
         for m in f.get("configMaps", []):
             facts.append((m["line"], f"ConfigMap {m['name']} ns={m['namespace']}"))
             facts += [(l, f"{m['name']}.data {k}") for k, l in m["keys"]]
@@ -831,14 +842,17 @@ def archctl_k8s(archctl, root, files):
                 facts += [(e["line"], f"{name}.{cn}.envFrom {e['configMap']} prefix={e['prefix']}") for e in c["envFrom"]]
         out[f["file"]] = collections.Counter(facts)
     edges = collections.defaultdict(set)
+    guards = {}
     for s in rep["services"]:
         if not s["key"].startswith("k8s:"):
             continue
+        i, e = s["ingress"], s["egress"]
+        guards[s["key"]] = [i["isolated"], i["any"], sorted(i["pods"]), e["isolated"], e["any"], sorted(e["pods"])]
         for e in s["edges"]:
             host = e["shown"].split(" → ", 1)[1].rsplit(":", 1)[0] if ":" in e["shown"].split(" → ", 1)[1] \
                 else e["shown"].split(" → ", 1)[1]
             edges[f"{s['key']}\t{e['file']}:{e['line']}\t{host}"].add(e["target"])
-    return out, edges
+    return out, edges, guards
 
 
 def k8s_truth(python, root, files):
@@ -859,7 +873,8 @@ def k8s_truth(python, root, files):
                        input="".join(f"{f}\n" for f in files), capture_output=True, text=True, timeout=900)
     if p.returncode != 0:
         bench.die(f"thước đo Kubernetes hỏng: {p.stderr.strip()[-400:]}")
-    return out, {k: set(v) for k, v in json.loads(p.stdout).items()}
+    res = json.loads(p.stdout)
+    return out, {k: set(v) for k, v in res["edges"].items()}, res["guards"]
 
 
 PROTO_REQUIREMENTS = HERE / "proto-requirements.txt"
@@ -1199,8 +1214,8 @@ def main():
         yamls = yaml_files(root) if dep_python else []
         if yamls:
             kt = Tally("K8s")
-            have_all, have_edges = archctl_k8s(archctl, root, yamls)
-            want_all, want_edges = k8s_truth(dep_python, root, yamls)
+            have_all, have_edges, have_guards = archctl_k8s(archctl, root, yamls)
+            want_all, want_edges, want_guards = k8s_truth(dep_python, root, yamls)
             for file, want in want_all.items():
                 if isinstance(want, str):
                     if want.startswith("ERR") and file in have_all:
@@ -1221,6 +1236,12 @@ def main():
                     kt.note(f"{at} thiếu cạnh: {src} → {t} qua `{host}`")
                 for t in sorted(have - want):
                     kt.note(f"{at} thừa cạnh: {src} → {t} qua `{host}`")
+            # NetworkPolicy: cô lập, cho phép mọi nguồn, cho phép rõ ai, hai chiều.
+            for key in sorted(set(want_guards) | set(have_guards)):
+                want, have = want_guards.get(key), have_guards.get(key)
+                kt.imports += 1
+                if want != have:
+                    kt.note(f"{key} lệch NetworkPolicy: thước đo {want}, archctl {have}")
             if kt.files:
                 tallies.append(kt)
 

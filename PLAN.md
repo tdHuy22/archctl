@@ -5,9 +5,28 @@ Mô tả sản phẩm ở [README.md](README.md); file này chỉ ghi trạng th
 
 ## §0 Đang ở đâu, việc tiếp theo
 
-Cập nhật 2026-10-13.
+Cập nhật 2026-10-14.
 
 ### Đã xong, có bằng chứng
+
+- **NetworkPolicy đối chiếu `link`, việc A của đợt 3** (2026-10-14, chưa commit;
+  bạn chốt "theo đề xuất hết"). `scan/k8s.rs` đọc NetworkPolicy (podSelector,
+  namespaceSelector, `matchExpressions`, ingress, egress, `policyTypes` mặc định
+  theo `SetDefaults_NetworkPolicy`); `deploy.rs` tính từng workload bị cô lập
+  chiều nào và được cho phép rõ với ai; `check`: cụm cho phép mà thiếu `link` là
+  vi phạm (nêu tên policy), `link` bị chặn là cảnh báo `--strict` tính; `init`
+  sinh `link` cho đường policy cho phép. Trên Online Boutique bắt một chỗ lệch có
+  thật: deny-all của component `network-policies` chặn frontend →
+  shoppingassistantservice mà env trỏ tới. Bộ đo: `policy`, `blocked` trong
+  `consistency.DEPLOY`; oracle so dữ kiện policy và kết quả cô lập, cho phép của
+  từng workload; ca vàng viết tay theo tài liệu Kubernetes; 4 kiểu phá mới (42).
+  Threat model TM-23..25 đã có. Review opus: 4 mục (vòng xét đường cho phép bung
+  bậc hai làm hook treo 25–91 s và 3,6 GB, `egress: []`, namespace một bên, thước
+  đo không độc lập), sửa hết; ca DoS còn dưới 1,7 s, 163 MB. Biên nhận trên mã
+  cuối: `cargo test` (596), clippy, `cargo +1.88 check`, bộ đo 30 repo 0 bất nhất
+  1050/1050, oracle khớp hết, sabotage 57/57, `verify` 3/3, `check --strict` 0.
+  Cùng lượt: `e31a772` đã lên `main` sau CI xanh 5/5 trên `thu/k8s` (run
+  38540029655), kèm `4271fa7` sửa bộ đo (git tự bảo trì làm sabotage đổ ngẫu nhiên).
 
 - **Manifest Kubernetes, việc cuối của tầng hạ tầng đợt 2** (2026-10-13, bạn cho commit 2026-10-14;
   bạn chốt "theo khuyên hết", trang https://claude.ai/artifact/Tzgo8YiLFnA9BhWjwtfE29).
@@ -335,13 +354,12 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-Mọi mốc ở §1 đã xong (2026-10-14). Chờ bạn chốt ba câu ở trang
-https://claude.ai/artifact/Xy5ZNKRt6p7JdGwcco9zCa:
-1. đẩy `e31a772` qua nhánh thử, chạy CI, xanh thì lên `main` (khuyên: có);
-2. mốc mới: A NetworkPolicy đối chiếu `link`, B gRPC Node và Rust, C lối vào
-   từ ngoài cụm (Ingress, Istio), D cạnh mạng từ mã (khuyên: A rồi B);
-3. với A: cụm cho phép mà không có `link` là vi phạm, có `link` mà cụm chặn là
-   cảnh báo (khuyên).
+1. Việc B của đợt 3: gRPC của Node (`@grpc/proto-loader`, `addService`, mã sinh
+   `*_grpc_pb.js`) và Rust (`tonic`: `x_server::XServer`, `x_client::XClient`,
+   tên ghép không phân biệt hoa thường); hook tìm phía bên kia cả file TS/JS, Rust;
+   bộ đo Online Boutique (Checkout → Currency, Payment là server Node), vllm (server Rust).
+2. Chờ bạn cho commit việc A (NetworkPolicy); bản diff riêng của A lưu ở scratchpad
+   `np-A.patch` để tách commit.
 
 **Đã quyết (2026-10-11): cạnh binding Python ↔ native tự viết.** Đã tìm theo
 skill reuse-best. Không công cụ tĩnh nào phủ cả PyO3, pybind11, nanobind
@@ -552,3 +570,17 @@ hàm, `ctypes` của Python và IPC thì không — xem [docs/check.md](docs/che
 - [x] `from k8s:` và nhiều nguồn trong một service; `check`: `link`, `runs`, khai báo lạc hậu, workload chưa khai; hook.
 - [x] `init --from-code` gộp compose với k8s, gom bản sao theo nơi dựng; `scan`, `export`/`serve`.
 - [x] Bộ đo: Online Boutique, oracle `k8s_truth.py`, sabotage; tài liệu.
+
+### Tầng hạ tầng, đợt 3
+
+Bạn chốt "theo đề xuất hết" (2026-10-14, trang https://claude.ai/artifact/Xy5ZNKRt6p7JdGwcco9zCa):
+đẩy `e31a772` qua nhánh thử rồi lên `main`; làm A rồi B; với A, cụm cho phép mà
+không có `link` là vi phạm, có `link` mà cụm chặn là cảnh báo (`--strict` tính).
+
+- [x] Đẩy `e31a772` qua nhánh thử `thu/k8s`, CI xanh thì lên `main`, xoá nhánh.
+- [x] NetworkPolicy đối chiếu `link`: đọc policy (podSelector, namespaceSelector,
+  ingress, egress), cho phép rõ mà thiếu `link` là vi phạm, `link` bị chặn là cảnh
+  báo; `init` sinh `link` theo policy; `scan`; bộ đo (Online Boutique), oracle, sabotage; tài liệu.
+- [ ] gRPC của Node (`@grpc/proto-loader`, `addService`) và Rust (`tonic`); bộ đo
+  Online Boutique (currency, payment), vllm; oracle, sabotage; tài liệu.
+

@@ -86,6 +86,13 @@ DEPLOY = {
         # image `emailservice` → skaffold `context: src/emailservice` →
         # `ENTRYPOINT ["python", "email_server.py"]`; Go dựng bằng `go build`.
         "runs": [("Emailservice", "Emailservice"), ("Checkoutservice", "Checkoutservice")],
+        # NetworkPolicy `checkoutservice` chỉ nhận từ `app: frontend`: gỡ link
+        # thì vi phạm phải nêu chính policy đó.
+        "policy": [("Frontend", "Checkoutservice")],
+        # Component `network-policies` chặn mọi đường vào (deny-all) mà không
+        # mở đường cho `shoppingassistantservice`, trong khi env của frontend
+        # trỏ tới nó: chỗ lệch có thật trong repo.
+        "blocked": [("Frontend", "Shoppingassistantservice")],
     },
 }
 
@@ -226,6 +233,7 @@ def deploy(archctl: str, name: str, law: Path, root: list, rep: dict, out: dict)
         ("deployUnread", "không đọc được file triển khai", lambda x: f"{x['file']}: {x['why']}"),
         ("entryUnknown", "service có runs mà không rõ điểm vào", lambda x: f"{x['service']}: {x['why']}"),
         ("linksUnseen", "link sinh ra mà không thấy trong cấu hình", lambda x: f"{x['from']} -> {x['to']}"),
+        ("linksBlocked", "link sinh ra mà NetworkPolicy chặn", lambda x: f"{x['from']} -> {x['to']}"),
         ("servicesUndeclared", "service hay workload không được sinh", lambda x: f"{x['name']} ({x['file']}:{x['line']})"),
     ]:
         for item in rep.get(key, [])[:4]:
@@ -235,6 +243,13 @@ def deploy(archctl: str, name: str, law: Path, root: list, rep: dict, out: dict)
             out["problems"].append(f"{m['source']} `{m['name']}`: {m['hint']}")
 
     want = DEPLOY.get(name)
+    if want and want.get("blocked"):
+        # Chỗ lệch đã biết của repo: phải báo đúng nó, không thừa không thiếu.
+        expected = {f"link sinh ra mà NetworkPolicy chặn: {a} -> {b}" for a, b in want["blocked"]}
+        got = {p for p in out["problems"] if p.startswith("link sinh ra mà NetworkPolicy chặn")}
+        out["problems"] = [p for p in out["problems"] if p not in expected]
+        for miss in sorted(expected - got):
+            out["problems"].append(f"thiếu cảnh báo NetworkPolicy: {miss.split(': ', 1)[1]}")
     if not want:
         return
     links = {(a, b.strip()) for a, bs in re.findall(r"^link\s+(\w+)\s*->\s*([^@\n]+)", text, re.M)
@@ -253,9 +268,14 @@ def deploy(archctl: str, name: str, law: Path, root: list, rep: dict, out: dict)
             out["problems"].append(f"thiếu runs: luật sinh ra không có {c} trong runs của service {s}")
         else:
             checks.append(("runs", s, c))
+    for a, b in want.get("policy", []):
+        if (a, b) not in links:
+            out["problems"].append(f"thiếu cạnh mạng: luật sinh ra không có link {a} -> {b}")
+        else:
+            checks.append(("policy", a, b))
     # Gỡ từng cái đi thì `check` phải báo đúng loại vi phạm đó.
     for kind, a, b in checks:
-        if kind == "network":
+        if kind in ("network", "policy"):
             pattern = rf"^(link\s+{a}\s*->\s*)([^@\n]+)"
             broken = re.sub(pattern, lambda m: m.group(1) + ", ".join(
                 x.strip() for x in m.group(2).split(",") if x.strip() != b) + " ", text, flags=re.M)
@@ -272,14 +292,17 @@ def deploy(archctl: str, name: str, law: Path, root: list, rep: dict, out: dict)
         law.write_text(broken)
         try:
             p, _ = _run(archctl, ["check", "--json", *root])
-            seen = {(v["from"], v["to"], v.get("reason")) for v in json.loads(p.stdout)["violations"]}
+            vs = json.loads(p.stdout)["violations"]
+            seen = {(v["from"], v["to"], v.get("reason")) for v in vs}
+            # Vi phạm do NetworkPolicy cho phép: nêu tên policy trong `spec`.
+            seen |= {(v["from"], v["to"], "policy") for v in vs if v.get("spec", "").startswith("NetworkPolicy")}
         except (json.JSONDecodeError, KeyError):
             seen = set()
         finally:
             law.write_text(text)
-        reason = "not_linked" if kind == "network" else "not_run"
+        reason = {"network": "not_linked", "runs": "not_run", "policy": "policy"}[kind]
         if (a, b, reason) not in seen:
-            what = f"link {a} -> {b}" if kind == "network" else f"{b} khỏi runs của {a}"
+            what = f"{b} khỏi runs của {a}" if kind == "runs" else f"link {a} -> {b}"
             out["problems"].append(f"gỡ {what} mà check không báo {reason}")
 
 

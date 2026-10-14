@@ -306,6 +306,20 @@ fn discover_services(root: &Path, deploy_files: &[String], owners: &Owners, out:
                     links.entry(dsl.clone()).or_default().insert((*to).to_string());
                 }
             }
+            // Đường NetworkPolicy cho phép rõ: `check` đòi `link` cho chúng.
+            for (guard, inbound) in [(&svc.ingress, true), (&svc.egress, false)] {
+                for g in guard.grants.iter().flat_map(|g| g.iter()) {
+                    let deploy::Grant::Pods { keys, .. } = g else { continue };
+                    for k in keys.iter() {
+                        let Some(other) = by_key.get(k) else { continue };
+                        if *other == dsl {
+                            continue;
+                        }
+                        let (from, to) = if inbound { ((*other).to_string(), dsl.clone()) } else { (dsl.clone(), (*other).to_string()) };
+                        links.entry(from).or_default().insert(to);
+                    }
+                }
+            }
         }
     }
     // Lời gọi gRPC giữa hai service, theo đúng điều `check` đòi: với mỗi

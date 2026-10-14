@@ -37,10 +37,13 @@ PyYAML và dockerfile-parse cài vào venv nên cần mạng; CI bật nó.
 
 Ba kiểu `deploy-gen`, `deploy-link`, `deploy-runs` chạy lại trên
 `--k8s-bench-repo` (mặc định microservices-demo), nơi `link` và `runs` đến từ
-manifest Kubernetes chứ không từ compose. `--k8s-repo microservices-demo` phá
+manifest Kubernetes chứ không từ compose; thêm hai kiểu ở NetworkPolicy (`check`
+giấu vi phạm do policy cho phép, giấu cảnh báo `link` bị chặn). `--k8s-repo microservices-demo` phá
 thêm bốn kiểu ở dữ kiện manifest và cạnh qua Service mà `scan --json` in ra
 (mất một biến môi trường, lệch dòng một workload, mất một cạnh, đổi đích một
-cạnh), đối chiếu bằng `k8s_truth.py` trên PyYAML; cần mạng như `--deploy-repo`.
+cạnh), cộng hai kiểu ở NetworkPolicy (mất một peer, đổi một workload từ bị cô
+lập thành không), đối chiếu bằng `k8s_truth.py` trên PyYAML; cần mạng như
+`--deploy-repo`.
 
 `--proto-repo vllm` phá thêm hai kiểu ở dữ kiện `.proto` (mất một `rpc`, lệch
 dòng một `service`), đối chiếu bằng `protoc` của grpcio-tools cài vào venv nên
@@ -121,12 +124,19 @@ DEPLOY_ORACLE_MODES = {
 
 # kiểu phá tầng hạ tầng chạy lại trên repo có manifest Kubernetes
 K8S_BENCH_MODES = {m: DEPLOY_MODES[m] for m in ("deploy-gen", "deploy-link", "deploy-runs")}
+# NetworkPolicy, chỉ có ở repo manifest Kubernetes
+K8S_BENCH_MODES |= {
+    "deploy-policy": "mà check không báo policy",
+    "deploy-blocked": "thiếu cảnh báo NetworkPolicy",
+}
 # phá dữ kiện manifest và cạnh qua Service trong `scan --json` → dòng `oracle.py` phải in ra
 K8S_ORACLE_MODES = {
     "k8s-env": "thiếu:",
     "k8s-line": "lệch dòng:",
     "k8s-edge": "thiếu cạnh:",
     "k8s-target": "thừa cạnh:",
+    "k8s-policy": "thiếu:",
+    "k8s-guard": "lệch NetworkPolicy",
 }
 
 # phá dữ kiện `.proto` trong `scan --json` → dòng `oracle.py` phải in ra
@@ -179,6 +189,20 @@ def sabotage_k8s(rep: dict, mode: str):
     """Làm hỏng dữ kiện manifest đầu tiên đúng loại, hay cạnh qua Service đầu
     tiên, trong `scan --json`."""
     dep = rep.get("deploy", {})
+    if mode == "k8s-guard":
+        for s in dep.get("services", []):
+            if s["key"].startswith("k8s:") and s.get("ingress", {}).get("isolated"):
+                s["ingress"]["isolated"] = False
+                return
+        return
+    if mode == "k8s-policy":
+        for f in dep.get("files", []):
+            for pol in f.get("policies", []) if f.get("kind") == "k8s" else []:
+                for rule in pol.get("ingress") or []:
+                    if rule["peers"]:
+                        rule["peers"].pop(0)
+                        return
+        return
     if mode in ("k8s-edge", "k8s-target"):
         keys = [s["key"] for s in dep.get("services", []) if s["key"].startswith("k8s:")]
         for s in dep.get("services", []):
@@ -298,6 +322,10 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
             rep["violations"] = [v for v in rep["violations"] if v.get("reason") != "not_run"]
         elif mode == "deploy-warn":
             rep.setdefault("deployUnread", []).append({"file": "docker-compose.yml", "why": "giả"})
+        elif mode == "deploy-policy":
+            rep["violations"] = [v for v in rep["violations"] if not v.get("spec", "").startswith("NetworkPolicy")]
+        elif mode == "deploy-blocked":
+            rep["linksBlocked"] = []
         out = json.dumps(rep)
     elif mode == "diff" and args[:1] == ["diff"]:
         out = "kiến trúc a → b\n"

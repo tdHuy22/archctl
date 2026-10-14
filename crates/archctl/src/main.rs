@@ -285,6 +285,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
         + report.deploy_unread.len()
         + report.entry_unknown.len()
         + report.links_unseen.len()
+        + report.links_blocked.len()
         + law.len();
     let failed = fresh > 0 || (strict && unchecked > 0);
     if strict && fresh == 0 && unchecked > 0 {
@@ -532,6 +533,13 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
             arch_core::ARCH_FILE
         );
     }
+    for (from, to, line) in report.links_blocked.iter().take(MAX_LISTED) {
+        crate::say!("⚠ LINK BỊ NETWORKPOLICY CHẶN  link {from} -> {to}");
+        crate::say!(
+            "  {}:{line}  — NetworkPolicy chặn mọi đường từ workload của {from} tới workload của {to}\n",
+            arch_core::ARCH_FILE
+        );
+    }
 
     for (label, shown, total) in [
         ("khai báo lạc hậu", MAX_LISTED, report.missing.len()),
@@ -542,6 +550,7 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
         ("file triển khai chưa đọc được", MAX_LISTED, report.deploy_unread.len()),
         ("service không rõ điểm vào", MAX_LISTED, report.entry_unknown.len()),
         ("link không thấy trong cấu hình", MAX_LISTED, report.links_unseen.len()),
+        ("link bị NetworkPolicy chặn", MAX_LISTED, report.links_blocked.len()),
     ] {
         if let Some(rest) = total.checked_sub(shown).filter(|n| *n > 0) {
             crate::say!("⚠ … còn {rest} {label} nữa — xem `--json`\n");
@@ -603,6 +612,7 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
         + report.deploy_unread.len()
         + report.entry_unknown.len()
         + report.links_unseen.len()
+        + report.links_blocked.len()
         + usize::from(!report.unchecked.is_empty())
         + usize::from(report.files_unmapped > 0)
         + usize::from(!report.services_undeclared.is_empty());
@@ -763,9 +773,16 @@ fn print_json(hash: &str, report: &Report, law: &[Diag]) {
             format!(r#"{{"from":{},"to":{},"line":{line}}}"#, json::string(from), json::string(to))
         })
         .collect();
+    let blocked: Vec<String> = report
+        .links_blocked
+        .iter()
+        .map(|(from, to, line)| {
+            format!(r#"{{"from":{},"to":{},"line":{line}}}"#, json::string(from), json::string(to))
+        })
+        .collect();
 
     crate::say!(
-        r#"{{"archHash":{},"filesScanned":{},"filesUnmapped":{},"checked":{},"unchecked":{},"violations":[{}],"unresolved":[{}],"missing":[{}],"vacuous":[{}],"unproven":[{}],"oversized":[{}],"ambiguous":[{}],"deployUnread":[{}],"entryUnknown":[{}],"servicesUndeclared":[{}],"linksUnseen":[{}],"lawWarnings":[{}]}}"#,
+        r#"{{"archHash":{},"filesScanned":{},"filesUnmapped":{},"checked":{},"unchecked":{},"violations":[{}],"unresolved":[{}],"missing":[{}],"vacuous":[{}],"unproven":[{}],"oversized":[{}],"ambiguous":[{}],"deployUnread":[{}],"entryUnknown":[{}],"servicesUndeclared":[{}],"linksUnseen":[{}],"linksBlocked":[{}],"lawWarnings":[{}]}}"#,
         json::string(hash),
         report.files_scanned,
         report.files_unmapped,
@@ -782,6 +799,7 @@ fn print_json(hash: &str, report: &Report, law: &[Diag]) {
         entry_unknown.join(","),
         undeclared.join(","),
         unseen.join(","),
+        blocked.join(","),
         law_warnings.join(","),
     );
 }
@@ -1430,8 +1448,22 @@ fn scan_deploy(
             .iter()
             .map(|u| format!(r#"{{"file":{},"why":{}}}"#, json::string(&u.file), json::string(&u.why)))
             .collect();
+        // NetworkPolicy: workload bị cô lập chiều nào, và được cho phép rõ với ai.
+        let guard = |g: &deploy::Guard| {
+            let mut keys: Vec<String> = Vec::new();
+            let mut any = false;
+            for grant in g.grants.iter().flat_map(|x| x.iter()) {
+                match grant {
+                    deploy::Grant::Pods { keys: k, .. } => keys.extend(k.iter().map(deploy::Key::text)),
+                    deploy::Grant::Any | deploy::Grant::Unknown => any = true,
+                }
+            }
+            keys.sort();
+            keys.dedup();
+            format!(r#"{{"isolated":{},"any":{},"pods":{}}}"#, g.isolated, any, json::strings(keys.iter().map(String::as_str)))
+        };
         services.push(format!(
-            r#"{{"key":{},"file":{},"line":{},"code":{},"edges":[{}],"starts":[{}],"unknown":{},"patched":[{}]}}"#,
+            r#"{{"key":{},"file":{},"line":{},"code":{},"edges":[{}],"starts":[{}],"unknown":{},"patched":[{}],"ingress":{},"egress":{}}}"#,
             json::string(&key),
             json::string(&svc.file),
             svc.line,
@@ -1440,6 +1472,8 @@ fn scan_deploy(
             starts_json.join(","),
             opt(svc.unknown.as_deref()),
             patched.join(","),
+            guard(&svc.ingress),
+            guard(&svc.egress),
         ));
     }
     if !as_json {
@@ -1512,7 +1546,11 @@ fn scan_k8s_file(
     // cờ có chữ `kind` thì chỉ in khi đọc ra được gì.
     let f = match k8s::parse(text) {
         Ok(f) if k8s::looks_like(text)
-            || !(f.workloads.is_empty() && f.services.is_empty() && f.config_maps.is_empty() && f.unknown.is_empty()) =>
+            || !(f.workloads.is_empty()
+                && f.services.is_empty()
+                && f.config_maps.is_empty()
+                && f.policies.is_empty()
+                && f.unknown.is_empty()) =>
         {
             f
         }
@@ -1606,12 +1644,61 @@ fn scan_k8s_file(
         .collect();
     let unknown: Vec<String> =
         f.unknown.iter().map(|(k, n, l)| format!("[{},{},{l}]", json::string(k), json::string(n))).collect();
+    let sel = |s: &k8s::Selector| {
+        let exprs: Vec<String> = s
+            .exprs
+            .iter()
+            .map(|(k, op, v)| format!("[{},{},{}]", json::string(k), json::string(op), json::strings(v.iter().map(String::as_str))))
+            .collect();
+        format!(r#"{{"labels":{},"exprs":[{}]}}"#, pairs(&s.labels), exprs.join(","))
+    };
+    let rules = |r: &Option<Vec<k8s::Rule>>| match r {
+        None => "null".to_string(),
+        Some(rules) => {
+            let items: Vec<String> = rules
+                .iter()
+                .map(|rule| {
+                    let peers: Vec<String> = rule
+                        .peers
+                        .iter()
+                        .map(|p| {
+                            format!(
+                                r#"{{"line":{},"pods":{},"namespaces":{},"ip":{}}}"#,
+                                p.line,
+                                p.pods.as_ref().map_or_else(|| "null".into(), sel),
+                                p.namespaces.as_ref().map_or_else(|| "null".into(), sel),
+                                p.ip
+                            )
+                        })
+                        .collect();
+                    format!(r#"{{"line":{},"peers":[{}]}}"#, rule.line, peers.join(","))
+                })
+                .collect();
+            format!("[{}]", items.join(","))
+        }
+    };
+    let policies: Vec<String> = f
+        .policies
+        .iter()
+        .map(|p| {
+            format!(
+                r#"{{"name":{},"namespace":{},"line":{},"pods":{},"ingress":{},"egress":{}}}"#,
+                json::string(&p.name),
+                maybe(p.namespace.as_deref()),
+                p.line,
+                sel(&p.pods),
+                rules(&p.ingress),
+                rules(&p.egress)
+            )
+        })
+        .collect();
     Some(format!(
-        r#"{{"file":{},"kind":"k8s","workloads":[{}],"services":[{}],"configMaps":[{}],"unknown":[{}]}}"#,
+        r#"{{"file":{},"kind":"k8s","workloads":[{}],"services":[{}],"configMaps":[{}],"policies":[{}],"unknown":[{}]}}"#,
         json::string(file),
         workloads.join(","),
         services.join(","),
         maps.join(","),
+        policies.join(","),
         unknown.join(",")
     ))
 }

@@ -354,11 +354,62 @@ thư mục, và ghi chú lại. Service compose và workload cùng tên dựng t
 chỗ thành một service hai nguồn; không cùng thì là hai service (`Vote` và
 `VoteK8s`).
 
+## NetworkPolicy
+
+Luật mạng trong cụm thường đã có sẵn ở dạng NetworkPolicy. archctl so nó với
+`link` theo hai chiều:
+
+```
+✗ VI PHẠM  Worker -> Db  (cạnh mạng không có link, #accepted)
+  k8s/np.yaml:17  NetworkPolicy `db` cho phép
+
+⚠ LINK BỊ NETWORKPOLICY CHẶN  link Frontend -> Shoppingassistantservice
+  .arch/system.arch:42  — NetworkPolicy chặn mọi đường từ workload của Frontend tới workload của Shoppingassistantservice
+```
+
+- **Cụm cho phép mà không có `link`: vi phạm.** Một luật `ingress.from` (hay
+  `egress.to`) có `podSelector` chọn workload của một service đã khai là một
+  đường mạng được mở rõ; nó cần `link` như cạnh lấy từ biến môi trường. Agent
+  nới NetworkPolicy để mở đường mới thì bị bắt. `init --from-code` sinh `link`
+  cho các đường này.
+- **Có `link` mà cụm chặn: cảnh báo, `--strict` tính.** Workload bị cô lập
+  theo một chiều khi có policy cùng chiều chọn nó; khi đó chỉ đường mà luật
+  của các policy đó cho phép mới đi được. `link A -> B` bị báo khi mọi cặp
+  workload của A và B đều bị chặn, ở chiều vào của B hay chiều ra của A.
+
+Đọc theo tài liệu Kubernetes: không ghi `policyTypes` thì luôn cô lập chiều
+vào, cô lập chiều ra khi mục `egress` là danh sách không rỗng (`egress: []` thì
+không); luật không ghi nguồn (đích) là mọi pod; `podSelector: {}` là mọi pod; `matchLabels` và `matchExpressions` (`In`,
+`NotIn`, `Exists`, `DoesNotExist`); `podSelector` không kèm `namespaceSelector`
+là namespace của chính policy. `namespaceSelector` theo
+`kubernetes.io/metadata.name` (nhãn Kubernetes tự gắn) thì biết là namespace
+nào; theo nhãn khác thì repo không cho biết, nên khi xét "bị chặn" coi như cho
+phép, còn khi xét "cho phép rõ" vẫn so `podSelector` với mọi workload. `ipBlock`
+là địa chỉ, không phải pod của repo. Cổng (`ports`) không được xét.
+
+Một pod chỉ bị coi là cô lập khi biết chắc nó cùng namespace với policy (cả
+hai cùng ghi một namespace, hay cùng không ghi): manifest ứng dụng thường để
+namespace cho `kubectl apply -n`, và default-deny của namespace `monitoring`
+không được làm mọi `link` thành "bị chặn". Còn khi xét đường policy cho phép
+rõ, phép khớp vẫn rộng (namespace thiếu ở một bên là khớp), để không lách được
+bằng cách ghi thêm namespace.
+
+Không xét: pod không bị policy nào chọn (mặc định của Kubernetes là mở, và
+`link` vẫn được kiểm theo cấu hình như cũ); đường cho mọi pod (`from: []`,
+`podSelector: {}`), vì nó không nêu service nào. Mỗi cặp service một vi phạm,
+ở luật đầu tiên cho phép; peer cho ra cùng tập workload chỉ tính một lần, và
+việc xét có trần (2 000 000 bước, vượt thì báo "chưa đọc được").
+
+Trên Online Boutique, component `network-policies` chặn mọi đường vào
+(deny-all) mà không mở đường cho `shoppingassistantservice`, trong khi biến môi
+trường của frontend trỏ tới nó: `check` báo đúng chỗ lệch đó.
+
 ## Không đọc
 
 - Helm template, overlay của Kustomize, Terraform: không render. Ai cần thì
   khai `verify` gọi `helm template`, `terraform graph`, kube-linter, checkov.
-- NetworkPolicy, Ingress, Istio: đợt sau. gRPC từ TypeScript, Rust, Java: đợt sau.
+- Ingress, Istio: đợt sau. gRPC từ TypeScript, Rust, Java: đợt sau.
+- Cổng trong NetworkPolicy, policy của CNI riêng (Cilium, Calico).
 - `$(VAR)` trong lệnh (`command`, `args`), và trong env khi biến lấy từ
   `fieldRef` hay Secret: không thay, không đoán.
 - Cạnh chỉ có lúc chạy: URL ghép trong mã, service discovery, biến lấy từ

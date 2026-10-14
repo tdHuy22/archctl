@@ -173,6 +173,41 @@ pub struct Svc {
     /// Dockerfile dựng service (container chính của workload): `init` gộp
     /// service compose với workload cùng tên khi chúng dựng từ cùng một chỗ.
     pub built: Option<String>,
+    /// NetworkPolicy cho workload này: ai được gọi vào, nó được gọi ra đâu.
+    pub ingress: Guard,
+    pub egress: Guard,
+}
+
+/// Một chiều (vào hay ra) của NetworkPolicy đối với một workload.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Guard {
+    /// Có policy cùng chiều chọn workload này: chỉ đường trong `grants` được đi.
+    pub isolated: bool,
+    /// Luật của từng policy chọn workload này, dùng chung giữa các workload: một
+    /// policy chọn hàng nghìn pod không nhân bản luật của nó (TM-23).
+    pub grants: Vec<Rc<Vec<Grant>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Grant {
+    /// Mọi pod: luật không ghi nguồn (đích), hay `podSelector: {}`.
+    Any,
+    /// Không kết luận được: namespace chọn theo nhãn mà repo không cho biết.
+    Unknown,
+    /// Workload cụ thể mà một luật cho phép, kèm policy và dòng của luật.
+    Pods { keys: Rc<Vec<Key>>, policy: String, file: String, line: usize },
+}
+
+impl Guard {
+    /// Đường tới (hay từ) workload `key` có được đi không. Không bị cô lập là
+    /// được; không kết luận được thì coi như được, để không báo nhầm (TM-25).
+    pub fn allows(&self, key: &Key) -> bool {
+        !self.isolated
+            || self.grants.iter().flat_map(|g| g.iter()).any(|g| match g {
+                Grant::Any | Grant::Unknown => true,
+                Grant::Pods { keys, .. } => keys.contains(key),
+            })
+    }
 }
 
 /// Cạnh mạng thấy trong cấu hình.
@@ -790,6 +825,8 @@ fn project(shared: &Shared<'_>, dir: &str, records: &[Record], out: &mut Deploy)
             unknown: None,
             patched: Vec::new(),
             built: None,
+            ingress: Guard::default(),
+            egress: Guard::default(),
         };
         let mut seen: HashSet<(String, String, usize)> = HashSet::new();
         let mut push_edge = |to: &str, file: &str, line: usize, shown: String| {
@@ -899,6 +936,8 @@ pub fn load_dockerfile(root: &Path, path: &str) -> Result<Svc, Unread> {
         unknown: None,
         patched: Vec::new(),
         built: Some(path.to_string()),
+        ingress: Guard::default(),
+        egress: Guard::default(),
     };
     let Some(target) = built.df.target(None) else {
         svc.unknown = Some("Dockerfile không có `FROM`".into());
@@ -981,6 +1020,7 @@ struct Placed<T> {
 struct Cluster {
     workloads: Vec<Placed<k8s::Workload>>,
     services: Vec<Placed<k8s::Service>>,
+    policies: Vec<Placed<k8s::NetPolicy>>,
     config_maps: Vec<Placed<k8s::ConfigMap>>,
     namespaces: HashSet<String>,
 }
@@ -1150,6 +1190,8 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
         r
     };
 
+    let guards = network_policies(&cluster, &steps);
+
     let mut over = false;
     for (wi, placed) in cluster.workloads.iter().enumerate() {
         // Hết ngân sách thì dừng hẳn và báo một lần: đọc tiếp nửa vời là bỏ
@@ -1174,6 +1216,8 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
             unknown: None,
             patched: patched.get(&wi).cloned().unwrap_or_default(),
             built: None,
+            ingress: guards.get(&wi).map(|g| g.0.clone()).unwrap_or_default(),
+            egress: guards.get(&wi).map(|g| g.1.clone()).unwrap_or_default(),
         };
         // Tên máy → Service → workload.
         let resolve_once = |host: &str| -> Vec<usize> {
@@ -1320,6 +1364,126 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
     }
 }
 
+/// Ngoài cụm hay namespace theo nhãn: phạm vi namespace của một peer.
+enum Scope<'a> {
+    /// Namespace của chính policy (`None`: không ghi, đặt lúc apply).
+    Same(Option<&'a str>),
+    Any,
+    /// Namespace theo tên (`kubernetes.io/metadata.name`, nhãn Kubernetes tự gắn).
+    Names(Vec<&'a str>),
+    /// Theo nhãn khác: repo không cho biết namespace nào mang nhãn đó.
+    Unknown,
+}
+
+/// Workload bị NetworkPolicy cô lập theo từng chiều, và đường được cho phép rõ
+/// (TM-24, TM-25). Mỗi policy so selector với mọi workload một lần, tính vào
+/// ngân sách bước chung (TM-23).
+fn network_policies(cluster: &Cluster, steps: &Cell<usize>) -> HashMap<usize, (Guard, Guard)> {
+    const NAME: &str = "kubernetes.io/metadata.name";
+    let mut out: HashMap<usize, (Guard, Guard)> = HashMap::new();
+    let pick = |sel: &k8s::Selector, scope: &Scope<'_>| -> Option<Vec<usize>> {
+        let mut hits = Vec::new();
+        for (wi, w) in cluster.workloads.iter().enumerate() {
+            if !Shared::spend(steps, 1) {
+                return None;
+            }
+            let ns = w.item.namespace.as_deref();
+            let in_scope = match scope {
+                Scope::Same(p) => same_ns(*p, ns),
+                Scope::Any | Scope::Unknown => true,
+                Scope::Names(names) => ns.is_none_or(|n| names.contains(&n)),
+            };
+            if in_scope && sel.matches(&w.item.labels) {
+                hits.push(wi);
+            }
+        }
+        Some(hits)
+    };
+    let key_of = |wi: usize| {
+        let w = &cluster.workloads[wi];
+        Key::K8s { dir: w.dir.clone(), name: w.item.name.clone() }
+    };
+    for p in &cluster.policies {
+        let pol = &p.item;
+        let Some(targets) = pick(&pol.pods, &Scope::Same(pol.namespace.as_deref())) else { return out };
+        if targets.is_empty() {
+            continue;
+        }
+        let mut sides: Vec<Option<Rc<Vec<Grant>>>> = Vec::new();
+        for rules in [&pol.ingress, &pol.egress] {
+            let Some(rules) = rules else {
+                sides.push(None);
+                continue;
+            };
+            let mut grants = Vec::new();
+            // Peer cho ra cùng tập workload chỉ giữ một: policy đối kháng lặp
+            // một selector hàng nghìn lần (TM-23).
+            let mut kept: HashSet<Vec<usize>> = HashSet::new();
+            for rule in rules {
+                if rule.peers.is_empty() {
+                    grants.push(Grant::Any);
+                    continue;
+                }
+                for peer in &rule.peers {
+                    if peer.pods.is_none() && peer.namespaces.is_none() {
+                        // `ipBlock`: địa chỉ, không phải pod của repo.
+                        continue;
+                    }
+                    let scope = match &peer.namespaces {
+                        None => Scope::Same(pol.namespace.as_deref()),
+                        Some(sel) if sel.is_empty() => Scope::Any,
+                        Some(sel) if sel.exprs.is_empty() && sel.labels.len() == 1 && sel.labels[0].0 == NAME => {
+                            Scope::Names(vec![sel.labels[0].1.as_str()])
+                        }
+                        Some(sel)
+                            if sel.labels.is_empty()
+                                && sel.exprs.len() == 1
+                                && sel.exprs[0].0 == NAME
+                                && sel.exprs[0].1 == "In" =>
+                        {
+                            Scope::Names(sel.exprs[0].2.iter().map(String::as_str).collect())
+                        }
+                        Some(_) => Scope::Unknown,
+                    };
+                    let pods = peer.pods.clone().unwrap_or_default();
+                    // `podSelector: {}` là mọi pod: không nêu đích cụ thể nào.
+                    if pods.is_empty() {
+                        grants.push(if matches!(scope, Scope::Unknown) { Grant::Unknown } else { Grant::Any });
+                        continue;
+                    }
+                    let Some(hits) = pick(&pods, &scope) else { return out };
+                    if !kept.insert(hits.clone()) {
+                        continue;
+                    }
+                    let keys: Vec<Key> = hits.into_iter().map(key_of).collect();
+                    grants.push(Grant::Pods {
+                        keys: Rc::new(keys),
+                        policy: pol.name.clone(),
+                        file: p.file.clone(),
+                        line: peer.line,
+                    });
+                }
+            }
+            sides.push(Some(Rc::new(grants)));
+        }
+        for &wi in &targets {
+            // Cô lập chỉ khi biết chắc policy và workload cùng namespace (cả hai
+            // cùng ghi, hay cùng không ghi): một bên không ghi thì có thể khác
+            // namespace, và coi là bị chặn sẽ báo nhầm (TM-25). Đường policy cho
+            // phép thì vẫn tính theo phép khớp rộng, để không lách được (TM-24).
+            let sure = cluster.workloads[wi].item.namespace == pol.namespace;
+            let entry = out.entry(wi).or_default();
+            for (side, guard) in sides.iter().zip([&mut entry.0, &mut entry.1]) {
+                if let Some(grants) = side {
+                    guard.isolated |= sure;
+                    guard.grants.push(grants.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Nhãn mà controller gắn vào pod lúc chạy, không viết trong pod template.
 const CONTROLLER_LABELS: &[&str] = &[
     "statefulset.kubernetes.io/pod-name",
@@ -1409,7 +1573,7 @@ fn read_manifests(
             .sum::<usize>()
             + file.services.iter().map(|s| 1 + s.selector.len()).sum::<usize>()
             + file.config_maps.iter().map(|m| 1 + m.keys().count()).sum::<usize>();
-        objects += file.workloads.len() + file.services.len() + file.config_maps.len();
+        objects += file.workloads.len() + file.services.len() + file.config_maps.len() + file.policies.len();
         if objects > MAX_K8S_OBJECTS || !Shared::spend(&shared.facts, facts) || !Shared::spend(&shared.bytes, file.size) {
             out.unread.push(Unread {
                 file: (*f).clone(),
@@ -1444,6 +1608,9 @@ fn read_manifests(
         for m in file.config_maps {
             c.namespaces.extend(m.namespace.clone());
             c.config_maps.push(Placed { file: (*f).clone(), dir: dir.clone(), item: m });
+        }
+        for p in file.policies {
+            c.policies.push(Placed { file: (*f).clone(), dir: dir.clone(), item: p });
         }
     }
     c
