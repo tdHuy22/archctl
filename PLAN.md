@@ -335,8 +335,13 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-Làm theo các mốc ở §1, bắt đầu từ mốc "Cạnh Python ↔ native". Thước đo
-chuẩn đã phủ cả năm ngôn ngữ.
+Mọi mốc ở §1 đã xong (2026-10-14). Chờ bạn chốt ba câu ở trang
+https://claude.ai/artifact/Xy5ZNKRt6p7JdGwcco9zCa:
+1. đẩy `e31a772` qua nhánh thử, chạy CI, xanh thì lên `main` (khuyên: có);
+2. mốc mới: A NetworkPolicy đối chiếu `link`, B gRPC Node và Rust, C lối vào
+   từ ngoài cụm (Ingress, Istio), D cạnh mạng từ mã (khuyên: A rồi B);
+3. với A: cụm cho phép mà không có `link` là vi phạm, có `link` mà cụm chặn là
+   cảnh báo (khuyên).
 
 **Đã quyết (2026-10-11): cạnh binding Python ↔ native tự viết.** Đã tìm theo
 skill reuse-best. Không công cụ tĩnh nào phủ cả PyO3, pybind11, nanobind
