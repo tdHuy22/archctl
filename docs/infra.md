@@ -2,7 +2,8 @@
 
 Đồ thị import cho biết mã nào gọi mã nào. Nó không cho biết mã nào chạy trong
 container nào, và container nào nói chuyện với container nào qua mạng. Hai câu
-hỏi đó nằm trong docker-compose và Dockerfile, và archctl đọc chúng.
+hỏi đó nằm trong docker-compose, Dockerfile và manifest Kubernetes, và archctl
+đọc chúng.
 
 ```
 service Api     from compose:api     runs Serve, Rag, Data
@@ -24,8 +25,8 @@ service.
 ## Khai báo
 
 ```
-service <Tên> [from <nguồn>] [runs <Component>, ...]   @owner #status
-link <Service> -> <Service>[, <Service>...]             @owner #status
+service <Tên> [from <nguồn>[, <nguồn>...]] [runs <Component>, ...]   @owner #status
+link <Service> -> <Service>[, <Service>...]                          @owner #status
 ```
 
 Nguồn cấu hình:
@@ -36,6 +37,15 @@ Nguồn cấu hình:
 | `compose:deploy/api` | service `api` trong file compose ở thư mục `deploy/`, khi nhiều thư mục cùng có tên đó |
 | `compose:./api` | như trên, cho thư mục gốc |
 | `dockerfile:svc/Dockerfile` | service dựng từ Dockerfile này, không qua compose; build context là thư mục chứa nó |
+| `k8s:api` | workload `api` (Deployment, StatefulSet, DaemonSet, ReplicaSet, Job, CronJob, Pod) trong manifest Kubernetes, ở mọi thư mục: bản phát hành trong `release/`, base của kustomize là bản sao của cùng ứng dụng và được kiểm hết |
+| `k8s:shop/k8s/api` | chỉ workload `api` trong thư mục `shop/k8s`, khi hai ứng dụng khác nhau cùng có workload tên đó |
+
+Một service có thể có nhiều nguồn, khi cùng một ứng dụng chạy bằng compose ở
+máy dev và bằng Kubernetes ở cụm thật: `service Vote from compose:vote,
+k8s:vote runs Vote`. Mỗi nguồn được kiểm riêng theo cùng `runs` và `link`.
+`dockerfile:` đi cùng `k8s:` nghĩa là image của container chính trong workload
+dựng từ Dockerfile đó (xem [Manifest Kubernetes](#manifest-kubernetes)); đi
+cùng `compose:` thì thừa, vì compose đã nói service dựng từ đâu.
 
 Không có `from` thì service chỉ là một cái tên trên sơ đồ, ví dụ cơ sở dữ liệu
 do bên khác vận hành. Đường dẫn trong `from` phải tương đối và nằm trong dự
@@ -244,26 +254,129 @@ thì `QuantStub()` của PyTorch cũng thành gRPC.
   và `link` giữa service. **`scan`** in chỗ gọi, chỗ đăng ký, và package,
   service, rpc của từng file `.proto`.
 
+## Manifest Kubernetes
+
+```
+service Checkout from k8s:checkoutservice runs Checkout
+service Catalog  from k8s:productcatalogservice runs Catalog
+link Checkout -> Catalog
+```
+
+Workload trong manifest là một `service` như service compose. Cạnh mạng đi qua
+tên `Service`:
+
+```
+✗ VI PHẠM  Checkout -> Catalog  (cạnh mạng không có link, #accepted)
+  kubernetes-manifests/checkoutservice.yaml:57  PRODUCT_CATALOG_SERVICE_ADDR → productcatalogservice:3550
+```
+
+**Cạnh mạng.** Giá trị biến môi trường theo đúng luật tên máy của compose (mục
+trên), kể cả giá trị lấy từ ConfigMap của repo qua `envFrom.configMapRef` và
+`valueFrom.configMapKeyRef`; cạnh khi đó trỏ về dòng trong ConfigMap. `$(TÊN)`
+được thay bằng giá trị của biến khai trước trong cùng container, như
+Kubernetes; biến không biết (`fieldRef`, Secret) thì giữ nguyên, không đoán.
+Tên máy là tên `Service`: `svc`, `svc.ns`, `svc.ns.svc`,
+`svc.ns.svc.cluster.local`, và pod của Service headless (`kafka-0.kafka`).
+`svc.ns` được hiểu là namespace khi `ns` là `default` hay namespace có trong
+repo (`metadata.namespace`, `kind: Namespace`, `namespace:` của kustomization);
+`x.y` mà `x` là Service của repo còn `y` không phải namespace đã biết thì vào
+mục "chưa đọc được", vì có thể là tên miền ngoài, có thể là namespace chưa
+khai. Service `ExternalName` trỏ tới tên trong cụm thì đi tiếp một bước tới
+Service đó. Service nối tới workload khi `selector` nằm trong nhãn của pod
+template, cùng namespace (thiếu namespace ở một bên thì coi như khớp, vì
+namespace thường đặt lúc `kubectl apply -n`); nhãn do controller gắn lúc chạy
+(`statefulset.kubernetes.io/pod-name: db-0`, `job-name`) so theo tên và loại
+workload. Có Service cùng tên ở nhiều thư mục thì ưu tiên Service và workload
+cùng thư mục với bên gọi. `Secret` không bao giờ được đọc, `secretKeyRef` và
+`envFrom.secretRef` bị bỏ.
+
+Service không chọn workload nào trong repo (`ExternalName`, không selector,
+chart của bên khác) được coi như gói ngoài: không vi phạm, không cảnh báo. Cạnh
+tới workload có trong repo mà chưa khai thì là vi phạm, như compose.
+
+**Workload chạy mã nào.** Manifest chỉ ghi tên image. archctl lần ngược:
+
+1. `dockerfile:` khai cùng `k8s:` trong luật: image của container chính
+   (theo chú thích `kubectl.kubernetes.io/default-container`, không có thì
+   container đầu tiên);
+2. artifact trong `skaffold.yaml` (`image` → `context`, `docker.dockerfile`,
+   `docker.target`, kể cả trong `profiles`);
+3. service compose có cả `image:` lẫn `build:`.
+
+So tên image bỏ tag và digest. Tên trần ở phía dựng (`checkoutservice` trong
+skaffold, registry đặt lúc chạy) khớp đoạn cuối của tên đầy đủ
+(`gcr.io/x/checkoutservice:v1`); tên có registry thì phải khớp đủ. Khớp nhiều
+nơi dựng khác nhau thì không chọn hộ, mà báo "không rõ điểm vào". Không lần
+được, như `postgres:16`, thì là image dựng sẵn: service có `runs` thì báo
+"không rõ điểm vào", như compose, kể cả khi một sidecar của pod lần được.
+Dựng không qua Dockerfile (`jib`, `ko`, `buildpacks`) cũng vậy. Service không
+có `runs` mà cấu hình cho thấy rõ nó chạy mã của một component thì vi phạm
+`runs` (với compose cũng vậy): `runs` rỗng nghĩa là không chạy mã nào của dự
+án.
+
+Lệnh khởi chạy theo đúng Kubernetes: `command` thay `ENTRYPOINT` của image,
+`args` thay `CMD`; có `command` mà không có `args` thì `CMD` bị bỏ.
+`workingDir` thay `WORKDIR`. Init container cũng là mã chạy trong pod.
+
+**Đọc file nào.** Mọi file YAML và JSON của repo có chữ `apiVersion` và `kind`
+(kể cả khoá thụt lề, có nháy, flow, BOM), trừ thư mục test, ví dụ, tài liệu, ẩn
+(như compose) — nhưng file trong các thư mục đó mà một kustomization kéo vào thì
+vẫn đọc, vì nó được triển khai. File có `apiVersion:` và `kind:` ở đầu dòng mà
+không phân tích được thì báo. `kind: List`, `DeploymentList`… được trải một
+tầng. Workload không container nào có image là mảnh patch, không phải
+workload. Manifest chỉ được đọc khi luật có nguồn `k8s:` (hay khi `init`,
+`scan`): repo chỉ dùng compose không tốn gì thêm.
+
+- **Helm:** template trong thư mục chart (`templates/`, `charts/` cạnh
+  `Chart.yaml`) không được đọc, vì nó chưa phải YAML cho tới khi render.
+  `scan` in thư mục chart ra. Không tính vào `--strict`. Muốn kiểm thì khai
+  `verify` gọi `helm template`.
+- **Kustomize:** file trong `resources` đọc như manifest thường; file patch
+  (`patches`, `patchesStrategicMerge`, `patchesJson6902`) không phải manifest.
+  Patch không được áp. Patch đổi lệnh, biến môi trường hay image của một
+  workload đã khai (kể cả JSON 6902 thay cả nhánh `/spec/template/spec`), trong
+  một kustomization kéo workload đó vào (qua `resources`, `components`), thì
+  được báo "chưa đọc được": workload thật chạy khác thứ archctl thấy. Patch chỉ
+  đổi `replicas`, `resources` thì không. `namePrefix`, `nameSuffix`, `images`,
+  `configMapGenerator`, `replacements`, `vars` cũng được báo như vậy, vì chúng
+  đổi tên Service, image hay giá trị env.
+- **Loại lạ có pod template** (Argo `Rollout`, CRD): báo "chưa đọc được", vì
+  mã chạy trong đó không được kiểm.
+- **Bản sao:** `k8s:<tên>` khớp workload tên đó ở mọi thư mục, và mỗi bản
+  được kiểm `link`, `runs` như nhau: bản phát hành trong `release/` thường
+  mới là thứ được triển khai thật.
+
+**`init --from-code`** sinh `service ... from k8s:<tên>` cho từng workload.
+Workload cùng tên ở nhiều thư mục mà dựng từ cùng một chỗ (cùng Dockerfile,
+hay cùng image dựng sẵn) là bản sao: một service. Dựng từ nhiều chỗ khác nhau
+(monorepo, hai ứng dụng cùng có `api`) thì mỗi chỗ một service, nguồn ghi rõ
+thư mục, và ghi chú lại. Service compose và workload cùng tên dựng từ cùng một
+chỗ thành một service hai nguồn; không cùng thì là hai service (`Vote` và
+`VoteK8s`).
+
 ## Không đọc
 
 - Helm template, overlay của Kustomize, Terraform: không render. Ai cần thì
   khai `verify` gọi `helm template`, `terraform graph`, kube-linter, checkov.
-- Manifest Kubernetes: đợt sau. gRPC từ TypeScript, Rust, Java: đợt sau.
+- NetworkPolicy, Ingress, Istio: đợt sau. gRPC từ TypeScript, Rust, Java: đợt sau.
+- `$(VAR)` trong lệnh (`command`, `args`), và trong env khi biến lấy từ
+  `fieldRef` hay Secret: không thay, không đoán.
 - Cạnh chỉ có lúc chạy: URL ghép trong mã, service discovery, biến lấy từ
-  secret store, `network_mode`.
+  secret store, `network_mode`, ConfigMap không có trong repo.
 
 ## Trong hook, `init`, sơ đồ
 
 **Hook.** `archctl check <file>` với file mã thuộc một component chỉ kiểm
 `runs` theo import của file đó. Nó đọc lại cấu hình của cả repo khi file vừa
-đổi có thể là thứ cấu hình trỏ tới: file compose, Dockerfile, `.env`, script,
-`package.json`; mọi file không phải mã (trừ tài liệu và ảnh), vì `env_file`,
+đổi có thể là thứ cấu hình trỏ tới: file compose, Dockerfile, manifest và mọi
+file YAML, `.env`, script, `package.json`; mọi file không phải mã (trừ tài liệu và ảnh), vì `env_file`,
 `extends.file`, `dockerfile:` đặt tên tuỳ ý; file mã không thuộc component
 nào, vì đó là chỗ của điểm vào (`main.py` ở gốc); và `pyproject.toml`,
 `setup.py`, `setup.cfg`, vì chúng đổi chỗ tìm module. Repo chưa khai `service`
 nào thì không đọc compose, không tốn gì.
 
-**`init --from-code`** sinh `service`, `runs` và `link`. `runs` là mọi
+**`init --from-code`** sinh `service`, `runs` và `link` (từ compose và manifest
+Kubernetes). `runs` là mọi
 component mà điểm vào chạm tới theo các cạnh đã quan sát — đúng điều `check`
 đòi, nên bản nháp nâng lên `#accepted` thì không tự vi phạm.
 
@@ -281,11 +394,12 @@ trường trong compose thì không bao giờ được in, kể cả với `--ve
 
 ## An toàn
 
-File compose và Dockerfile là của người khác hay do agent viết, và bộ đọc chạy
-trong hook. Chốt chặn (threat model TM-8 tới TM-12):
+File compose, Dockerfile và manifest là của người khác hay do agent viết, và bộ
+đọc chạy trong hook. Chốt chặn (threat model TM-8 tới TM-12, TM-18 tới TM-22):
 
 - không chạy lệnh nào — lệnh khởi chạy chỉ được tách thành chữ;
-- **không bao giờ in giá trị biến môi trường**: chỉ `KHOÁ → máy:cổng`, và tên
+- **không bao giờ in giá trị biến môi trường** (compose, manifest, ConfigMap;
+  `Secret` không được đọc): chỉ `KHOÁ → máy:cổng`, và tên
   máy chỉ là tên một service; phần `user:mật khẩu@` của URL bị bỏ, kể cả trong
   đường dẫn hiện trong thông báo lỗi. Giá trị thường mang mật khẩu, và output
   của archctl đi vào log CI và context của agent. Riêng `PYTHONPATH` và
@@ -306,8 +420,17 @@ trong hook. Chốt chặn (threat model TM-8 tới TM-12):
   `COPY`, mỗi giá trị sau khi thay biến tối đa 8 KB, tổng giá trị `ARG`/`ENV`
   được nhớ tối đa 1 MB. Mỗi lệnh khởi chạy lần qua tối đa 256 bước, cả repo
   20 000; lồng `sh -c` tối đa 4 tầng; mỗi lệnh ghi chi tiết tối đa 5 chỗ thôi
-  đọc. Vượt trần ở file compose hay Dockerfile thì file đó vào mục "chưa đọc
-  được"; ở lệnh khởi chạy thì service vào mục "không rõ điểm vào".
+  đọc. Manifest: đọc tối đa 32 MB và 10 000 file YAML cho cả repo (lọc thô theo
+  chữ `apiVersion`, `kind` trước khi phân tích), mỗi file 2 000 tài liệu,
+  50 000 mục, 8 MB sau khi trải alias, 256 nhãn mỗi pod; cả repo 20 000
+  workload, Service, ConfigMap, 20 000 cạnh mạng, 2 000 kustomization, 500 000
+  bước so selector, lần `resources` và áp patch; selector tra bằng bảng băm
+  theo cặp nhãn, đích của một tên máy tính một lần cho mỗi workload, patch viết
+  thẳng đọc một lần dù alias nhân nó lên. Đường dẫn trong `skaffold.yaml` và
+  `kustomization.yaml` đi qua cùng chốt chặn như trên. Vượt trần ở file compose
+  hay Dockerfile thì file đó vào mục "chưa đọc được"; ở lệnh khởi chạy thì
+  service vào mục "không rõ điểm vào"; ở manifest thì phần còn lại vào mục
+  "chưa đọc được".
 
 Thứ không đọc được thì báo ra, không im lặng bỏ qua.
 
@@ -316,7 +439,12 @@ Thứ không đọc được thì báo ra, không im lặng bỏ qua.
 `bench/repos.tsv` có `example-voting-app` (compose năm service, stage
 Dockerfile thừa hưởng `WORKDIR`, bind mount) và `open-webui` (ứng dụng LLM tự
 host: `build: .`, `COPY --from=build`, điểm vào qua `start.sh` rồi `uvicorn`).
-Luật `init` sinh ra phải tự nhất quán; cạnh mạng và `runs` bắt buộc phải có, và
-gỡ chúng đi thì `check` phải báo (`consistency.DEPLOY`). `oracle.py --require
-deploy` so dữ kiện từng file compose và Dockerfile với PyYAML và
-dockerfile-parse; `sabotage.py` phá từng phép kiểm để chắc nó đổ được.
+`microservices-demo` (Online Boutique) có manifest Kubernetes, `skaffold.yaml`,
+bản phát hành trong `release/`, chart Helm và component Kustomize; mười một
+microservice gọi nhau bằng gRPC qua địa chỉ trong env. Luật `init` sinh ra phải
+tự nhất quán; cạnh mạng và `runs` bắt buộc phải có, và gỡ chúng đi thì `check`
+phải báo (`consistency.DEPLOY`). `oracle.py --require deploy` so dữ kiện từng
+file compose và Dockerfile với PyYAML và dockerfile-parse, và dữ kiện từng
+manifest cùng mọi cạnh qua Service với `bench/k8s_truth.py` (PyYAML, cài lại
+luật DNS và selector theo tài liệu Kubernetes); `sabotage.py` phá từng phép
+kiểm để chắc nó đổ được.

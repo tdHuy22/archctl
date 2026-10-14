@@ -199,9 +199,10 @@ pub struct Api {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Service {
     pub name: String,
-    /// Nơi đọc cấu hình của service. Không có thì service chỉ là một cái tên
-    /// trên sơ đồ — một cơ sở dữ liệu do bên khác vận hành chẳng hạn.
-    pub source: Option<Source>,
+    /// Nơi đọc cấu hình của service. Rỗng thì service chỉ là một cái tên
+    /// trên sơ đồ — một cơ sở dữ liệu do bên khác vận hành chẳng hạn. Nhiều
+    /// nguồn khi cùng một ứng dụng chạy bằng compose lẫn Kubernetes.
+    pub sources: Vec<Source>,
     /// Component được phép chạy trong service. Rỗng nghĩa là không có mã của
     /// dự án này: image dựng sẵn như `postgres`.
     pub runs: Vec<String>,
@@ -214,8 +215,13 @@ pub enum Source {
     /// Service tên `name` trong file compose. `dir` là thư mục chứa file
     /// compose, khi nhiều thư mục cùng có service tên đó.
     Compose { dir: Option<String>, name: String },
-    /// Dockerfile dựng service này, khi không có compose.
+    /// Dockerfile dựng service này, khi không có compose. Đi cùng `k8s:` thì
+    /// là image của container chính trong workload đó.
     Dockerfile(String),
+    /// Workload tên `name` (Deployment, StatefulSet…) trong manifest
+    /// Kubernetes. `dir` là thư mục chứa manifest, khi nhiều thư mục cùng có
+    /// workload tên đó.
+    K8s { dir: Option<String>, name: String },
 }
 
 impl Source {
@@ -225,7 +231,26 @@ impl Source {
             Source::Compose { dir: Some(dir), name } => format!("compose:{dir}/{name}"),
             Source::Compose { dir: None, name } => format!("compose:{name}"),
             Source::Dockerfile(path) => format!("dockerfile:{path}"),
+            Source::K8s { dir: Some(dir), name } if dir.is_empty() => format!("k8s:./{name}"),
+            Source::K8s { dir: Some(dir), name } => format!("k8s:{dir}/{name}"),
+            Source::K8s { dir: None, name } => format!("k8s:{name}"),
         }
+    }
+}
+
+impl Service {
+    /// `compose:api, k8s:api`, hay `-` khi không có nguồn nào.
+    pub fn sources_text(&self) -> String {
+        if self.sources.is_empty() {
+            return "-".into();
+        }
+        self.sources.iter().map(Source::text).collect::<Vec<_>>().join(", ")
+    }
+
+    /// Có workload Kubernetes: khi đó `dockerfile:` là image của nó, không
+    /// phải một service riêng.
+    pub fn on_k8s(&self) -> bool {
+        self.sources.iter().any(|s| matches!(s, Source::K8s { .. }))
     }
 }
 
@@ -610,7 +635,7 @@ impl Document {
             out.push(Element::new("api", a.name.clone(), list(&a.symbols), &a.meta));
         }
         for s in &self.services {
-            let from = s.source.as_ref().map_or("-".to_string(), Source::text);
+            let from = s.sources_text();
             out.push(Element::new(
                 "service",
                 s.name.clone(),

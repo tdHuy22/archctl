@@ -35,6 +35,13 @@ Dockerfile mà `scan --json` in ra (mất một `depends_on`, lệch dòng một
 môi trường, thêm một tên máy giả, sửa một chỉ thị Dockerfile), đối chiếu bằng
 PyYAML và dockerfile-parse cài vào venv nên cần mạng; CI bật nó.
 
+Ba kiểu `deploy-gen`, `deploy-link`, `deploy-runs` chạy lại trên
+`--k8s-bench-repo` (mặc định microservices-demo), nơi `link` và `runs` đến từ
+manifest Kubernetes chứ không từ compose. `--k8s-repo microservices-demo` phá
+thêm bốn kiểu ở dữ kiện manifest và cạnh qua Service mà `scan --json` in ra
+(mất một biến môi trường, lệch dòng một workload, mất một cạnh, đổi đích một
+cạnh), đối chiếu bằng `k8s_truth.py` trên PyYAML; cần mạng như `--deploy-repo`.
+
 `--proto-repo vllm` phá thêm hai kiểu ở dữ kiện `.proto` (mất một `rpc`, lệch
 dòng một `service`), đối chiếu bằng `protoc` của grpcio-tools cài vào venv nên
 cần mạng; CI bật nó. Kiểu `rpc` chạy trên `--rpc-repo` (mặc định etcd): xoá cạnh
@@ -112,6 +119,16 @@ DEPLOY_ORACLE_MODES = {
     "dep-docker": "thiếu:",
 }
 
+# kiểu phá tầng hạ tầng chạy lại trên repo có manifest Kubernetes
+K8S_BENCH_MODES = {m: DEPLOY_MODES[m] for m in ("deploy-gen", "deploy-link", "deploy-runs")}
+# phá dữ kiện manifest và cạnh qua Service trong `scan --json` → dòng `oracle.py` phải in ra
+K8S_ORACLE_MODES = {
+    "k8s-env": "thiếu:",
+    "k8s-line": "lệch dòng:",
+    "k8s-edge": "thiếu cạnh:",
+    "k8s-target": "thừa cạnh:",
+}
+
 # phá dữ kiện `.proto` trong `scan --json` → dòng `oracle.py` phải in ra
 PROTO_ORACLE_MODES = {
     "proto-drop": "thiếu:",
@@ -156,6 +173,32 @@ def sabotage_deploy(rep: dict, mode: str):
                 else:
                     s["env"].append({**s["env"][0], "key": "KHONG_CO_THAT_HOST"})
                 return
+
+
+def sabotage_k8s(rep: dict, mode: str):
+    """Làm hỏng dữ kiện manifest đầu tiên đúng loại, hay cạnh qua Service đầu
+    tiên, trong `scan --json`."""
+    dep = rep.get("deploy", {})
+    if mode in ("k8s-edge", "k8s-target"):
+        keys = [s["key"] for s in dep.get("services", []) if s["key"].startswith("k8s:")]
+        for s in dep.get("services", []):
+            if s["key"].startswith("k8s:") and s["edges"]:
+                if mode == "k8s-edge":
+                    s["edges"].pop(0)
+                else:
+                    e = s["edges"][0]
+                    e["target"] = next(k for k in keys if k not in (e["target"], s["key"]))
+                return
+        return
+    for f in dep.get("files", []):
+        for w in f.get("workloads", []) if f.get("kind") == "k8s" else []:
+            if mode == "k8s-line":
+                w["line"] += 1
+                return
+            for c in w["containers"]:
+                if c["env"]:
+                    c["env"].pop(0)
+                    return
 
 
 def sabotage_crossings(rep: dict, mode: str):
@@ -271,6 +314,10 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
         rep = json.loads(out)
         sabotage_deploy(rep, mode)
         out = json.dumps(rep)
+    elif mode in K8S_ORACLE_MODES and args[:1] == ["scan"] and "--json" in args:
+        rep = json.loads(out)
+        sabotage_k8s(rep, mode)
+        out = json.dumps(rep)
     elif mode in PROTO_ORACLE_MODES and args[:1] == ["scan"] and "--json" in args:
         rep = json.loads(out)
         sabotage_protos(rep, mode)
@@ -297,6 +344,10 @@ def main():
                     help="repo có cạnh gRPC bắt buộc, cho kiểu phá `rpc`")
     ap.add_argument("--deploy-bench-repo", default="example-voting-app",
                     help="repo có compose và `runs`, `link` bắt buộc, cho các kiểu phá `deploy-*`")
+    ap.add_argument("--k8s-bench-repo", default="microservices-demo",
+                    help="repo có manifest Kubernetes và `runs`, `link` bắt buộc, cho kiểu phá `deploy-*` lần hai")
+    ap.add_argument("--k8s-repo",
+                    help="phá cả phần manifest Kubernetes của oracle.py trên repo này (cài PyYAML vào venv)")
     ap.add_argument("--proto-repo",
                     help="phá cả phần `.proto` của oracle.py trên repo này (cài grpcio-tools vào venv)")
     ap.add_argument("--deploy-repo",
@@ -319,7 +370,12 @@ def main():
                  for m, e in [("", None), *RPC_MODES.items()]]
         runs += [("bench.py", args.deploy_bench_repo, m, e)
                  for m, e in [("", None), *DEPLOY_MODES.items()]]
+        runs += [("bench.py", args.k8s_bench_repo, m, e)
+                 for m, e in [("", None), *K8S_BENCH_MODES.items()]]
         runs += [("oracle.py", args.repo, m, e) for m, e in [("", None), *ORACLE_MODES.items()]]
+        if args.k8s_repo:
+            runs += [("oracle.py", args.k8s_repo, m, e)
+                     for m, e in [("", None), *K8S_ORACLE_MODES.items()]]
         if args.deploy_repo:
             runs += [("oracle.py", args.deploy_repo, m, e)
                      for m, e in [("", None), *DEPLOY_ORACLE_MODES.items()]]
@@ -344,7 +400,8 @@ def main():
                 need = ["syn"]
             if mode in NOTEBOOK_ORACLE_MODES or (script == "oracle.py" and repo == args.notebook_repo):
                 need = ["ipython"]
-            if mode in DEPLOY_ORACLE_MODES or (script == "oracle.py" and repo == args.deploy_repo and not mode):
+            if mode in DEPLOY_ORACLE_MODES or mode in K8S_ORACLE_MODES \
+                    or (script == "oracle.py" and repo in (args.deploy_repo, args.k8s_repo) and not mode):
                 need = ["deploy"]
             binding_repos = {r for _, r, _ in BINDING_ORACLE_RUNS}
             if mode in BINDING_ORACLE_MODES or (script == "oracle.py" and not mode and repo in binding_repos

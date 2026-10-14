@@ -378,7 +378,7 @@ fn model_json(root: &Path) -> String {
     }
     let svc = |name: &str| format!("{}{name}", layout::SERVICE_PREFIX);
     for s in &doc.services {
-        let from = s.source.as_ref().map(|src| src.text()).unwrap_or_default();
+        let from = if s.sources.is_empty() { String::new() } else { s.sources_text() };
         let sub = match (from.is_empty(), s.runs.is_empty()) {
             (_, false) if from.is_empty() => s.runs.join(", "),
             (_, false) => format!("{from} · {}", s.runs.join(", ")),
@@ -492,10 +492,10 @@ fn model_json(root: &Path) -> String {
             card(format!("không rõ điểm vào của service {s}"), format!("{why} — `runs` chỉ được kiểm theo cạnh import"))
         }))
         .chain(report.links_unseen.iter().map(|(from, to, line)| {
-            card(format!("link {from} -> {to}"), format!("system.arch:{line} — không compose nào cho thấy cạnh này"))
+            card(format!("link {from} -> {to}"), format!("system.arch:{line} — không cấu hình nào cho thấy cạnh này"))
         }))
         .chain(report.services_undeclared.iter().map(|(file, line, name)| {
-            card(format!("service {name} chưa khai"), format!("{file}:{line} — thêm `service ... from compose:{name}`"))
+            card(format!("service {name} chưa khai"), format!("{file}:{line} — thêm `service ... from compose:{name}` hay `from k8s:{name}`"))
         }))
         .collect();
 

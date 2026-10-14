@@ -103,14 +103,14 @@ pub const MAX_FACTS: usize = 50_000;
 pub const MAX_COPIED: usize = 8 << 20;
 
 /// Ngân sách của một file, trừ dần khi chép.
-struct Budget {
-    bytes: usize,
-    over: bool,
+pub(crate) struct Budget {
+    pub(crate) bytes: usize,
+    pub(crate) over: bool,
 }
 
 impl Budget {
     /// Trừ `n` byte; hết thì ghi lại và trả `false`.
-    fn take(&mut self, n: usize) -> bool {
+    pub(crate) fn take(&mut self, n: usize) -> bool {
         match self.bytes.checked_sub(n + 1) {
             Some(rest) => {
                 self.bytes = rest;
@@ -126,7 +126,7 @@ impl Budget {
 
     /// Chép một chuỗi nếu còn ngân sách. Hết thì trả chuỗi rỗng: `parse` bỏ
     /// cả file ngay sau service đó.
-    fn own(&mut self, s: &str) -> String {
+    pub(crate) fn own(&mut self, s: &str) -> String {
         if self.take(s.len()) { s.to_string() } else { String::new() }
     }
 }

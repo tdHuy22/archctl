@@ -33,15 +33,30 @@ fn check_services(doc: &Document, diags: &mut Vec<Diag>) {
                 format!("service `{}` trùng tên đã khai báo ở dòng {first}", s.name),
             ));
         }
-        if let Some(source) = &s.source
-            && let Some(first) = sources.insert(source.text(), s.meta.line)
-        {
+        for source in &s.sources {
+            // `dockerfile:` đi cùng `k8s:` là image của workload, nên nhiều
+            // workload được phép dựng từ cùng một Dockerfile.
+            if s.on_k8s() && matches!(source, Source::Dockerfile(_)) {
+                continue;
+            }
+            if let Some(first) = sources.insert(source.text(), s.meta.line) {
+                diags.push(
+                    Diag::error(
+                        s.meta.line,
+                        format!("`from {}` đã dùng cho service khai báo ở dòng {first}", source.text()),
+                    )
+                    .with_hint("mỗi service trong compose hay workload Kubernetes ứng với đúng một `service`"),
+                );
+            }
+        }
+        let dockerfiles = s.sources.iter().filter(|x| matches!(x, Source::Dockerfile(_))).count();
+        let compose = s.sources.iter().any(|x| matches!(x, Source::Compose { .. }));
+        if dockerfiles > 1 || (dockerfiles == 1 && compose && !s.on_k8s()) {
             diags.push(
-                Diag::error(
-                    s.meta.line,
-                    format!("`from {}` đã dùng cho service khai báo ở dòng {first}", source.text()),
-                )
-                .with_hint("mỗi service trong compose ứng với đúng một `service`"),
+                Diag::error(s.meta.line, format!("service `{}`: `dockerfile:` thừa", s.name)).with_hint(
+                    "compose đã nói service dựng từ đâu; `dockerfile:` chỉ đi một mình, \
+                     hay cùng `k8s:` để nói image của workload dựng từ đâu",
+                ),
             );
         }
         for name in &s.runs {
@@ -84,7 +99,7 @@ fn check_services(doc: &Document, diags: &mut Vec<Diag>) {
         // không có cấu hình nào để đối chiếu, và `link` từ nó không bao giờ
         // kiểm được.
         if let Some(s) = doc.service(&link.from)
-            && s.source.is_none()
+            && s.sources.is_empty()
             && link.meta.status.is_enforced()
         {
             diags.push(

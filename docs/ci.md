@@ -89,7 +89,7 @@ khi mã dùng let-chain của 1.88, suốt nhiều tháng, vì không có gì ki
 
 ## Repo thật, ở mỗi pull request
 
-Job `repo thật` chạy [bench/bench.py](../bench/bench.py): tải hai mươi chín repo ở
+Job `repo thật` chạy [bench/bench.py](../bench/bench.py): tải ba mươi repo ở
 đúng commit ghim trong `bench/repos.tsv`, rồi đòi hai điều. Luật do `init
 --from-code` sinh ra, nâng lên `#accepted`, kiểm lại chính mã đó thì phải ra 0
 vi phạm. Và mọi lệnh phải chạy được trên mã người khác viết, chứ không chỉ trên
@@ -114,18 +114,20 @@ bộ kiểm cùng dùng — làm cả hai sai giống nhau mà vẫn ra "0 bất
 từng mất 21% import tĩnh như vậy suốt nhiều lần chạy xanh. Bước này đối chiếu
 với parser chuẩn: `ast` của Python, lexer thô của clang, parser module của
 Node, `go/parser` của Go, `syn` cho Rust, IPython cho notebook, PyYAML và
-dockerfile-parse cho compose và Dockerfile. Bốn cái đầu có sẵn trên image
+dockerfile-parse cho compose và Dockerfile, PyYAML cho manifest Kubernetes và
+cạnh qua Service ([k8s_truth.py](../bench/k8s_truth.py)). Bốn cái đầu có sẵn trên image
 `ubuntu-24.04` đã ghim. `syn` thì phải tải từ crates.io, nên riêng bước này
 mở lại mạng cho cargo (`CARGO_NET_OFFLINE: "false"`); archctl đã dựng xong ở
 bước trước khi còn offline, và crate tải về chỉ vào trình đọc của bộ đo, ghim
 cứng bằng `=`. IPython, PyYAML và dockerfile-parse cài bằng pip vào venv riêng,
 mọi gói ghim `==` kèm sha256; grpcio-tools (`protoc`) cũng vậy. `--require
 clang,node,go,syn,ipython,deploy,proto` để ngày thiếu một cái thì bước này đỏ
-chứ không lặng lẽ bỏ qua. Mười tám trong ba mươi mốt kiểu phá của
+chứ không lặng lẽ bỏ qua. Hai mươi hai trong ba mươi tám kiểu phá của
 `sabotage.py` nhắm vào bước này: ba ở import Python, ba ở import Rust, hai ở
-notebook, bốn ở cạnh Python ↔ native, bốn ở compose và Dockerfile, hai ở
-`.proto`. Bốn kiểu khác nhắm vào phần hạ tầng của chính bộ đo, một kiểu vào
-cạnh gRPC bắt buộc. Phần Rust cũng cần `syn`, nên bước
+notebook, bốn ở cạnh Python ↔ native, bốn ở compose và Dockerfile, bốn ở
+manifest Kubernetes và cạnh qua Service, hai ở `.proto`. Bảy kiểu khác nhắm vào
+phần hạ tầng của chính bộ đo (bốn trên compose, ba lặp lại trên manifest
+Kubernetes), một kiểu vào cạnh gRPC bắt buộc. Phần Rust cũng cần `syn`, nên bước
 sabotage mở mạng giống bước đối chiếu.
 
 ## Kiến trúc mô hình chạy thật

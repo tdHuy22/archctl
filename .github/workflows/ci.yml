@@ -169,7 +169,7 @@ jobs:
         run: python3 bench/bench.py --archctl target/release/archctl --rounds 1
 
       # Bộ đo bắt được lỗi chỉ khi từng phép kiểm của nó đổ được. Bước này phá
-      # archctl hai mươi tám kiểu và đòi bộ đo bắt đúng từng kiểu — nếu một lần sửa sau
+      # archctl ba mươi tám kiểu và đòi bộ đo bắt đúng từng kiểu — nếu một lần sửa sau
       # này vô tình làm một phép kiểm luôn đạt, nó đỏ ở đây.
       #
       # `--rust-repo` phá thêm phần Rust của bước đối chiếu bên dưới, phần dùng
@@ -177,14 +177,15 @@ jobs:
       # bước đối chiếu. archctl đã dựng xong ở trên khi còn offline.
       # `--notebook-repo` phá phần notebook, đối chiếu bằng IPython cài qua pip.
       # `--deploy-repo` phá phần compose và Dockerfile, đối chiếu bằng PyYAML và
-      # dockerfile-parse cài qua pip, cũng ghim kèm hash. `--proto-repo` phá
+      # dockerfile-parse cài qua pip, cũng ghim kèm hash. `--k8s-repo` phá phần
+      # manifest Kubernetes và cạnh qua Service, đối chiếu bằng PyYAML cùng venv. `--proto-repo` phá
       # phần `.proto`, đối chiếu bằng `protoc` của grpcio-tools cài y như vậy.
       # Phần cạnh binding (matplotlib, pytorch-image-models, vllm) cần clang, có
       # sẵn trên image.
       - name: bộ đo đổ được
         env:
           CARGO_NET_OFFLINE: "false"
-        run: python3 bench/sabotage.py --archctl target/release/archctl --rust-repo ripgrep --notebook-repo matplotlib --deploy-repo example-voting-app --proto-repo vllm
+        run: python3 bench/sabotage.py --archctl target/release/archctl --rust-repo ripgrep --notebook-repo matplotlib --deploy-repo example-voting-app --k8s-repo microservices-demo --proto-repo vllm
 
       # Phép tự nhất quán ở trên so archctl với chính nó: bộ khám phá và bộ
       # kiểm dùng chung bộ trích, nên một lỗi trong bộ trích làm cả hai sai

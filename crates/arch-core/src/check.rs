@@ -432,7 +432,8 @@ fn check_with(root: &Path, doc: &Document, files: &[String], partial: bool, depl
     let rpc_links = judge_grpc(root, doc, files, partial, rpc_calls, rpc_serves, rpc_impls, &mut report);
     if let Some(deploy_files) = deploy {
         report.deploy_checked = true;
-        judge_deploy(root, doc, &resolver, &deploy::load(root, &deploy_files), &rpc_links, &mut report);
+        let loaded = deploy::load(root, &deploy_files, &deploy_options(doc));
+        judge_deploy(root, doc, &resolver, &loaded, &rpc_links, &mut report);
     }
 
     counts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
@@ -1282,26 +1283,56 @@ fn pulled_in(doc: &Document, from: &str, to: &str, file: &str, line: usize, spec
     }
 }
 
-/// Cấu hình nào ứng với `service`: service compose cùng tên (cùng thư mục nếu
-/// có ghi), hay Dockerfile đã nạp.
+/// Cấu hình nào ứng với `service`: service compose hay workload Kubernetes
+/// cùng tên (cùng thư mục nếu có ghi), hay Dockerfile đã nạp.
 fn matches_source(source: &Source, key: &Key) -> bool {
     match (source, key) {
-        (Source::Compose { dir, name }, Key::Compose { dir: d, name: n }) => {
-            n == name && dir.as_ref().is_none_or(|x| x == d)
-        }
+        (Source::Compose { dir, name }, Key::Compose { dir: d, name: n })
+        | (Source::K8s { dir, name }, Key::K8s { dir: d, name: n }) => n == name && dir.as_ref().is_none_or(|x| x == d),
         (Source::Dockerfile(p), Key::Dockerfile(q)) => p == q,
         _ => false,
     }
 }
 
+/// Nguồn mà một `service` được đối chiếu: `dockerfile:` đi cùng `k8s:` là
+/// image của workload, không phải một cấu hình riêng.
+fn own_sources(s: &Service) -> impl Iterator<Item = &Source> {
+    let k8s = s.on_k8s();
+    s.sources.iter().filter(move |x| !(k8s && matches!(x, Source::Dockerfile(_))))
+}
+
+/// Cách nạp cấu hình mà file luật cần: manifest Kubernetes chỉ được đọc khi
+/// luật có nguồn `k8s:` (TM-18); `dockerfile:` đi cùng `k8s:` là image của
+/// container chính.
+pub fn deploy_options(doc: &Document) -> deploy::Options {
+    let mut opts = deploy::Options { k8s: doc.services.iter().any(Service::on_k8s), pins: Vec::new() };
+    for s in doc.services.iter().filter(|s| s.on_k8s()) {
+        let Some(dockerfile) = s.sources.iter().find_map(|x| match x {
+            Source::Dockerfile(p) => Some(p),
+            _ => None,
+        }) else {
+            continue;
+        };
+        for x in &s.sources {
+            if let Source::K8s { dir, name } = x {
+                opts.pins.push(deploy::Pin { dir: dir.clone(), name: name.clone(), dockerfile: dockerfile.clone() });
+            }
+        }
+    }
+    opts
+}
+
 /// Đối chiếu cấu hình triển khai với `service` và `link`.
 /// Đầu câu `rule` của vi phạm cạnh mạng tới service compose chưa khai.
 const UNDECLARED: &str = "service compose ";
+/// Như [`UNDECLARED`], cho workload Kubernetes.
+const UNDECLARED_K8S: &str = "workload Kubernetes ";
 
-/// Cạnh mạng tới một service compose chưa khai trong file luật: `to` là tên
-/// trong compose, và phải khai `service` cho nó trước khi có `link` được.
+/// Cạnh mạng tới một service compose hay workload chưa khai trong file luật:
+/// `to` là tên trong cấu hình, và phải khai `service` cho nó trước khi có
+/// `link` được.
 pub fn to_undeclared(v: &Violation) -> bool {
-    v.reason == Reason::NotLinked && v.rule.starts_with(UNDECLARED)
+    v.reason == Reason::NotLinked && (v.rule.starts_with(UNDECLARED) || v.rule.starts_with(UNDECLARED_K8S))
 }
 
 fn judge_deploy(
@@ -1314,58 +1345,68 @@ fn judge_deploy(
 ) {
     let mut svcs: Vec<Svc> = dep.services.clone();
     report.deploy_unread.extend(dep.unread.iter().cloned());
-    for s in &doc.services {
-        if let Some(Source::Dockerfile(path)) = &s.source
-            && !svcs.iter().any(|v| v.key == Key::Dockerfile(path.clone()))
-        {
-            match deploy::load_dockerfile(root, path) {
-                Ok(v) => svcs.push(v),
-                Err(u) if u.why == "không có" => {}
-                Err(u) => report.deploy_unread.push(u),
+    for s in doc.services.iter().filter(|s| !s.on_k8s()) {
+        for source in &s.sources {
+            if let Source::Dockerfile(path) = source
+                && !svcs.iter().any(|v| v.key == Key::Dockerfile(path.clone()))
+            {
+                match deploy::load_dockerfile(root, path) {
+                    Ok(v) => svcs.push(v),
+                    Err(u) if u.why == "không có" => {}
+                    Err(u) => report.deploy_unread.push(u),
+                }
             }
         }
     }
 
     // `service` của file luật → các cấu hình ứng với nó.
     let mut matched: Vec<(&Service, Vec<&Svc>)> = Vec::new();
-    for s in &doc.services {
-        let Some(source) = &s.source else { continue };
-        let found: Vec<&Svc> = svcs.iter().filter(|v| matches_source(source, &v.key)).collect();
-        let dirs: std::collections::BTreeSet<&str> = found
-            .iter()
-            .filter_map(|v| match &v.key {
-                Key::Compose { dir, .. } => Some(dir.as_str()),
-                Key::Dockerfile(_) => None,
-            })
-            .collect();
-        if s.meta.status.is_enforced() {
-            if found.is_empty() {
-                report.missing.push(Missing {
-                    name: source.text(),
-                    source: format!("service {}", s.name),
-                    line: s.meta.line,
-                    hint: match source {
-                        Source::Compose { name, .. } => format!("không có service `{name}` trong file compose nào"),
-                        Source::Dockerfile(p) => format!("không có Dockerfile `{p}`"),
-                    },
-                });
-            } else if dirs.len() > 1 {
-                report.missing.push(Missing {
-                    name: source.text(),
-                    source: format!("service {}", s.name),
-                    line: s.meta.line,
-                    hint: format!(
-                        "khớp service compose ở nhiều thư mục ({}) — viết `compose:<thư mục>/<tên>`",
-                        dirs.iter().map(|d| if d.is_empty() { "." } else { d }).collect::<Vec<_>>().join(", ")
-                    ),
-                });
+    for s in doc.services.iter().filter(|s| !s.sources.is_empty()) {
+        let mut all: Vec<&Svc> = Vec::new();
+        for source in own_sources(s) {
+            let found: Vec<&Svc> = svcs.iter().filter(|v| matches_source(source, &v.key)).collect();
+            let dirs: std::collections::BTreeSet<&str> = found
+                .iter()
+                .filter_map(|v| match &v.key {
+                    Key::Compose { dir, .. } | Key::K8s { dir, .. } => Some(dir.as_str()),
+                    Key::Dockerfile(_) => None,
+                })
+                .collect();
+            if s.meta.status.is_enforced() {
+                if found.is_empty() {
+                    report.missing.push(Missing {
+                        name: source.text(),
+                        source: format!("service {}", s.name),
+                        line: s.meta.line,
+                        hint: match source {
+                            Source::Compose { name, .. } => format!("không có service `{name}` trong file compose nào"),
+                            Source::K8s { name, .. } => format!("không có workload `{name}` trong manifest Kubernetes nào đọc được"),
+                            Source::Dockerfile(p) => format!("không có Dockerfile `{p}`"),
+                        },
+                    });
+                } else if dirs.len() > 1 && matches!(source, Source::Compose { .. }) {
+                    // Workload cùng tên ở nhiều thư mục là bản sao của cùng một
+                    // ứng dụng (`release/`, base của kustomize): `k8s:<tên>`
+                    // kiểm hết chúng, không chọn hộ một bản.
+                    let (what, form) = ("service compose", "compose");
+                    report.missing.push(Missing {
+                        name: source.text(),
+                        source: format!("service {}", s.name),
+                        line: s.meta.line,
+                        hint: format!(
+                            "khớp {what} ở nhiều thư mục ({}) — viết `{form}:<thư mục>/<tên>`",
+                            dirs.iter().map(|d| if d.is_empty() { "." } else { d }).collect::<Vec<_>>().join(", ")
+                        ),
+                    });
+                }
             }
+            all.extend(found);
         }
-        matched.push((s, found));
+        matched.push((s, all));
     }
 
-    // Service compose → `service` của file luật, để gọi tên đích của cạnh mạng.
-    let declared = |key: &Key| doc.services.iter().find(|s| s.source.as_ref().is_some_and(|src| matches_source(src, key)));
+    // Cấu hình → `service` của file luật, để gọi tên đích của cạnh mạng.
+    let declared = |key: &Key| doc.services.iter().find(|s| own_sources(s).any(|src| matches_source(src, key)));
 
     // Cặp service có lời gọi gRPC cũng là `link` được thấy.
     let mut seen: std::collections::BTreeSet<(String, String)> = rpc_links.clone();
@@ -1377,15 +1418,18 @@ fn judge_deploy(
             continue;
         }
         for v in found {
+            // Patch Kustomize đè lên workload này mà archctl không áp (TM-21).
+            report.deploy_unread.extend(v.patched.iter().cloned());
             // Cạnh mạng.
             for e in &v.edges {
-                let target = match &v.key {
-                    Key::Compose { dir, .. } => Key::Compose { dir: dir.clone(), name: e.to.clone() },
-                    Key::Dockerfile(_) => continue,
-                };
-                // Cạnh tới service compose chưa khai: không có `link` nào cho nó
-                // được, nên đó là cạnh mạng không ai cho phép — không bỏ qua.
-                let Some(t) = declared(&target) else {
+                // Cạnh tới service compose hay workload chưa khai: không có
+                // `link` nào cho nó được, nên đó là cạnh mạng không ai cho phép
+                // — không bỏ qua.
+                let Some(t) = declared(&e.target) else {
+                    let (what, form) = match &e.target {
+                        Key::K8s { .. } => (UNDECLARED_K8S, "k8s"),
+                        _ => (UNDECLARED, "compose"),
+                    };
                     report.violations.push(Violation {
                         from: s.name.clone(),
                         to: e.to.clone(),
@@ -1395,9 +1439,9 @@ fn judge_deploy(
                         via: Via::Network,
                         count: 1,
                         reason: Reason::NotLinked,
-                        rule: format!("{UNDECLARED}`{}` chưa khai, nên không có link nào cho {} tới nó", e.to, s.name),
+                        rule: format!("{what}`{}` chưa khai, nên không có link nào cho {} tới nó", e.to, s.name),
                         status: Status::Accepted,
-                        hint: format!("khai `service ... from compose:{}` rồi thêm `link {} -> ...`", e.to, s.name),
+                        hint: format!("khai `service ... from {form}:{}` rồi thêm `link {} -> ...`", e.to, s.name),
                     });
                     continue;
                 };
@@ -1426,12 +1470,41 @@ fn judge_deploy(
             }
             // Điểm vào.
             if s.runs.is_empty() {
+                // `runs` rỗng là "không chạy mã của dự án". Cấu hình cho thấy
+                // rõ nó chạy mã của một component thì đó là vi phạm `runs`,
+                // không phải cách lách (TM-21). Chỗ không lần ra hết thì để
+                // yên, như image dựng sẵn: `init` cũng sinh `runs` rỗng ở đó.
+                let clear = v.code
+                    && v.unknown.is_none()
+                    && v.starts.iter().all(|st| {
+                        st.unresolved.is_empty()
+                            && st.cut.is_empty()
+                            && st.entries.iter().all(|e| {
+                                let files = entry_files(root, resolver, std::slice::from_ref(e));
+                                !files.is_empty() && files.iter().all(|f| Lang::for_path(f).is_some())
+                            })
+                    });
+                if clear {
+                    let mut quiet = Report::default();
+                    let mut found: HashSet<(String, String, usize)> = HashSet::new();
+                    for st in &v.starts {
+                        for file in entry_files(root, resolver, &st.entries) {
+                            entry_runs(root, doc, resolver, s, st, &file, &mut targets, &mut found, &mut quiet);
+                        }
+                    }
+                    report.violations.extend(quiet.violations);
+                }
                 continue;
             }
             if v.starts.is_empty() {
                 let why = v.unknown.clone().unwrap_or_else(|| "không xác định được lệnh khởi chạy".into());
                 report.entry_unknown.push((s.name.clone(), why));
                 continue;
+            }
+            // Workload có container lần được (sidecar) mà container chính thì
+            // không: vẫn là chỗ không biết mã nào chạy.
+            if let (Key::K8s { .. }, Some(why)) = (&v.key, &v.unknown) {
+                report.entry_unknown.push((s.name.clone(), why.clone()));
             }
             // Từng thứ lệnh chạy phải lần ra được mã: một cái không ra thì có
             // thể nó đang chạy mã ngoài `runs` mà không ai thấy (TM-12).
@@ -1497,20 +1570,29 @@ fn judge_deploy(
         }
     }
 
-    // Đã mô tả triển khai thì mọi service trong compose phải có mặt.
-    if doc.services.iter().any(|s| matches!(s.source, Some(Source::Compose { .. }))) {
-        for v in &svcs {
-            if let Key::Compose { name, .. } = &v.key
-                && declared(&v.key).is_none()
-            {
+    // Đã mô tả triển khai thì mọi service trong compose, mọi workload trong
+    // manifest phải có mặt.
+    let uses = |f: fn(&Source) -> bool| doc.services.iter().any(|s| s.sources.iter().any(f));
+    let compose = uses(|x| matches!(x, Source::Compose { .. }));
+    let k8s = uses(|x| matches!(x, Source::K8s { .. }));
+    for v in &svcs {
+        match &v.key {
+            Key::Compose { name, .. } if compose && declared(&v.key).is_none() => {
                 report.services_undeclared.push((v.file.clone(), v.line, name.clone()));
             }
+            Key::K8s { name, .. } if k8s && declared(&v.key).is_none() => {
+                report.services_undeclared.push((v.file.clone(), v.line, name.clone()));
+            }
+            _ => {}
         }
     }
     report.services_undeclared.sort();
     report.services_undeclared.dedup();
     report.entry_unknown.sort();
     report.entry_unknown.dedup();
+    // Cùng một patch đè lên workload mà hai `service` cùng trỏ tới: báo một lần.
+    let mut seen_unread: HashSet<(String, String)> = HashSet::new();
+    report.deploy_unread.retain(|u| seen_unread.insert((u.file.clone(), u.why.clone())));
 }
 
 /// File mà các điểm vào nạp. Module không có ở thư mục làm việc trong

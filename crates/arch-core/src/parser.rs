@@ -439,7 +439,8 @@ fn parse_target(s: &str, no: usize, diags: &mut Vec<Diag>) -> Option<Target> {
     Some(Target::Named(s.to_string()))
 }
 
-/// `service Api from compose:api runs Serve, Rag`
+/// `service Api from compose:api runs Serve, Rag`,
+/// `service Vote from compose:vote, k8s:vote runs Vote`
 ///
 /// `from` trước `runs`, cả hai đều tuỳ chọn. Thứ tự cố định để một dòng chỉ
 /// có một cách đọc.
@@ -452,10 +453,11 @@ fn parse_service(rest: &str, meta: Meta, no: usize, doc: &mut Document, diags: &
         Some((n, f)) => (n.trim(), Some(f.trim())),
         None => (head.trim(), None),
     };
-    if name.contains(" runs") || from.is_some_and(|f| f.contains(' ')) {
+    let from: Vec<&str> = from.map(|f| f.split(',').map(str::trim).collect()).unwrap_or_default();
+    if name.contains(" runs") || from.iter().any(|f| f.is_empty() || f.contains(' ')) {
         diags.push(
             Diag::error(no, "`service` viết sai thứ tự hay thừa chữ")
-                .with_hint("dạng đúng: service <Tên> [from compose:<tên>] [runs <Component>, ...]"),
+                .with_hint("dạng đúng: service <Tên> [from <nguồn>, ...] [runs <Component>, ...]"),
         );
         return;
     }
@@ -467,20 +469,20 @@ fn parse_service(rest: &str, meta: Meta, no: usize, doc: &mut Document, diags: &
             return;
         }
     }
-    let source = match from {
-        None => None,
-        Some(text) => match parse_source(text) {
-            Ok(s) => Some(s),
+    let mut sources = Vec::new();
+    for text in from {
+        match parse_source(text) {
+            Ok(s) => sources.push(s),
             Err(why) => {
                 diags.push(Diag::error(no, format!("`from {text}`: {why}")).with_hint(
-                    "dạng đúng: from compose:<service>, from compose:<thư mục>/<service>, \
-                     from dockerfile:<đường dẫn>",
+                    "dạng đúng: from compose:<service>, compose:<thư mục>/<service>, \
+                     k8s:<workload>, k8s:<thư mục>/<workload>, dockerfile:<đường dẫn>",
                 ));
                 return;
             }
-        },
-    };
-    doc.services.push(Service { name: name.to_string(), source, runs, meta });
+        }
+    }
+    doc.services.push(Service { name: name.to_string(), sources, runs, meta });
 }
 
 /// Đường dẫn trong `from` là tương đối với gốc dự án và không được ra khỏi đó:
@@ -493,15 +495,15 @@ fn parse_source(text: &str) -> Result<Source, String> {
             && !path.contains('\\')
             && path.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
     };
-    if let Some(rest) = text.strip_prefix("compose:") {
+    // `compose:<thư mục>/<tên>` và `k8s:<thư mục>/<tên>`: `./` là gốc dự án.
+    let scoped = |rest: &str, what: &str| -> Result<(Option<String>, String), String> {
         let (dir, name) = match rest.rsplit_once('/') {
             Some((d, n)) => (Some(d), n),
             None => (None, rest),
         };
         if !is_compose_name(name) {
-            return Err(format!("tên service compose không hợp lệ: `{name}`"));
+            return Err(format!("tên {what} không hợp lệ: `{name}`"));
         }
-        // `compose:./api` là service `api` trong compose ở gốc dự án.
         let dir = match dir {
             Some(".") => Some(""),
             Some(d) if !relative(d) => {
@@ -509,7 +511,15 @@ fn parse_source(text: &str) -> Result<Source, String> {
             }
             d => d,
         };
-        return Ok(Source::Compose { dir: dir.map(str::to_string), name: name.to_string() });
+        Ok((dir.map(str::to_string), name.to_string()))
+    };
+    if let Some(rest) = text.strip_prefix("compose:") {
+        let (dir, name) = scoped(rest, "service compose")?;
+        return Ok(Source::Compose { dir, name });
+    }
+    if let Some(rest) = text.strip_prefix("k8s:") {
+        let (dir, name) = scoped(rest, "workload")?;
+        return Ok(Source::K8s { dir, name });
     }
     if let Some(path) = text.strip_prefix("dockerfile:") {
         if !relative(path) {

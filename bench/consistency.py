@@ -55,6 +55,10 @@ RPC = {
     # `pb.NewKVClient` của `client/v3` ↔ `pb.RegisterKVServer` của `server/`;
     # gateway trong `api/` (`etcdserverpb.NewKVClient`) cũng gọi server.
     "etcd": [("Client", "Server"), ("Api", "Server")],
+    # Online Boutique: client Python `demo_pb2_grpc.ProductCatalogServiceStub`
+    # ↔ server Go `pb.RegisterProductCatalogServiceServer`, và ngược lại client
+    # Go `pb.NewEmailServiceClient` ↔ server Python `add_EmailServiceServicer_to_server`.
+    "microservices-demo": [("Recommendationservice", "Productcatalogservice"), ("Checkoutservice", "Emailservice")],
 }
 
 
@@ -73,6 +77,15 @@ DEPLOY = {
         "links": [("OpenWebui", "Ollama")],
         # `CMD ["bash", "start.sh"]` → `uvicorn open_webui.main:app`.
         "runs": [("OpenWebui", "Routers")],
+    },
+    # Manifest Kubernetes: `PRODUCT_CATALOG_SERVICE_ADDR: "productcatalogservice:3550"`
+    # → Service `productcatalogservice` → selector `app: productcatalogservice`.
+    "microservices-demo": {
+        "links": [("Checkoutservice", "Productcatalogservice"), ("Frontend", "Cartservice"),
+                  ("Recommendationservice", "Productcatalogservice"), ("Cartservice", "RedisCart")],
+        # image `emailservice` → skaffold `context: src/emailservice` →
+        # `ENTRYPOINT ["python", "email_server.py"]`; Go dựng bằng `go build`.
+        "runs": [("Emailservice", "Emailservice"), ("Checkoutservice", "Checkoutservice")],
     },
 }
 
@@ -148,7 +161,7 @@ def analyse(archctl: str, name: str, src: Path, work: Path, expected: int,
         )
     # Repo mà các phần không import lẫn nhau (voting app: ba ứng dụng riêng)
     # vẫn có cái để kiểm ở tầng triển khai: `runs` và `link`.
-    deploy_rules = re.search(r"^service\s+\w+\s+from\s+\S+\s+runs\s", text, re.M)
+    deploy_rules = re.search(r"^service\s+\w+\s+from\s+[^\n]*?\s+runs\s", text, re.M)
     if out["checked"] == 0 and not deploy_rules:
         out["problems"].append("không component nào vào diện kiểm, 0 vi phạm là vô nghĩa")
     if "lawWarnings" not in rep:
@@ -213,7 +226,7 @@ def deploy(archctl: str, name: str, law: Path, root: list, rep: dict, out: dict)
         ("deployUnread", "không đọc được file triển khai", lambda x: f"{x['file']}: {x['why']}"),
         ("entryUnknown", "service có runs mà không rõ điểm vào", lambda x: f"{x['service']}: {x['why']}"),
         ("linksUnseen", "link sinh ra mà không thấy trong cấu hình", lambda x: f"{x['from']} -> {x['to']}"),
-        ("servicesUndeclared", "service compose không được sinh", lambda x: f"{x['name']} ({x['file']}:{x['line']})"),
+        ("servicesUndeclared", "service hay workload không được sinh", lambda x: f"{x['name']} ({x['file']}:{x['line']})"),
     ]:
         for item in rep.get(key, [])[:4]:
             out["problems"].append(f"{what}: {shown(item)}")
@@ -226,7 +239,8 @@ def deploy(archctl: str, name: str, law: Path, root: list, rep: dict, out: dict)
         return
     links = {(a, b.strip()) for a, bs in re.findall(r"^link\s+(\w+)\s*->\s*([^@\n]+)", text, re.M)
              for b in bs.split(",")}
-    runs = {(s, c.strip()) for s, cs in re.findall(r"^service\s+(\w+)\s+from\s+\S+\s+runs\s+([^@\n]+)", text, re.M)
+    # `from` có thể có nhiều nguồn: `from compose:vote, k8s:vote runs Vote`.
+    runs = {(s, c.strip()) for s, cs in re.findall(r"^service\s+(\w+)\s+from\s+[^\n]*?\s+runs\s+([^@\n]+)", text, re.M)
             for c in cs.split(",")}
     checks = []
     for a, b in want.get("links", []):
@@ -247,7 +261,7 @@ def deploy(archctl: str, name: str, law: Path, root: list, rep: dict, out: dict)
                 x.strip() for x in m.group(2).split(",") if x.strip() != b) + " ", text, flags=re.M)
             broken = re.sub(rf"^link\s+{a}\s*->\s*@", "#", broken, flags=re.M)
         else:
-            pattern = rf"^(service\s+{a}\s+from\s+\S+\s+runs\s+)([^@\n]+)"
+            pattern = rf"^(service\s+{a}\s+from\s+[^\n]*?\s+runs\s+)([^@\n]+)"
             # Gỡ hết thì service mất `runs` và không còn gì để kiểm: khi đó thay
             # bằng một component khác để `runs` vẫn có hiệu lực.
             others = [c for c in re.findall(r"^component\s+(\w+)", text, re.M) if c != b]

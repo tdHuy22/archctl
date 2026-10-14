@@ -9,6 +9,25 @@ Cập nhật 2026-10-13.
 
 ### Đã xong, có bằng chứng
 
+- **Manifest Kubernetes, việc cuối của tầng hạ tầng đợt 2** (2026-10-13, bạn cho commit 2026-10-14;
+  bạn chốt "theo khuyên hết", trang https://claude.ai/artifact/Tzgo8YiLFnA9BhWjwtfE29).
+  `scan/k8s.rs`: workload, Service (kể cả `ExternalName`), ConfigMap, `Namespace`,
+  `*List`, `skaffold.yaml`, `kustomization.yaml` (patch, phép biến đổi). `deploy.rs`:
+  image → skaffold, compose, hay `dockerfile:` trong luật; `command`/`args` theo
+  Kubernetes; env và ConfigMap (`$(TÊN)`) → tên máy theo DNS → Service → selector
+  (cả nhãn controller) → workload. DSL `from a, b` nhiều nguồn, `k8s:<tên>` kiểm
+  mọi bản sao. `check`: `link`, `runs` (cả service không `runs` mà rõ ràng chạy
+  mã), khai báo lạc hậu, workload chưa khai, patch hay phép biến đổi Kustomize đè
+  lên workload đã khai, loại lạ có pod template, `x.y` không rõ namespace. `init`
+  gộp compose với workload cùng nơi dựng, gom bản sao, tách ứng dụng khác nơi
+  dựng. Bộ đo thêm microservices-demo (30 repo): `link`, `runs`, cạnh gRPC Python ↔
+  Go bắt buộc; oracle `k8s_truth.py` (PyYAML) khớp 357 dữ kiện và 54 cạnh; 7
+  kiểu phá mới. Threat model TM-18..22 đã có. Review: reviewer opus 6 mục, agent
+  đối kháng 36 ca (22 lỗ), tự đo 4 ca DoS; sửa hết trừ chỗ đúng thiết kế (Secret,
+  sidecar image dựng sẵn, workload chưa khai không tính `--strict`). Đổi so với
+  trang chốt: `k8s:<tên>` không chọn một thư mục mà kiểm mọi bản sao, vì reviewer
+  chỉ ra bản `release/` (bản triển khai thật) không được kiểm.
+
 - **Cạnh gRPC, việc 6.1** (2026-10-12, commit `da89744`, đã push lên `main`
   2026-10-13 sau khi CI trên nhánh thử `thu/grpc` xanh 5/5, run 38341136312;
   bạn chốt "theo khuyên hết").
@@ -516,4 +535,15 @@ hàm, `ctypes` của Python và IPC thì không — xem [docs/check.md](docs/che
 - [x] Bộ đọc `.proto` và bộ dò client/server Python, Go; ghép, `allow`, `link`; hook tìm phía server.
 - [x] `init --from-code`, `scan`, `export`/`serve` có cạnh gRPC; tài liệu.
 - [x] Bộ đo: etcd cạnh bắt buộc qua `etcdserverpb.KV`; oracle `.proto` bằng `grpcio-tools`; sabotage.
-- [ ] Manifest Kubernetes (Deployment, Service) vào `service`/`link`; không render Helm.
+- [x] Manifest Kubernetes (Deployment, Service) vào `service`/`link`; không render Helm.
+  Bạn chốt "theo khuyên hết" (2026-10-13, trang https://claude.ai/artifact/Tzgo8YiLFnA9BhWjwtfE29):
+  `from k8s:<tên>` (thêm `<thư mục>/` khi trùng); image tự lần qua skaffold và
+  compose, không ra thì cho khai thêm `dockerfile:`, vẫn không ra thì "không rõ
+  điểm vào"; một service nhiều nguồn (`from compose:vote, k8s:vote`); cạnh từ env
+  và ConfigMap qua Service selector, không đọc Secret, Service không chọn workload
+  nào trong repo như gói ngoài; Helm không đọc, patch Kustomize không áp. reuse-best:
+  tự làm trên bộ đọc YAML sẵn có, oracle trên PyYAML ghim hash. Threat model TM-18 tới TM-22.
+- [x] Bộ đọc manifest (workload, Service, ConfigMap, patch Kustomize), `skaffold.yaml`; trần.
+- [x] `from k8s:` và nhiều nguồn trong một service; `check`: `link`, `runs`, khai báo lạc hậu, workload chưa khai; hook.
+- [x] `init --from-code` gộp compose với k8s, gom bản sao theo nơi dựng; `scan`, `export`/`serve`.
+- [x] Bộ đo: Online Boutique, oracle `k8s_truth.py`, sabotage; tài liệu.

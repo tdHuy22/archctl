@@ -19,6 +19,7 @@ pub mod dockerfile;
 pub mod command;
 pub mod compose;
 pub mod deploy;
+pub mod k8s;
 
 use lexer::{Backtick, CharLit, LexConfig, Tok, Token};
 use std::collections::HashSet;

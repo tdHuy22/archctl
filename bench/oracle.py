@@ -717,6 +717,8 @@ def archctl_deploy(archctl, root, files):
         bench.die(f"archctl scan hỏng ở {root.name}: {p.stderr.strip()[-300:]}")
     out = {}
     for f in json.loads(p.stdout)["deploy"]["files"]:
+        if f.get("kind") in ("k8s", "skaffold"):
+            continue
         if "error" in f:
             out[f["file"]] = f"ERR {f['error']}"
             continue
@@ -776,6 +778,88 @@ def deploy_truth(python, root, files):
         else:
             out[file] = collections.Counter((l, s) for l, s in json.loads(res)["facts"])
     return out
+
+
+def yaml_files(root):
+    """File YAML mà git theo dõi và có trên đĩa: ứng viên manifest Kubernetes,
+    `skaffold.yaml`, `kustomization.yaml`, `Chart.yaml`."""
+    p = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--", "*.yaml", "*.yml", "*.json"],
+                       capture_output=True, text=True)
+    return sorted(f for f in p.stdout.split("\0")
+                  if f and (root / f).is_file() and not (root / f).is_symlink())
+
+
+def archctl_k8s(archctl, root, files):
+    """Dữ kiện từng manifest (`{file: Counter}` hay chuỗi lỗi) và cạnh
+    (`{"<khoá>\\t<file>:<dòng>\\t<máy>": {đích}}`) theo `archctl scan`."""
+    p = subprocess.run([archctl, "scan", "--json", "--verbatim", "--root", str(root), *files],
+                       capture_output=True, text=True, timeout=600)
+    if p.returncode != 0:
+        bench.die(f"archctl scan hỏng ở {root.name}: {p.stderr.strip()[-300:]}")
+    rep = json.loads(p.stdout)["deploy"]
+    out = {}
+    for f in rep["files"]:
+        if f.get("kind") not in ("k8s", "skaffold"):
+            continue
+        if "error" in f:
+            out[f["file"]] = f"ERR {f['error']}"
+            continue
+        facts = []
+        for a in f.get("artifacts", []):
+            facts.append((a["line"], f"artifact {a['image']} context={a['context']} dockerfile={a['dockerfile']} "
+                                     f"target={a['target']}"))
+        for s in f.get("services", []):
+            facts.append((s["line"], f"Service {s['name']} ns={s['namespace']} selector={json.dumps(s['selector'])}"))
+        for m in f.get("configMaps", []):
+            facts.append((m["line"], f"ConfigMap {m['name']} ns={m['namespace']}"))
+            facts += [(l, f"{m['name']}.data {k}") for k, l in m["keys"]]
+        for kind, name, l in f.get("unknown", []):
+            facts.append((l, f"unknown {kind} {name}"))
+        for w in f.get("workloads", []):
+            name = w["name"]
+            facts.append((w["line"], f"{w['kind']} {name} ns={w['namespace']} labels={json.dumps(w['labels'])}"))
+            for c in w["containers"]:
+                cn = c["name"]
+                facts.append((c["line"], f"{name}.container {cn} init={c['init']} image={c['image']}"))
+                for k in ("command", "args"):
+                    if c[k] is not None:
+                        facts.append((c[k]["line"], f"{name}.{cn}.{k}={json.dumps(c[k]['argv'], ensure_ascii=False)}"))
+                if c["workingDir"] is not None:
+                    facts.append((c["line"], f"{name}.{cn}.workingDir={c['workingDir']}"))
+                facts += [(e["line"], f"{name}.{cn}.env {e['key']}") for e in c["env"]]
+                facts += [(r["line"], f"{name}.{cn}.ref {r['key']}={r['configMap']}/{r['item']}") for r in c["configRefs"]]
+                facts += [(e["line"], f"{name}.{cn}.envFrom {e['configMap']} prefix={e['prefix']}") for e in c["envFrom"]]
+        out[f["file"]] = collections.Counter(facts)
+    edges = collections.defaultdict(set)
+    for s in rep["services"]:
+        if not s["key"].startswith("k8s:"):
+            continue
+        for e in s["edges"]:
+            host = e["shown"].split(" → ", 1)[1].rsplit(":", 1)[0] if ":" in e["shown"].split(" → ", 1)[1] \
+                else e["shown"].split(" → ", 1)[1]
+            edges[f"{s['key']}\t{e['file']}:{e['line']}\t{host}"].add(e["target"])
+    return out, edges
+
+
+def k8s_truth(python, root, files):
+    """Dữ kiện từng manifest và cạnh theo PyYAML và tài liệu Kubernetes."""
+    p = subprocess.run([python, "-I", str(HERE / "k8s_truth.py"), "facts"],
+                       input="".join(f"{root}\t{f}\n" for f in files),
+                       capture_output=True, text=True, timeout=900)
+    if p.returncode != 0:
+        bench.die(f"thước đo Kubernetes hỏng: {p.stderr.strip()[-400:]}")
+    out = {}
+    for line in p.stdout.splitlines():
+        file, res = line.split("\t", 1)
+        if res.startswith(("ERR", "SKIP")):
+            out[file] = res
+        else:
+            out[file] = collections.Counter((l, s) for l, s in json.loads(res)["facts"])
+    p = subprocess.run([python, "-I", str(HERE / "k8s_truth.py"), "edges", str(root)],
+                       input="".join(f"{f}\n" for f in files), capture_output=True, text=True, timeout=900)
+    if p.returncode != 0:
+        bench.die(f"thước đo Kubernetes hỏng: {p.stderr.strip()[-400:]}")
+    return out, {k: set(v) for k, v in json.loads(p.stdout).items()}
 
 
 PROTO_REQUIREMENTS = HERE / "proto-requirements.txt"
@@ -887,7 +971,7 @@ class Tally:
             self.examples.append(msg)
 
     def line(self, repo):
-        unit = {"Binding": "đầu cạnh", "Hạ tầng": "dữ kiện", "Proto": "dữ kiện"}.get(self.label, "import")
+        unit = {"Binding": "đầu cạnh", "Hạ tầng": "dữ kiện", "Proto": "dữ kiện", "K8s": "dữ kiện"}.get(self.label, "import")
         head = f"  {repo:22} {self.label:8} {self.files:5} file, {self.imports:6} {unit}"
         tail = f", {self.unparsed} không parse được" if self.unparsed else ""
         if self.in_macro:
@@ -1111,6 +1195,34 @@ def main():
             if skipped:
                 dep.skipped = f"{skipped} Dockerfile có heredoc BỎ QUA"
             tallies.append(dep)
+
+        yamls = yaml_files(root) if dep_python else []
+        if yamls:
+            kt = Tally("K8s")
+            have_all, have_edges = archctl_k8s(archctl, root, yamls)
+            want_all, want_edges = k8s_truth(dep_python, root, yamls)
+            for file, want in want_all.items():
+                if isinstance(want, str):
+                    if want.startswith("ERR") and file in have_all:
+                        kt.unparsed += 1
+                    continue
+                have = have_all.get(file, "ERR archctl không in file này")
+                if isinstance(have, str):
+                    kt.files += 1
+                    kt.note(f"{file}: archctl không đọc được mà PyYAML đọc được — {have[4:120]}")
+                    continue
+                check_lines(kt, file, want, have)
+            # Cạnh: cùng nguồn, cùng dòng, cùng tên máy thì cùng tập đích.
+            for key in sorted(set(want_edges) | set(have_edges)):
+                want, have = want_edges.get(key, set()), have_edges.get(key, set())
+                kt.imports += len(want)
+                src, at, host = key.split("\t")
+                for t in sorted(want - have):
+                    kt.note(f"{at} thiếu cạnh: {src} → {t} qua `{host}`")
+                for t in sorted(have - want):
+                    kt.note(f"{at} thừa cạnh: {src} → {t} qua `{host}`")
+            if kt.files:
+                tallies.append(kt)
 
         protos = proto_files(root) if proto_python else []
         if protos:

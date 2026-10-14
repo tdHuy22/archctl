@@ -4,7 +4,7 @@
 python3 bench/bench.py
 ```
 
-Một lệnh: dựng archctl bản release, tải hai mươi chín repo ở đúng commit đã ghim
+Một lệnh: dựng archctl bản release, tải ba mươi repo ở đúng commit đã ghim
 trong [repos.tsv](repos.tsv), rồi chạy hai phép thử trên từng repo. Chỉ cần
 Python 3 và git, không gói Python nào ngoài thư viện chuẩn.
 
@@ -22,7 +22,8 @@ chỗ mà luật `allow`/`deny` giữa component có nghĩa nhất.
 | C++ | leveldb (storage engine, CMake) |
 | Rust | tokio, ripgrep, rusqlite, pydantic-core (với Python), zstd-rs (với C qua submodule) |
 | Go | hugo (đồ thị dày), etcd (mười bốn `go.mod` trong một repo), kubernetes (phần scheduler, tải sparse; module staging có `go.mod` riêng) |
-| docker-compose | example-voting-app (năm service, stage Dockerfile thừa hưởng `WORKDIR`, bind mount, file compose ghi đè), open-webui (ứng dụng LLM tự host: `build: .`, `COPY --from=build`, điểm vào qua `start.sh`, mã Python trong `backend/` khai bằng `sources` của hatch) |
+| docker-compose | example-voting-app (năm service, stage Dockerfile thừa hưởng `WORKDIR`, bind mount, file compose ghi đè; cả manifest Kubernetes dùng image dựng sẵn), open-webui (ứng dụng LLM tự host: `build: .`, `COPY --from=build`, điểm vào qua `start.sh`, mã Python trong `backend/` khai bằng `sources` của hatch) |
+| Kubernetes | microservices-demo (Online Boutique: mười một microservice Go, Python, Node, C#, Java gọi nhau bằng gRPC; env `…_ADDR` trỏ tên Service, `skaffold.yaml` nối image với thư mục mã, bản phát hành trong `release/`, chart Helm, component Kustomize) |
 
 Lần thêm tám repo cuối (etcd, excalidraw, langchain, leveldb, netbox, nginx,
 scikit-learn, vllm) bắt được bốn chỗ archctl không thấy cạnh nào mà cũng
@@ -92,6 +93,7 @@ sót. Và phải có các cạnh đã biết (`DEPLOY` trong [consistency.py](co
 | --- | --- | --- |
 | example-voting-app | `link Vote -> Redis`, `Result -> Db`, `Worker -> Db, Redis`; `Vote` trong `runs` của service Vote | `not_linked`, `not_run` |
 | open-webui | `link OpenWebui -> Ollama`; `Routers` trong `runs` của OpenWebui | `not_linked`, `not_run` |
+| microservices-demo | `link Checkoutservice -> Productcatalogservice`, `Frontend -> Cartservice`, `Recommendationservice -> Productcatalogservice`, `Cartservice -> RedisCart`; `Emailservice`, `Checkoutservice` trong `runs` của service cùng tên | `not_linked`, `not_run` |
 
 Repo mà các phần không import lẫn nhau (ba ứng dụng riêng của voting app) không
 có component nào vào diện kiểm; nó vẫn đạt vì tầng hạ tầng có cái để kiểm.
@@ -158,6 +160,12 @@ bộ trích, nên một lỗi trong bộ trích làm cả hai sai giống nhau m
   (CI bật). dockerfile-parse không hiểu heredoc của BuildKit, nên file có heredoc
   in `BỎ QUA`; nó cắt lệnh ở dòng trống giữa dòng nối còn BuildKit thì không, nên
   thước đo thay dòng trống đó bằng chú thích trước khi đưa vào.
+- Kubernetes: dữ kiện mà `scan --json` đọc từ mọi file YAML có dáng manifest và
+  `skaffold.yaml` (workload, nhãn, container, image, `command`, `args`, khoá env,
+  tham chiếu ConfigMap, Service và selector, khoá ConfigMap) được đọc lại bằng
+  PyYAML; mọi cạnh qua Service (nguồn, dòng, tên máy → tập workload đích) được
+  tính lại độc lập theo luật DNS và selector của tài liệu Kubernetes
+  ([k8s_truth.py](k8s_truth.py)). Cùng venv và cùng `--require deploy`.
 
 Python, notebook, binding, hạ tầng, C/C++, Go và Rust đòi khớp cả tên lẫn số dòng: thiếu, thừa hay lệch dòng đều
 là lệch. Thiếu clang, Node hay Go thì phần đó in `BỎ QUA`; `--require
@@ -220,15 +228,19 @@ Bốn kiểu phá tầng hạ tầng của bộ đo, trên example-voting-app: `
 báo thêm một file triển khai không đọc được. `--deploy-repo example-voting-app`
 thêm bốn kiểu ở dữ kiện compose và Dockerfile của `scan --json` (mất một
 `depends_on`, lệch dòng một biến môi trường, thêm một tên máy giả, sửa một chỉ
-thị Dockerfile), đối chiếu bằng PyYAML nên cần mạng.
+thị Dockerfile), đối chiếu bằng PyYAML nên cần mạng. Ba kiểu đầu chạy lại trên
+microservices-demo, nơi `link` và `runs` đến từ manifest Kubernetes.
+`--k8s-repo microservices-demo` thêm bốn kiểu ở dữ kiện manifest và cạnh qua
+Service (mất một biến môi trường, lệch dòng một workload, mất một cạnh, đổi đích
+một cạnh).
 
 Kiểu `rpc` xoá cạnh gRPC bắt buộc (`consistency.RPC`: etcd `Client -> Server`,
 `Api -> Server`) khỏi cả luật `init` sinh ra lẫn vi phạm `check` báo.
 `--proto-repo vllm` thêm hai kiểu ở dữ kiện `.proto` của `scan --json` (mất một
 `rpc`, lệch dòng một `service`), đối chiếu bằng `protoc` của grpcio-tools nên
 cần mạng. CI chạy bước này sau bộ đo, với `--rust-repo ripgrep
---notebook-repo matplotlib --deploy-repo example-voting-app --proto-repo
-vllm`: ba mươi mốt kiểu phá.
+--notebook-repo matplotlib --deploy-repo example-voting-app --k8s-repo
+microservices-demo --proto-repo vllm`: ba mươi tám kiểu phá.
 
 Nó có mặt vì bộ đo này từng nằm ngoài git, và lúc đưa vào, đọc lại thì bốn
 phép kiểm không kiểm gì: một cái chỉ xét file có tồn tại vì vế sau của `or`

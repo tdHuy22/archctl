@@ -430,8 +430,9 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
                     // Đích chưa khai: `link` tới nó không hợp lệ cho tới khi có
                     // dòng `service`.
                     Reason::NotLinked if arch_core::check::to_undeclared(v) => crate::say!(
-                        "    archctl propose 'service {} from compose:{}' --reason \"...\"   (rồi `link {} -> {}`)",
+                        "    archctl propose 'service {} from {}:{}' --reason \"...\"   (rồi `link {} -> {}`)",
                         arch_core::discover::pascal_case(&v.to),
+                        if v.rule.starts_with("workload") { "k8s" } else { "compose" },
                         v.to,
                         v.from,
                         arch_core::discover::pascal_case(&v.to)
@@ -526,7 +527,10 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
     }
     for (from, to, line) in report.links_unseen.iter().take(MAX_LISTED) {
         crate::say!("⚠ LINK KHÔNG THẤY TRONG CẤU HÌNH  link {from} -> {to}");
-        crate::say!("  {}:{line}  — không compose nào cho thấy {from} gọi {to}\n", arch_core::ARCH_FILE);
+        crate::say!(
+            "  {}:{line}  — không cấu hình nào (compose, manifest Kubernetes, lời gọi gRPC) cho thấy {from} gọi {to}\n",
+            arch_core::ARCH_FILE
+        );
     }
 
     for (label, shown, total) in [
@@ -945,7 +949,10 @@ fn cmd_scan(args: &[String]) -> ExitCode {
             .iter()
             .filter(|f| {
                 let name = f.rsplit('/').next().unwrap_or(f);
-                scan::deploy::is_compose(name) || scan::deploy::is_dockerfile(name)
+                scan::deploy::is_compose(name)
+                    || scan::deploy::is_dockerfile(name)
+                    || scan::deploy::is_manifest_file(name)
+                    || scan::k8s::is_kustomization(name)
             })
             .cloned()
             .collect()
@@ -1195,7 +1202,7 @@ fn scan_deploy(
     as_json: bool,
     verbatim: bool,
 ) -> String {
-    use arch_core::scan::{compose, deploy, dockerfile};
+    use arch_core::scan::{compose, deploy, dockerfile, k8s};
     let opt = |v: Option<&str>| v.map_or_else(|| "null".to_string(), json::string);
     let command = |c: &Option<(dockerfile::Command, usize)>| match c {
         None => "null".to_string(),
@@ -1228,13 +1235,29 @@ fn scan_deploy(
     let mut file_json: Vec<String> = Vec::new();
     for file in files {
         let name = file.rsplit('/').next().unwrap_or(file);
-        let text = match deploy::read_in(root, file, deploy::MAX_DEPLOY_BYTES) {
-            Ok(t) => t,
+        // File YAML khác compose: chỉ in khi có dáng manifest hay là
+        // `skaffold.yaml`; repo có hàng nghìn file YAML không liên quan.
+        let other = !deploy::is_compose(name) && !deploy::is_dockerfile(name);
+        let text = match deploy::read_head(root, file, deploy::MAX_DEPLOY_BYTES) {
+            Ok((t, false)) => t,
+            Ok((t, true)) if other && !k8s::may_be(&t) => continue,
+            Ok(_) => {
+                let why = format!("quá {} KB", deploy::MAX_DEPLOY_BYTES >> 10);
+                file_json.push(format!(r#"{{"file":{},"error":{}}}"#, json::string(file), json::string(&why)));
+                continue;
+            }
+            Err(_) if other => continue,
             Err(why) => {
                 file_json.push(format!(r#"{{"file":{},"error":{}}}"#, json::string(file), json::string(&why)));
                 continue;
             }
         };
+        if other {
+            if let Some(j) = scan_k8s_file(file, &text, &command, &quoted) {
+                file_json.push(j);
+            }
+            continue;
+        }
         if deploy::is_compose(name) {
             match compose::parse(&text) {
                 Err(e) => file_json.push(format!(
@@ -1345,13 +1368,10 @@ fn scan_deploy(
         }
     }
 
-    let loaded = deploy::load(root, files);
+    let loaded = deploy::load(root, files, &deploy::Options { k8s: true, pins: Vec::new() });
     let mut services: Vec<String> = Vec::new();
     for svc in &loaded.services {
-        let key = match &svc.key {
-            deploy::Key::Compose { dir, name } => format!("compose:{}{name}", if dir.is_empty() { String::new() } else { format!("{dir}/") }),
-            deploy::Key::Dockerfile(p) => format!("dockerfile:{p}"),
-        };
+        let key = svc.key.text();
         let starts: Vec<(String, Vec<String>)> = svc
             .starts
             .iter()
@@ -1374,14 +1394,18 @@ fn scan_deploy(
             if let Some(why) = &svc.unknown {
                 say!("  ? {why}");
             }
+            for u in &svc.patched {
+                say!("  ? {} — {}", u.file, u.why);
+            }
         }
         let edges: Vec<String> = svc
             .edges
             .iter()
             .map(|e| {
                 format!(
-                    r#"{{"to":{},"file":{},"line":{},"shown":{}}}"#,
+                    r#"{{"to":{},"target":{},"file":{},"line":{},"shown":{}}}"#,
                     json::string(&e.to),
+                    json::string(&e.target.text()),
                     json::string(&e.file),
                     e.line,
                     json::string(&e.shown)
@@ -1401,8 +1425,13 @@ fn scan_deploy(
                 )
             })
             .collect();
+        let patched: Vec<String> = svc
+            .patched
+            .iter()
+            .map(|u| format!(r#"{{"file":{},"why":{}}}"#, json::string(&u.file), json::string(&u.why)))
+            .collect();
         services.push(format!(
-            r#"{{"key":{},"file":{},"line":{},"code":{},"edges":[{}],"starts":[{}],"unknown":{}}}"#,
+            r#"{{"key":{},"file":{},"line":{},"code":{},"edges":[{}],"starts":[{}],"unknown":{},"patched":[{}]}}"#,
             json::string(&key),
             json::string(&svc.file),
             svc.line,
@@ -1410,11 +1439,15 @@ fn scan_deploy(
             edges.join(","),
             starts_json.join(","),
             opt(svc.unknown.as_deref()),
+            patched.join(","),
         ));
     }
     if !as_json {
         for u in &loaded.unread {
             say!("chưa đọc được {} — {}", u.file, u.why);
+        }
+        for c in &loaded.charts {
+            say!("không đọc (chart Helm, không render) {}", if c.is_empty() { "." } else { c });
         }
     }
     let unread: Vec<String> = loaded
@@ -1422,7 +1455,165 @@ fn scan_deploy(
         .iter()
         .map(|u| format!(r#"{{"file":{},"why":{}}}"#, json::string(&u.file), json::string(&u.why)))
         .collect();
-    format!(r#"{{"files":[{}],"services":[{}],"unread":[{}]}}"#, file_json.join(","), services.join(","), unread.join(","))
+    format!(
+        r#"{{"files":[{}],"services":[{}],"unread":[{}],"charts":{}}}"#,
+        file_json.join(","),
+        services.join(","),
+        unread.join(","),
+        json::strings(loaded.charts.iter().map(String::as_str))
+    )
+}
+
+/// Lệnh in ra JSON: `argc`, `argv` khi `--verbatim`, dòng.
+type CommandJson<'a> = &'a dyn Fn(&Option<(arch_core::scan::dockerfile::Command, usize)>) -> String;
+
+/// Dữ kiện của một file manifest Kubernetes hay `skaffold.yaml`, cho `scan
+/// --json`. Như compose: chỉ khoá và dòng của biến môi trường, không giá trị
+/// (TM-19); ConfigMap chỉ có khoá.
+fn scan_k8s_file(
+    file: &str,
+    text: &str,
+    command: CommandJson<'_>,
+    quoted: &dyn Fn(&str) -> String,
+) -> Option<String> {
+    use arch_core::scan::{dockerfile::Command, k8s};
+    let name = file.rsplit('/').next().unwrap_or(file);
+    let maybe = |v: Option<&str>| v.map_or_else(|| "null".to_string(), quoted);
+    let pairs = |v: &[(String, String)]| {
+        format!("[{}]", v.iter().map(|(k, x)| format!("[{},{}]", json::string(k), json::string(x))).collect::<Vec<_>>().join(","))
+    };
+    if k8s::is_skaffold(name) {
+        let s = match k8s::skaffold(text) {
+            Ok(s) => s,
+            Err(e) => {
+                return Some(format!(r#"{{"file":{},"kind":"skaffold","error":{}}}"#, json::string(file), json::string(&e.to_string())));
+            }
+        };
+        let artifacts: Vec<String> = s
+            .artifacts
+            .iter()
+            .map(|a| {
+                format!(
+                    r#"{{"image":{},"context":{},"dockerfile":{},"target":{},"line":{}}}"#,
+                    quoted(&a.image),
+                    quoted(&a.context),
+                    maybe(a.dockerfile.as_deref()),
+                    maybe(a.target.as_deref()),
+                    a.line
+                )
+            })
+            .collect();
+        return Some(format!(r#"{{"file":{},"kind":"skaffold","artifacts":[{}]}}"#, json::string(file), artifacts.join(",")));
+    }
+    if !k8s::may_be(text) {
+        return None;
+    }
+    // Như lúc nạp: chắc là manifest mà không đọc được thì báo; file chỉ tình
+    // cờ có chữ `kind` thì chỉ in khi đọc ra được gì.
+    let f = match k8s::parse(text) {
+        Ok(f) if k8s::looks_like(text)
+            || !(f.workloads.is_empty() && f.services.is_empty() && f.config_maps.is_empty() && f.unknown.is_empty()) =>
+        {
+            f
+        }
+        Ok(_) => return None,
+        Err(e) if k8s::looks_like(text) => {
+            return Some(format!(r#"{{"file":{},"kind":"k8s","error":{}}}"#, json::string(file), json::string(&e.to_string())));
+        }
+        Err(_) => return None,
+    };
+    let words = |w: &Option<(Vec<String>, usize)>| command(&w.as_ref().map(|(a, l)| (Command::Exec(a.clone()), *l)));
+    let workloads: Vec<String> = f
+        .workloads
+        .iter()
+        .map(|w| {
+            let containers: Vec<String> = w
+                .containers
+                .iter()
+                .map(|c| {
+                    let env: Vec<String> =
+                        c.env.iter().map(|e| format!(r#"{{"key":{},"line":{}}}"#, json::string(&e.key), e.line)).collect();
+                    let refs: Vec<String> = c
+                        .refs
+                        .iter()
+                        .map(|r| {
+                            format!(
+                                r#"{{"key":{},"configMap":{},"item":{},"line":{}}}"#,
+                                json::string(&r.key),
+                                json::string(&r.config_map),
+                                json::string(&r.item),
+                                r.line
+                            )
+                        })
+                        .collect();
+                    let from: Vec<String> = c
+                        .env_from
+                        .iter()
+                        .map(|e| format!(r#"{{"configMap":{},"prefix":{},"line":{}}}"#, json::string(&e.config_map), json::string(&e.prefix), e.line))
+                        .collect();
+                    format!(
+                        r#"{{"name":{},"line":{},"init":{},"image":{},"command":{},"args":{},"workingDir":{},"env":[{}],"configRefs":[{}],"envFrom":[{}]}}"#,
+                        json::string(&c.name),
+                        c.line,
+                        c.init,
+                        maybe(c.image.as_deref()),
+                        words(&c.command),
+                        words(&c.args),
+                        maybe(c.working_dir.as_deref()),
+                        env.join(","),
+                        refs.join(","),
+                        from.join(",")
+                    )
+                })
+                .collect();
+            format!(
+                r#"{{"kind":{},"name":{},"namespace":{},"line":{},"labels":{},"containers":[{}]}}"#,
+                json::string(&w.kind),
+                json::string(&w.name),
+                maybe(w.namespace.as_deref()),
+                w.line,
+                pairs(&w.labels),
+                containers.join(",")
+            )
+        })
+        .collect();
+    let services: Vec<String> = f
+        .services
+        .iter()
+        .map(|s| {
+            format!(
+                r#"{{"name":{},"namespace":{},"line":{},"selector":{}}}"#,
+                json::string(&s.name),
+                maybe(s.namespace.as_deref()),
+                s.line,
+                pairs(&s.selector)
+            )
+        })
+        .collect();
+    let maps: Vec<String> = f
+        .config_maps
+        .iter()
+        .map(|m| {
+            let keys: Vec<String> = m.keys().map(|(k, l)| format!("[{},{l}]", json::string(k))).collect();
+            format!(
+                r#"{{"name":{},"namespace":{},"line":{},"keys":[{}]}}"#,
+                json::string(&m.name),
+                maybe(m.namespace.as_deref()),
+                m.line,
+                keys.join(",")
+            )
+        })
+        .collect();
+    let unknown: Vec<String> =
+        f.unknown.iter().map(|(k, n, l)| format!("[{},{},{l}]", json::string(k), json::string(n))).collect();
+    Some(format!(
+        r#"{{"file":{},"kind":"k8s","workloads":[{}],"services":[{}],"configMaps":[{}],"unknown":[{}]}}"#,
+        json::string(file),
+        workloads.join(","),
+        services.join(","),
+        maps.join(","),
+        unknown.join(",")
+    ))
 }
 
 /// Đưa đường dẫn người dùng gõ về dạng tương đối so với gốc dự án, và bỏ

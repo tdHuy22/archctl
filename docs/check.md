@@ -72,6 +72,7 @@ request. Bảng dưới là lần đo khi bộ đo có 24 repo:
 | Binding (2026-10-11) | token thô của clang cho C/C++, `ast` cho `torch.ops`, `syn` cho PyO3 | vllm 287 file, 1 470 đầu cạnh; apex 34; matplotlib 14; pydantic-core 1 (PyO3): khớp cả khoá lẫn dòng ngay lần đầu |
 | Proto (2026-10-12) | `protoc` của grpcio-tools 1.84.0, đọc thành FileDescriptorSet; googleapis-common-protos cho import `google/api`; cài vào venv nên cần mạng; CI bật | package, service, rpc khớp cả tên lẫn dòng: vllm 2 file 54 dữ kiện, etcd 5 file, google-cloud-python 2, opentelemetry-python 2. File mà `protoc` không dựng được vì import nằm ngoài repo (`gogoproto` của etcd) bị bỏ qua |
 | Hạ tầng (2026-10-12) | PyYAML 6.0.3 (`compose` giữ số dòng, `<<` trải bằng `flatten_mapping`) cho compose, dockerfile-parse 2.0.1 cho Dockerfile, cài vào venv nên cần mạng; CI bật | 12 repo, 49 file compose và Dockerfile, 4 792 dữ kiện (service, build, lệnh, khoá env, `depends_on`, bind mount, alias, chỉ thị Dockerfile): khớp cả giá trị lẫn dòng; vllm chiếm 3 830. Hai Dockerfile có heredoc của BuildKit (hugo, vllm) bị bỏ qua vì dockerfile-parse không đọc heredoc. Bộ đọc YAML còn được so riêng với PyYAML trên 804 file YAML của bộ đo: 793 khớp, phần lệch là template Helm và anchor trùng tên, không phải compose |
+| Kubernetes (2026-10-13) | PyYAML 6.0.3 cùng venv hạ tầng, [k8s_truth.py](../bench/k8s_truth.py): dữ kiện từng manifest và `skaffold.yaml`, và mọi cạnh qua Service tính lại độc lập theo luật DNS, selector của tài liệu Kubernetes | 3 repo (microservices-demo, example-voting-app, etcd), 87 file, 357 dữ kiện (workload, nhãn, container, image, lệnh, khoá env, tham chiếu ConfigMap, Service, selector) cộng 54 cạnh của Online Boutique: khớp hết. Template Helm bỏ qua ở cả hai phía |
 
 Trước khi sửa, cũng phép đối chiếu đó cho:
 
@@ -433,8 +434,9 @@ cùng một loại, nên `--strict` không đối xử như nhau.
 
 **Đã thử kiểm và không kiểm được** — `--strict` chặn. Tên không phân giải
 được, file quá 4 MB, khai báo lạc hậu, `allow` không bao giờ áp được vào đâu,
-mẫu `at` chồng nhau, biên nhận hết hạn; ở tầng hạ tầng: file compose hay
-Dockerfile không đọc được, service có `runs` mà không rõ điểm vào (kể cả khi
+mẫu `at` chồng nhau, biên nhận hết hạn; ở tầng hạ tầng: file compose,
+Dockerfile hay manifest không đọc được (kể cả loại workload lạ và patch
+Kustomize đổi lệnh hay env của workload đã khai), service có `runs` mà không rõ điểm vào (kể cả khi
 bộ đọc thôi đọc lệnh khởi chạy giữa chừng), `link` không cấu hình nào cho thấy
 ([infra.md](infra.md)). Mỗi cái là một chỗ báo cáo đang
 im lặng mà không phải vì sạch.
@@ -446,8 +448,8 @@ nhóm trên: một import không phân giải được chỉ là một chỗ t�
 luật đang được áp — ai xem sơ đồ cũng tưởng nó đang được giữ.
 
 **Chưa khai báo** — `--strict` **không** chặn. Component chưa có `allow` nào,
-file không thuộc component nào, service trong compose chưa có `service` nào
-khai. Áp dần là cách dùng được thiết kế: `init
+file không thuộc component nào, service trong compose hay workload trong
+manifest chưa có `service` nào khai. Áp dần là cách dùng được thiết kế: `init
 --from-code` sinh ra toàn `#draft`, và một repo đang chạy thì luôn có phần
 chưa vào sơ đồ. Chặn nhóm này nghĩa là không ai áp được `--strict` cho tới khi
 đã mô tả xong cả repo, và chẳng ai làm thế. Xem [adopt.md](adopt.md).
@@ -623,9 +625,10 @@ native/ops.cpp (C/C++)
       2  cung cấp op:mylib.fused cho ngôn ngữ khác
 ```
 
-File compose và Dockerfile cũng được in: mỗi service một khối, lệnh khởi chạy
-dẫn tới file nào, cạnh mạng thấy ở đâu. Giá trị biến môi trường của compose
-không bao giờ được in, chỉ tên máy trong đó. Đối số của lệnh (`command`,
+File compose, Dockerfile và manifest Kubernetes cũng được in: mỗi service hay
+workload một khối, lệnh khởi chạy dẫn tới file nào, cạnh mạng thấy ở đâu, thư
+mục chart Helm không đọc. Giá trị biến môi trường của compose, manifest và
+ConfigMap không bao giờ được in, chỉ tên máy trong đó. Đối số của lệnh (`command`,
 `RUN`, `ENV`, `ARG`) mặc định cũng không, vì hay chở token: chỉ tên chương
 trình, số đối số, từ khoá và dòng; đường dẫn và URL bỏ phần `user:mật khẩu@`.
 `--verbatim` in đủ, cho lúc bạn tự xem ([infra.md](infra.md)):

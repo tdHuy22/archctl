@@ -12,7 +12,7 @@
 use crate::check;
 use crate::resolve::{NativeImport, Resolved, Resolver, settle_natives};
 use crate::scan::Lang;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 /// Thư mục không nói gì về kiến trúc của sản phẩm. Bỏ khi **chọn bố cục**;
@@ -58,12 +58,15 @@ pub struct Discovery {
     pub services: Vec<FoundService>,
     /// Cạnh mạng giữa các service, theo tên trong file luật.
     pub links: Vec<(String, Vec<String>)>,
+    /// Ghi chú cho bản nháp: workload có ở nhiều thư mục, chart Helm không đọc.
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FoundService {
     pub name: String,
-    /// `compose:<tên>` hay `compose:<thư mục>/<tên>`.
+    /// `compose:<tên>`, `compose:<thư mục>/<tên>`, `k8s:<tên>`, hay cả hai,
+    /// cách nhau bằng dấu phẩy.
     pub source: String,
     pub runs: Vec<String>,
     /// Vì sao không có `runs`: không rõ điểm vào.
@@ -137,97 +140,171 @@ pub fn discover(root: &Path, ignores: &[String]) -> Discovery {
     out
 }
 
-/// Service, `runs` và `link` từ docker-compose.
+/// Service, `runs` và `link` từ docker-compose và manifest Kubernetes.
 ///
 /// `runs` là mọi component mà điểm vào chạm tới theo các cạnh đã quan sát, tính
 /// từ component chứa file điểm vào (hay, khi file đó không thuộc component nào,
 /// từ những component nó import trực tiếp). Đúng điều mà `check` đòi, nên bản
 /// nháp nâng lên `#accepted` thì không tự vi phạm.
+///
+/// Service compose và workload cùng tên, dựng từ cùng một Dockerfile (hay cùng
+/// một image dựng sẵn), là một service với hai nguồn. Workload cùng tên ở
+/// nhiều thư mục (`kubernetes-manifests/`, `release/`, base của kustomize) mà
+/// dựng từ cùng một chỗ là bản sao của một ứng dụng: một nguồn `k8s:<tên>`
+/// kiểm hết chúng. Dựng từ nhiều chỗ khác nhau (monorepo, hai ứng dụng cùng có
+/// `api`) thì mỗi chỗ dựng một service, nguồn ghi rõ thư mục.
 fn discover_services(root: &Path, deploy_files: &[String], owners: &Owners, out: &mut Discovery) {
     use crate::scan::deploy::{self, Key};
-    let dep = deploy::load(root, deploy_files);
+    let dep = deploy::load(root, deploy_files, &deploy::Options { k8s: true, pins: Vec::new() });
     let resolver = Resolver::new(root);
-    let compose: Vec<(&str, &str, &deploy::Svc)> = dep
-        .services
-        .iter()
-        .filter_map(|s| match &s.key {
-            Key::Compose { dir, name } => Some((dir.as_str(), name.as_str(), s)),
-            Key::Dockerfile(_) => None,
-        })
-        .collect();
-    let mut names: BTreeMap<(&str, &str), String> = BTreeMap::new();
-    let mut taken: Vec<String> = Vec::new();
-    for (dir, name, _) in &compose {
-        let dsl = unique_name(&pascal_case(name), &taken);
-        taken.push(dsl.clone());
-        names.insert((dir, name), dsl);
+
+    let mut compose_count: BTreeMap<&str, usize> = BTreeMap::new();
+    // Workload theo tên, giữ thứ tự gặp.
+    let mut k8s_order: Vec<&str> = Vec::new();
+    let mut k8s_by_name: HashMap<&str, Vec<&deploy::Svc>> = HashMap::new();
+    for s in &dep.services {
+        match &s.key {
+            Key::K8s { name, .. } => {
+                let list = k8s_by_name.entry(name).or_default();
+                if list.is_empty() {
+                    k8s_order.push(name);
+                }
+                list.push(s);
+            }
+            Key::Compose { name, .. } => *compose_count.entry(name).or_default() += 1,
+            Key::Dockerfile(_) => {}
+        }
     }
-    let mut links: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut count: BTreeMap<&str, usize> = BTreeMap::new();
-    for (_, name, _) in &compose {
-        *count.entry(name).or_default() += 1;
+
+    // Mỗi đơn vị là một `service` của bản nháp: một hay nhiều nguồn.
+    struct Unit<'a> {
+        base: String,
+        sources: Vec<String>,
+        svcs: Vec<&'a deploy::Svc>,
+        k8s: bool,
     }
-    for (dir, name, svc) in &compose {
-        let dsl = names[&(*dir, *name)].clone();
-        let ambiguous = count[name] > 1;
+    let mut units: Vec<Unit<'_>> = Vec::new();
+    for s in &dep.services {
+        let Key::Compose { dir, name } = &s.key else { continue };
         // Tên trùng ở nhiều thư mục thì ghi rõ thư mục; `./` là gốc repo.
-        let source = match (ambiguous, dir.is_empty()) {
+        let source = match (compose_count[name.as_str()] > 1, dir.is_empty()) {
             (false, _) => format!("compose:{name}"),
             (true, true) => format!("compose:./{name}"),
             (true, false) => format!("compose:{dir}/{name}"),
         };
-        let mut seeds: BTreeSet<String> = BTreeSet::new();
-        // Lệnh nào không lần ra mã thì `check` báo không rõ điểm vào; sinh
-        // `runs` cho service đó là sinh ra một luật tự cảnh báo.
-        let lost = svc.starts.iter().find_map(|st| {
-            if let Some(why) = st.cut.first() {
-                return Some(format!("không đọc hết lệnh khởi chạy: {why}"));
+        units.push(Unit { base: pascal_case(name), sources: vec![source], svcs: vec![s], k8s: false });
+    }
+    let image = |s: &deploy::Svc| s.image.as_deref().map(|i| crate::scan::k8s::image_name(i).0.to_string());
+    // Nơi dựng: Dockerfile, không có thì tên image dựng sẵn.
+    let identity = |s: &deploy::Svc| s.built.clone().or_else(|| image(s)).unwrap_or_default();
+    // Bảng băm thay vì tìm tuần tự: hàng chục nghìn workload thì tìm tuần
+    // tự cho từng cái là bậc hai.
+    let mut by_compose: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, u) in units.iter().enumerate() {
+        if let Key::Compose { name, .. } = &u.svcs[0].key {
+            by_compose.entry(name.to_ascii_lowercase()).or_default().push(i);
+        }
+    }
+    let shown = |d: &str| if d.is_empty() { ".".to_string() } else { d.to_string() };
+    for name in k8s_order {
+        let svcs = &k8s_by_name[name];
+        let mut groups: Vec<(String, Vec<&deploy::Svc>)> = Vec::new();
+        for s in svcs {
+            let id = identity(s);
+            match groups.iter_mut().find(|(g, _)| *g == id) {
+                Some((_, list)) => list.push(s),
+                None => groups.push((id, vec![s])),
             }
-            let missing = st.unresolved.first().cloned().or_else(|| {
-                st.entries
-                    .iter()
-                    .find(|e| {
-                        let files = check::entry_files(root, &resolver, std::slice::from_ref(e));
-                        // File không biết ngôn ngữ và không thuộc component nào:
-                        // `check` báo không rõ điểm vào.
-                        files.is_empty()
-                            || files.iter().any(|f| {
-                                Lang::for_path(f).is_none()
-                                    || (owners.of_file(f).is_none() && check::direct_targets(root, &resolver, f).is_err())
-                            })
-                    })
-                    .map(|_| st.shown.clone())
-            });
-            missing.map(|m| format!("không tìm thấy trong repo mã mà `{m}` nạp"))
-        });
-        for st in svc.starts.iter().filter(|_| lost.is_none()) {
-            for file in check::entry_files(root, &resolver, &st.entries) {
-                match owners.of_file(&file) {
-                    Some(c) => {
-                        seeds.insert(c.clone());
-                    }
-                    None => {
-                        for (target, _, _) in check::direct_targets(root, &resolver, &file).unwrap_or_default() {
-                            if let Some(c) = owners.of_target(root, &target) {
-                                seeds.insert(c.clone());
+        }
+        if groups.len() > 1 {
+            let dirs: BTreeSet<String> =
+                svcs.iter().filter_map(|s| match &s.key { Key::K8s { dir, .. } => Some(shown(dir)), _ => None }).collect();
+            out.notes.push(format!(
+                "workload `{name}` ở {} dựng từ {} nơi khác nhau: tách thành từng service",
+                dirs.into_iter().collect::<Vec<_>>().join(", "),
+                groups.len()
+            ));
+        }
+        let split = groups.len() > 1;
+        for (_, group) in groups {
+            let sources: Vec<String> = if split {
+                let dirs: BTreeSet<&str> =
+                    group.iter().filter_map(|s| match &s.key { Key::K8s { dir, .. } => Some(dir.as_str()), _ => None }).collect();
+                dirs.into_iter().map(|d| if d.is_empty() { format!("k8s:./{name}") } else { format!("k8s:{d}/{name}") }).collect()
+            } else {
+                vec![format!("k8s:{name}")]
+            };
+            let first = group[0];
+            let twin = by_compose.get(&name.to_ascii_lowercase()).and_then(|list| {
+                list.iter().copied().find(|&i| {
+                    let u = &units[i];
+                    !u.k8s
+                        && u.svcs.len() == 1
+                        && match (&u.svcs[0].built, &first.built) {
+                            (Some(a), Some(b)) => a == b,
+                            (None, None) => {
+                                !u.svcs[0].code && !first.code && image(u.svcs[0]).is_some() && image(u.svcs[0]) == image(first)
                             }
+                            _ => false,
                         }
-                    }
+                })
+            });
+            match twin {
+                Some(i) => {
+                    units[i].sources.extend(sources);
+                    units[i].svcs.extend(group);
+                    units[i].k8s = true;
+                }
+                None => units.push(Unit { base: pascal_case(name), sources, svcs: group, k8s: true }),
+            }
+        }
+    }
+    let mut taken: HashSet<String> = HashSet::new();
+    let mut names: Vec<String> = Vec::new();
+    for u in &units {
+        // Workload không gộp được với service compose cùng tên: `VoteK8s`.
+        let only_k8s = u.k8s && u.svcs.iter().all(|v| matches!(v.key, Key::K8s { .. }));
+        let base = if only_k8s && taken.contains(&u.base) { format!("{}K8s", u.base) } else { u.base.clone() };
+        let dsl = if taken.contains(&base) {
+            (2..).map(|n| format!("{base}{n}")).find(|c| !taken.contains(c)).unwrap_or_default()
+        } else {
+            base
+        };
+        taken.insert(dsl.clone());
+        names.push(dsl);
+    }
+    let by_key: HashMap<&Key, &str> =
+        units.iter().zip(&names).flat_map(|(u, n)| u.svcs.iter().map(move |v| (&v.key, n.as_str()))).collect();
+
+    let mut links: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (u, dsl) in units.iter().zip(&names) {
+        let mut seeds: BTreeSet<String> = BTreeSet::new();
+        let mut lost: Option<String> = None;
+        for svc in &u.svcs {
+            match entry_seeds(root, &resolver, owners, svc) {
+                Ok(found) => seeds.extend(found),
+                Err(why) => {
+                    lost.get_or_insert(why);
                 }
             }
         }
-        let runs = closure(&seeds, &out.edges);
-        let note = (runs.is_empty() && svc.code).then(|| {
+        // Lệnh nào không lần ra mã thì `check` báo không rõ điểm vào; sinh
+        // `runs` cho service đó là sinh ra một luật tự cảnh báo.
+        let runs = if lost.is_some() { Vec::new() } else { closure(&seeds, &out.edges) };
+        let code = u.svcs.iter().any(|v| v.code);
+        let note = (runs.is_empty() && code).then(|| {
             lost.clone()
-                .or_else(|| svc.unknown.clone())
+                .or_else(|| u.svcs.iter().find_map(|v| v.unknown.clone()))
                 .unwrap_or_else(|| "điểm vào không thuộc component nào".into())
         });
-        out.services.push(FoundService { name: dsl.clone(), source, runs, note });
-        for e in &svc.edges {
-            if let Some(to) = names.get(&(*dir, e.to.as_str()))
-                && *to != dsl
-            {
-                links.entry(dsl.clone()).or_default().insert(to.clone());
+        out.services.push(FoundService { name: dsl.clone(), source: u.sources.join(", "), runs, note });
+        for svc in &u.svcs {
+            for e in &svc.edges {
+                if let Some(to) = by_key.get(&e.target)
+                    && *to != dsl
+                {
+                    links.entry(dsl.clone()).or_default().insert((*to).to_string());
+                }
             }
         }
     }
@@ -245,6 +322,58 @@ fn discover_services(root: &Path, deploy_files: &[String], owners: &Owners, out:
         }
     }
     out.links = links.into_iter().map(|(from, to)| (from, to.into_iter().collect())).collect();
+}
+
+/// Component mà các lệnh khởi chạy của một service chạm tới trực tiếp. Lệnh
+/// nào không lần ra mã thì trả lý do.
+fn entry_seeds(
+    root: &Path,
+    resolver: &Resolver,
+    owners: &Owners,
+    svc: &crate::scan::deploy::Svc,
+) -> Result<BTreeSet<String>, String> {
+    let lost = svc.starts.iter().find_map(|st| {
+        if let Some(why) = st.cut.first() {
+            return Some(format!("không đọc hết lệnh khởi chạy: {why}"));
+        }
+        let missing = st.unresolved.first().cloned().or_else(|| {
+            st.entries
+                .iter()
+                .find(|e| {
+                    let files = check::entry_files(root, resolver, std::slice::from_ref(e));
+                    // File không biết ngôn ngữ và không thuộc component nào:
+                    // `check` báo không rõ điểm vào.
+                    files.is_empty()
+                        || files.iter().any(|f| {
+                            Lang::for_path(f).is_none()
+                                || (owners.of_file(f).is_none() && check::direct_targets(root, resolver, f).is_err())
+                        })
+                })
+                .map(|_| st.shown.clone())
+        });
+        missing.map(|m| format!("không tìm thấy trong repo mã mà `{m}` nạp"))
+    });
+    if let Some(why) = lost {
+        return Err(why);
+    }
+    let mut seeds: BTreeSet<String> = BTreeSet::new();
+    for st in &svc.starts {
+        for file in check::entry_files(root, resolver, &st.entries) {
+            match owners.of_file(&file) {
+                Some(c) => {
+                    seeds.insert(c.clone());
+                }
+                None => {
+                    for (target, _, _) in check::direct_targets(root, resolver, &file).unwrap_or_default() {
+                        if let Some(c) = owners.of_target(root, &target) {
+                            seeds.insert(c.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(seeds)
 }
 
 /// Mọi component đi tới được từ `seeds` theo `edges`, kể cả chính chúng.
@@ -892,10 +1021,13 @@ pub fn render(d: &Discovery, date: &str) -> String {
     }
     if !d.services.is_empty() {
         out.push_str(
-            "\n# Triển khai, đọc từ docker-compose. `runs` là component mà lệnh khởi\n\
-             # chạy chạm tới theo các quan hệ ở trên. Service không phải của sản phẩm\n\
-             # (công cụ dev, bản thử) thì xoá.\n",
+            "\n# Triển khai, đọc từ docker-compose và manifest Kubernetes. `runs` là\n\
+             # component mà lệnh khởi chạy chạm tới theo các quan hệ ở trên. Service\n\
+             # không phải của sản phẩm (công cụ dev, bản thử) thì xoá.\n",
         );
+        for note in &d.notes {
+            let _ = writeln!(out, "# {note}");
+        }
         let width = d.services.iter().map(|s| s.name.len()).max().unwrap_or(0);
         let swidth = d.services.iter().map(|s| s.source.len()).max().unwrap_or(0);
         for s in &d.services {
@@ -907,7 +1039,10 @@ pub fn render(d: &Discovery, date: &str) -> String {
         }
     }
     if !d.links.is_empty() {
-        out.push_str("\n# Cạnh mạng thấy trong compose: depends_on, links, tên service trong biến môi trường.\n");
+        out.push_str(
+            "\n# Cạnh mạng thấy trong cấu hình: depends_on, links, tên service hay Service\n\
+             # Kubernetes trong biến môi trường, lời gọi gRPC.\n",
+        );
         let width = d.links.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
         for (from, to) in &d.links {
             let _ = writeln!(out, "link {from:<width$} -> {}   @ai #draft", to.join(", "));
