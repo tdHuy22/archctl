@@ -7,6 +7,7 @@ vendor, symlink, file sinh tự động, tên file có dấu cách.
 import json
 import re
 import shutil
+import sys
 import socket
 import subprocess
 import time
@@ -42,14 +43,30 @@ def _free_port() -> int:
 
 
 def _git(work, *args):
-    subprocess.run(["git", *args], cwd=work, capture_output=True, check=False)
+    # Không để git tự `gc`/`maintenance` tách nền: tiến trình đó còn ghi vào
+    # `.git` khi lượt sau xoá thư mục này, và `rmtree` đổ vì file biến mất giữa
+    # chừng (CI, sabotage chạy liền hai lượt trên cùng repo).
+    subprocess.run(["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", *args],
+                   cwd=work, capture_output=True, check=False)
+
+
+def _remove(path):
+    """Xoá thư mục; file đã biến mất giữa chừng thì bỏ qua."""
+    def gone(func, name, exc):
+        exc = exc[1] if isinstance(exc, tuple) else exc
+        if not isinstance(exc, FileNotFoundError):
+            raise exc
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=gone)
+    else:
+        shutil.rmtree(path, onerror=gone)
 
 
 def run_flows(archctl: str, name: str, src: Path, work: Path) -> Flows:
     f = Flows(archctl)
     work = work / name
     if work.exists():
-        shutil.rmtree(work)
+        _remove(work)
     shutil.copytree(src, work, symlinks=True, ignore=shutil.ignore_patterns(".git"))
     R = ["--root", str(work)]
     law = work / ".arch/system.arch"
