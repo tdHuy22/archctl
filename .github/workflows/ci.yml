@@ -146,8 +146,10 @@ jobs:
   bench:
     name: repo thật
     runs-on: ubuntu-24.04
-    # Bước đối chiếu với clang chạy qua ~4 000 file C/C++ trên hai lõi.
-    timeout-minutes: 25
+    # Bước đối chiếu với clang chạy qua ~4 000 file C/C++ trên hai lõi, và
+    # thước đo tên máy trong chuỗi parse đầy đủ mọi file Python, Go; sabotage
+    # chạy lại cả bước đối chiếu cho từng kiểu phá. Trần này để bắt treo.
+    timeout-minutes: 40
     steps:
       - name: lấy mã
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
