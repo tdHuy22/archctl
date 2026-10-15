@@ -12,6 +12,16 @@
 pub enum Tok {
     Word(String),
     Str(String),
+    /// Template của JavaScript. Mỗi chỗ nội suy `${...}` thành một `\0`: phần
+    /// chữ quanh nó vẫn đọc được (`http://payment:80`), còn tên ghép lúc chạy
+    /// (`api-${env}`) thì không thành tên nào. Tách khỏi `Str` để bộ dò import
+    /// không coi `` require(`x${y}`) `` là đường dẫn.
+    Template(String),
+    /// Chuỗi ba nháy của Python. Tách khỏi `Str`: docstring hay nhắc tên bảng,
+    /// URL mà không phải mã; ai cần thì tự xét chỗ nó đứng.
+    Triple(String),
+    /// `#define TÊN "giá trị"` của C/C++: chỉ thị còn lại bị bỏ qua cả dòng.
+    Define(String, String),
     /// `<stdio.h>` trong chỉ thị `#include` của C/C++.
     SystemStr(String),
     Punct(char),
@@ -98,6 +108,9 @@ impl LexConfig {
     }
 }
 
+/// Trường f-string lồng nhau tối đa; Python thật hiếm khi quá vài tầng.
+const MAX_FSTRING_DEPTH: usize = 32;
+
 /// Sau các từ khoá này, `/` chắc chắn mở đầu regex chứ không phải phép chia.
 const REGEX_AFTER_WORD: &[&str] = &[
     "return", "typeof", "case", "in", "of", "new", "delete", "void", "throw", "yield", "do",
@@ -118,6 +131,11 @@ struct Lexer<'a> {
     at_line_start: bool,
     cfg: &'a LexConfig,
     prev: Prev,
+    /// Chuỗi sắp đọc là chuỗi thô của Python (`r"…"`): `\` giữ nguyên.
+    raw: bool,
+    /// Số trường f-string đang lồng nhau; quá [`MAX_FSTRING_DEPTH`] thì đọc
+    /// phẳng, không đệ quy nữa (file đối kháng làm tràn stack của hook).
+    fdepth: usize,
     /// Vị trí ngay sau từ vừa đọc. `f"..."` là f-string chỉ khi `f` liền nháy.
     word_end: usize,
     out: Vec<Token>,
@@ -131,6 +149,8 @@ pub fn lex(src: &str, cfg: &LexConfig) -> Vec<Token> {
         at_line_start: true,
         cfg,
         prev: Prev::Nothing,
+            raw: false,
+            fdepth: 0,
         word_end: usize::MAX,
         out: Vec::new(),
     };
@@ -278,6 +298,23 @@ impl Lexer<'_> {
                 self.out.push(Token { tok: Tok::Word("include".into()), line: self.line });
                 self.out.push(Token { tok, line: self.line });
             }
+        } else if let Some(rest) = body.strip_prefix("define") {
+            // `#define DB_URL "http://db:5432"`: một macro chỉ là một chuỗi.
+            let rest = rest.trim_start();
+            let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            let after = rest[name.len()..].trim_start();
+            if !name.is_empty() && !rest[name.len()..].starts_with('(') && after.starts_with('"') {
+                let mut value = String::new();
+                let mut cs = after[1..].chars();
+                while let Some(c) = cs.next() {
+                    match c {
+                        '"' => break,
+                        '\\' => value.extend(cs.next()),
+                        c => value.push(c),
+                    }
+                }
+                self.out.push(Token { tok: Tok::Define(name, value), line: self.line });
+            }
         }
         self.i += 1;
         self.skip_directive();
@@ -386,13 +423,22 @@ impl Lexer<'_> {
 
     fn quoted(&mut self, quote: char) {
         if self.cfg.triple_quoted && self.opens_triple(quote) {
-            self.skip_triple(quote);
-            self.out.push(Token { tok: Tok::Str(String::new()), line: self.line });
+            let line = self.line;
+            self.raw = self.cfg.fstrings
+                && self.word_end == self.i
+                && matches!(&self.prev, Prev::Word(w) if matches!(w.to_ascii_lowercase().as_str(), "r" | "rb" | "br"));
+            let value = self.skip_triple(quote);
+            self.raw = false;
+            self.out.push(Token { tok: Tok::Triple(value), line });
             self.step(Prev::Punct('"'));
             return;
         }
         let line = self.line;
+        self.raw = self.cfg.fstrings
+            && self.word_end == self.i
+            && matches!(&self.prev, Prev::Word(w) if matches!(w.to_ascii_lowercase().as_str(), "r" | "rb" | "br"));
         let value = self.read_until(quote);
+        self.raw = false;
         self.out.push(Token { tok: Tok::Str(value), line });
         self.step(Prev::Punct('"'));
     }
@@ -408,25 +454,32 @@ impl Lexer<'_> {
     }
 
     /// Chuỗi ba nháy, từ ba nháy mở tới hết ba nháy đóng.
-    fn skip_triple(&mut self, quote: char) {
+    fn skip_triple(&mut self, quote: char) -> String {
         let close: String = std::iter::repeat_n(quote, 3).collect();
+        let mut value = String::new();
         self.i += 3;
         while self.i < self.cs.len() && !self.rest_starts_with(&close) {
             match self.cs[self.i] {
                 // `\"` không đóng chuỗi, kể cả chuỗi thô của Python.
                 '\\' => {
-                    if self.cs.get(self.i + 1) == Some(&'\n') {
-                        self.line += 1;
+                    match self.cs.get(self.i + 1) {
+                        Some('\n') => {
+                            self.line += 1;
+                            self.i += 2;
+                        }
+                        Some(_) => self.i += 1 + self.escape(self.i + 1, &mut value),
+                        None => self.i += 1,
                     }
-                    self.i += 2;
                     continue;
                 }
                 '\n' => self.line += 1,
                 _ => {}
             }
+            value.push(self.cs[self.i]);
             self.i += 1;
         }
         self.i = (self.i + 3).min(self.cs.len());
+        value
     }
 
     /// Từ vừa đọc là tiền tố của f-string hay t-string: `f`, `rf`, `fr`, `t`,
@@ -444,12 +497,17 @@ impl Lexer<'_> {
     fn fstring(&mut self, quote: char) {
         let line = self.line;
         let triple = self.opens_triple(quote);
+        self.raw = matches!(&self.prev, Prev::Word(w) if w.contains(['r', 'R']));
         self.i += if triple { 3 } else { 1 };
+        // Token của chuỗi đứng trước token của mã trong `{...}`, như trong
+        // file: thứ đứng trước nó (`url=`) mới là khoá của nó.
+        let at = self.out.len();
+        self.out.push(Token { tok: Tok::Str(String::new()), line });
         let mut value = String::new();
         self.fstring_body(quote, triple, &mut value);
-        // Như chuỗi thường: chuỗi ba nháy không giữ nội dung.
-        let (value, line) = if triple { (String::new(), self.line) } else { (value, line) };
-        self.out.push(Token { tok: Tok::Str(value), line });
+        self.raw = false;
+        let tok = if triple { Tok::Triple(value) } else { Tok::Str(value) };
+        self.out[at] = Token { tok, line };
         self.step(Prev::Punct('"'));
     }
 
@@ -467,25 +525,28 @@ impl Lexer<'_> {
             }
             let c = self.cs[self.i];
             match c {
-                '\\' => {
-                    if let Some(&next) = self.cs.get(self.i + 1) {
-                        value.push(next);
-                        if next == '\n' {
-                            self.line += 1;
-                        }
+                '\\' => match self.cs.get(self.i + 1) {
+                    Some('\n') => {
+                        self.line += 1;
+                        self.i += 2;
                     }
-                    self.i += 2;
-                }
+                    Some(_) => self.i += 1 + self.escape(self.i + 1, value),
+                    None => self.i += 1,
+                },
                 '\n' if !triple => return,
                 '\n' => {
                     self.line += 1;
+                    value.push('\n');
                     self.i += 1;
                 }
                 '{' | '}' if self.cs.get(self.i + 1) == Some(&c) => {
                     value.push(c);
                     self.i += 2;
                 }
+                // Mã trong `{...}` thành một `\0`, như template JS: phần chữ quanh
+                // nó vẫn đọc được (`http://db:{port}`), còn tên ghép thì không.
                 '{' => {
+                    value.push('\0');
                     self.i += 1;
                     self.fstring_field(quote, triple);
                 }
@@ -500,6 +561,36 @@ impl Lexer<'_> {
     /// Một trường `{...}`, từ sau `{` tới hết `}` đóng nó. Đây là mã: ngoặc
     /// lồng nhau, chuỗi, chú thích. `:` ở tầng ngoài cùng mở phần định dạng.
     fn fstring_field(&mut self, quote: char, triple: bool) {
+        self.fdepth += 1;
+        if self.fdepth > MAX_FSTRING_DEPTH {
+            self.flat_field();
+        } else {
+            self.fstring_field_inner(quote, triple);
+        }
+        self.fdepth -= 1;
+    }
+
+    /// Trường lồng quá sâu: tới `}` đóng nó, không đệ quy.
+    fn flat_field(&mut self) {
+        let mut depth = 1usize;
+        while self.i < self.cs.len() {
+            match self.cs[self.i] {
+                '\n' => self.line += 1,
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.i += 1;
+                        return;
+                    }
+                }
+                _ => {}
+            }
+            self.i += 1;
+        }
+    }
+
+    fn fstring_field_inner(&mut self, quote: char, triple: bool) {
         let mut depth = 0usize;
         while self.i < self.cs.len() {
             match self.cs[self.i] {
@@ -590,6 +681,78 @@ impl Lexer<'_> {
         }
     }
 
+    /// Ký tự sau `\` trong chuỗi. `\n`, `\t`, `\r` là khoảng trắng: `"db:5432\n"`
+    /// là máy `db` cổng `5432`. Python giữ `\` trước ký tự không phải thoát
+    /// (`"github\.com"`), và chuỗi thô giữ mọi `\`.
+    fn escape(&self, at: usize, value: &mut String) -> usize {
+        let next = self.cs[at];
+        if self.raw {
+            value.push('\\');
+            value.push(next);
+            return 1;
+        }
+        // Tối đa `max` chữ số cơ số `radix` bắt đầu ở `from`.
+        let digits = |from: usize, max: usize, radix: u32| -> (u32, usize) {
+            let mut v = 0u32;
+            let mut n = 0;
+            while n < max {
+                match self.cs.get(from + n).and_then(|c| c.to_digit(radix)) {
+                    Some(d) => {
+                        v = v * radix + d;
+                        n += 1;
+                    }
+                    None => break,
+                }
+            }
+            (v, n)
+        };
+        let code = |value: &mut String, v: u32| value.push(char::from_u32(v).unwrap_or('\u{FFFD}'));
+        match next {
+            'n' => value.push('\n'),
+            't' => value.push('\t'),
+            'r' => value.push('\r'),
+            '\\' | '\'' | '"' | '`' => value.push(next),
+            // `\x62`, `\u0062`, `\u{62}`, `\U00000062`, `\142`: tên máy viết bằng mã
+            // ký tự vẫn là tên máy.
+            'x' => {
+                let (v, n) = digits(at + 1, 2, 16);
+                if n > 0 {
+                    code(value, v);
+                    return 1 + n;
+                }
+                value.push('x');
+            }
+            'u' if self.cs.get(at + 1) == Some(&'{') => {
+                let (v, n) = digits(at + 2, 6, 16);
+                if n > 0 && self.cs.get(at + 2 + n) == Some(&'}') {
+                    code(value, v);
+                    return 3 + n;
+                }
+                value.push('u');
+            }
+            'u' | 'U' => {
+                let want = if next == 'u' { 4 } else { 8 };
+                let (v, n) = digits(at + 1, want, 16);
+                if n == want {
+                    code(value, v);
+                    return 1 + n;
+                }
+                value.push(next);
+            }
+            '0'..='7' => {
+                let (v, n) = digits(at, 3, 8);
+                code(value, v);
+                return n;
+            }
+            c if self.cfg.fstrings && !matches!(c, 'a' | 'b' | 'f' | 'v' | 'N') => {
+                value.push('\\');
+                value.push(c);
+            }
+            c => value.push(c),
+        }
+        1
+    }
+
     fn read_until(&mut self, quote: char) -> String {
         let multiline = self.cfg.multiline_strings && quote == '"';
         self.i += 1;
@@ -605,17 +768,20 @@ impl Lexer<'_> {
                     if crlf {
                         self.i += 1;
                     }
-                    if let Some(&next) = self.cs.get(self.i + 1) {
-                        // Cặp `\` và xuống dòng biến mất khỏi giá trị, như
-                        // trình biên dịch C, Python và JS: `"eig\⏎ht"` là
-                        // `"eight"`.
-                        if next == '\n' {
+                    // Cặp `\` và xuống dòng biến mất khỏi giá trị, như trình
+                    // biên dịch C, Python và JS: `"eig\⏎ht"` là `"eight"`.
+                    match self.cs.get(self.i + 1) {
+                        Some('\n') => {
                             self.line += 1;
-                        } else {
-                            value.push(next);
+                            if self.raw {
+                                value.push('\\');
+                                value.push('\n');
+                            }
+                            self.i += 2;
                         }
+                        Some(_) => self.i += 1 + self.escape(self.i + 1, &mut value),
+                        None => self.i += 1,
                     }
-                    self.i += 2;
                 }
                 '\n' if !multiline => return value,
                 '\n' => {
@@ -656,27 +822,39 @@ impl Lexer<'_> {
     }
 
     fn template(&mut self) {
+        let line = self.line;
+        let mut value = String::new();
         self.i += 1;
         while self.i < self.cs.len() {
             match self.cs[self.i] {
-                '\\' => {
-                    if self.cs.get(self.i + 1) == Some(&'\n') {
+                '\\' => match self.cs.get(self.i + 1) {
+                    Some('\n') => {
                         self.line += 1;
+                        self.i += 2;
                     }
-                    self.i += 2;
-                }
+                    Some(_) => self.i += 1 + self.escape(self.i + 1, &mut value),
+                    None => self.i += 1,
+                },
                 '\n' => {
                     self.line += 1;
+                    value.push('\n');
                     self.i += 1;
                 }
                 '`' => {
                     self.i += 1;
                     break;
                 }
-                '$' if self.cs.get(self.i + 1) == Some(&'{') => self.skip_interpolation(),
-                _ => self.i += 1,
+                '$' if self.cs.get(self.i + 1) == Some(&'{') => {
+                    value.push('\0');
+                    self.skip_interpolation();
+                }
+                c => {
+                    value.push(c);
+                    self.i += 1;
+                }
             }
         }
+        self.out.push(Token { tok: Tok::Template(value), line });
         self.step(Prev::Punct('`'));
     }
 

@@ -76,6 +76,10 @@ DEPLOY = {
                   ("Internet", "Vote"), ("Internet", "Result")],
         # `vote/Dockerfile` stage `dev`: `python app.py` trong `vote/`.
         "runs": [("Vote", "Vote")],
+        # Tên máy viết thẳng trong mã: `Redis(host="redis")`,
+        # `connectionString: 'postgres://…@db/postgres'`. Gỡ link thì `check`
+        # phải báo cả ở chính dòng mã đó, không chỉ ở `depends_on`.
+        "code": [("Vote", "Redis", "vote/app.py"), ("Result", "Db", "result/server.js")],
     },
     "open-webui": {
         # `OLLAMA_BASE_URL=http://ollama:11434` và `depends_on: ollama`.
@@ -280,9 +284,15 @@ def deploy(archctl: str, name: str, law: Path, root: list, rep: dict, out: dict)
             out["problems"].append(f"thiếu cạnh mạng: luật sinh ra không có link {a} -> {b}")
         else:
             checks.append(("policy", a, b))
+    code_files = {(a, b): f for a, b, f in want.get("code", [])}
+    for a, b in code_files:
+        if (a, b) not in links:
+            out["problems"].append(f"thiếu cạnh mạng: luật sinh ra không có link {a} -> {b}")
+        else:
+            checks.append(("code", a, b))
     # Gỡ từng cái đi thì `check` phải báo đúng loại vi phạm đó.
     for kind, a, b in checks:
-        if kind in ("network", "policy"):
+        if kind in ("network", "policy", "code"):
             pattern = rf"^(link\s+{a}\s*->\s*)([^@\n]+)"
             broken = re.sub(pattern, lambda m: m.group(1) + ", ".join(
                 x.strip() for x in m.group(2).split(",") if x.strip() != b) + " ", text, flags=re.M)
@@ -303,14 +313,20 @@ def deploy(archctl: str, name: str, law: Path, root: list, rep: dict, out: dict)
             seen = {(v["from"], v["to"], v.get("reason")) for v in vs}
             # Vi phạm do NetworkPolicy cho phép: nêu tên policy trong `spec`.
             seen |= {(v["from"], v["to"], "policy") for v in vs if v.get("spec", "").startswith("NetworkPolicy")}
+            # Vi phạm do tên máy viết trong mã: nằm ở chính file mã.
+            seen |= {(v["from"], v["to"], "code") for v in vs
+                     if v.get("reason") == "not_linked" and v["file"] == code_files.get((v["from"], v["to"]))}
         except (json.JSONDecodeError, KeyError):
             seen = set()
         finally:
             law.write_text(text)
-        reason = {"network": "not_linked", "runs": "not_run", "policy": "policy"}[kind]
+        reason = {"network": "not_linked", "runs": "not_run", "policy": "policy", "code": "code"}[kind]
         if (a, b, reason) not in seen:
             what = f"{b} khỏi runs của {a}" if kind == "runs" else f"link {a} -> {b}"
-            out["problems"].append(f"gỡ {what} mà check không báo {reason}")
+            if kind == "code":
+                out["problems"].append(f"gỡ {what} mà check không báo tên máy ở {code_files[(a, b)]}")
+            else:
+                out["problems"].append(f"gỡ {what} mà check không báo {reason}")
 
 
 def pick_source(work: Path):

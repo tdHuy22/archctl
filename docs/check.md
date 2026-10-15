@@ -598,7 +598,7 @@ Thêm mẫu glob vào `.arch/.archignore` để bỏ qua thêm.
 ## `archctl scan`: archctl đọc được gì
 
 ```
-archctl scan [--root <dir>] [--json] [--verbatim] [<file>...]
+archctl scan [--root <dir>] [--json] [--verbatim] [--all-hosts] [<file>...]
 ```
 
 In từng import archctl đọc được trong file, ở dòng nào, và phân giải ra đâu —
@@ -631,7 +631,9 @@ mục chart Helm không đọc. Giá trị biến môi trường của compose, 
 ConfigMap không bao giờ được in, chỉ tên máy trong đó. Đối số của lệnh (`command`,
 `RUN`, `ENV`, `ARG`) mặc định cũng không, vì hay chở token: chỉ tên chương
 trình, số đối số, từ khoá và dòng; đường dẫn và URL bỏ phần `user:mật khẩu@`.
-`--verbatim` in đủ, cho lúc bạn tự xem ([infra.md](infra.md)):
+`--verbatim` in đủ, cho lúc bạn tự xem ([infra.md](infra.md)). Tên máy viết
+thẳng trong chuỗi của mã chỉ được in khi là tên một service của repo, vì chuỗi
+dạng `a:b` khác có thể là `user:mật khẩu`; `--all-hosts` in mọi ứng viên:
 
 ```
 triển khai compose:api (docker-compose.yml:2)

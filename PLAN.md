@@ -9,6 +9,22 @@ Cập nhật 2026-10-14.
 
 ### Đã xong, có bằng chứng
 
+- **Cạnh mạng viết trong mã, đợt 4 việc 8.1** (2026-10-15, chưa commit; bạn chốt "làm
+  theo đề xuất, miễn hiệu quả", trang https://claude.ai/artifact/EjLmvkEkkAFPDkyNyTnTwW).
+  `scan/hosts.rs` đọc tên máy trong chuỗi của mã Python, JS/TS, Go, Rust, C/C++ theo
+  luật tên máy của biến môi trường, với khoá là chỗ chuỗi đứng; tên khớp service của
+  repo là cạnh từ mọi service chạy component đó, thiếu `link` là vi phạm (`check`,
+  hook), `init` sinh `link`, `scan` in (lọc theo tên service, `--all-hosts`). Lexer:
+  template JS, ký tự thoát, chuỗi thô Python, f-string `{…}`→`\0`, chuỗi ba nháy,
+  `#define`, trần độ sâu f-string (lỗi tràn stack có từ trước); file không phải UTF-8
+  được đọc ở mọi luật (trước bị bỏ cả file). Review: opus vòng 1 (10 mục), agent đối
+  kháng (khoảng 150 biến thể), opus vòng 2 (4 mục) — sửa hết; oracle mới
+  `bench/code_hosts.py` (ast, tokenize, go/ast) bắt thêm khoảng 15 lỗi. Threat model
+  TM-32..35 đã có. Biên nhận trên mã cuối: `cargo test` (629), clippy, `cargo +1.88
+  check`, bộ đo 30 repo 0 bất nhất 1050/1050, oracle khớp hết (7 903 tên máy),
+  sabotage 62 ca 0 trượt (3 kiểu mới, 47), `verify` 3/3, `check --strict` 0; `init` trên
+  4 repo có service sinh `link` y như trước, bộ đo chỉ ra 2 cạnh từ mã đều đúng.
+
 - **Lối vào từ Internet, việc C của đợt 3** (2026-10-14, commit ngay sau `781b0e9`; bạn chốt "làm
   theo đề xuất", trang https://claude.ai/artifact/CwipwvTdGjT9rjhrg8Q8Hf). `Internet` là
   tên dành riêng: `link Internet -> X` cho X lộ ra ngoài; khai `service Internet` hay
@@ -386,9 +402,9 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-1. Chưa push `c5ae95d`, `781b0e9` và commit việc C lên GitHub; nên qua nhánh thử, CI
+1. Việc 8.1 (cạnh mạng từ mã) xong, chưa commit: chờ bạn cho commit.
+2. Chưa push `c5ae95d`, `781b0e9`, `bc82d75` lên GitHub; nên qua nhánh thử, CI
    xanh rồi mới lên `main`.
-2. Hướng D (cạnh mạng từ mã: biến môi trường trong mã ↔ tên máy trong manifest) chờ bạn chốt.
 
 **Đã quyết (2026-10-11): cạnh binding Python ↔ native tự viết.** Đã tìm theo
 skill reuse-best. Không công cụ tĩnh nào phủ cả PyO3, pybind11, nanobind
@@ -616,3 +632,12 @@ không có `link` là vi phạm, có `link` mà cụm chặn là cảnh báo (`-
   Service `LoadBalancer`/`NodePort`/`externalIPs`, `hostNetwork`/`hostPort`, cổng
   compose; bộ đo (Online Boutique, voting app), oracle, sabotage; tài liệu.
 
+
+### Tầng hạ tầng, đợt 4
+
+- [x] Chốt 5 câu về cạnh mạng từ mã @ban: bạn chốt "làm theo đề xuất, miễn hiệu quả"; trang
+  https://claude.ai/artifact/EjLmvkEkkAFPDkyNyTnTwW (khuyên A: tên máy viết thẳng
+  trong mã, thiếu `link` là vi phạm)
+- [x] Cạnh mạng từ mã: chuỗi tên máy (URL, `máy:cổng`, `host=`) trong mã → `link`;
+  bộ đo (voting app), oracle, sabotage; tài liệu.
+- [ ] Đẩy `c5ae95d`, `781b0e9`, `bc82d75` qua nhánh thử, CI xanh rồi lên `main` @ban

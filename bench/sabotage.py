@@ -9,7 +9,8 @@ phép kiểm không thể đổ thì tệ hơn không có, vì nó vẫn cộng 
 và bộ đo này từng có bốn phép kiểm như vậy.
 
 `oracle.py` cũng vậy: ba kiểu phá đầu ra `scan --json` (mất một import, lệch
-một dòng, thêm một import giả) phải làm nó thoát 1. `--repo` phải có file
+một dòng, thêm một import giả) và hai kiểu phá tên máy trong chuỗi của file
+Python (mất một, thêm một giả) phải làm nó thoát 1. `--repo` phải có file
 Python, vì phần đối chiếu Python không cần công cụ nào ngoài chính Python.
 
 Kiểu `crossing` chạy trên `--crossing-repo` (mặc định pydantic-core): xoá cạnh
@@ -25,10 +26,11 @@ pytorch-image-models, op `TORCH_LIBRARY` phía C++ của vllm. Cần clang.
 `--notebook-repo matplotlib` phá thêm hai kiểu ở notebook (mất import, lệch
 dòng), đối chiếu bằng IPython cài vào venv nên cần mạng; CI bật nó.
 
-Bốn kiểu phá tầng hạ tầng chạy trên `--deploy-bench-repo` (mặc định
+Năm kiểu phá tầng hạ tầng chạy trên `--deploy-bench-repo` (mặc định
 example-voting-app), mỗi kiểu nhắm một phép kiểm trong `consistency.deploy`:
 `init` mất mọi `link`; `check` giấu vi phạm cạnh mạng; `check` giấu vi phạm
-`runs`; `check` báo thêm một file triển khai không đọc được.
+`runs`; `check` báo thêm một file triển khai không đọc được; `check` giấu vi
+phạm do tên máy viết trong mã.
 
 `--deploy-repo example-voting-app` phá thêm bốn kiểu ở dữ kiện compose và
 Dockerfile mà `scan --json` in ra (mất một `depends_on`, lệch dòng một biến
@@ -88,6 +90,9 @@ ORACLE_MODES = {
     "scan-drop": "thiếu:",
     "scan-line": "lệch dòng:",
     "scan-extra": "thừa:",
+    # tên máy viết thẳng trong chuỗi của file Python
+    "host-drop": "thiếu:",
+    "host-extra": "thừa:",
 }
 RUST_ORACLE_MODES = {
     "rust-drop": "thiếu:",
@@ -113,6 +118,8 @@ DEPLOY_MODES = {
     "deploy-link": "mà check không báo not_linked",
     "deploy-runs": "mà check không báo not_run",
     "deploy-warn": "không đọc được file triển khai",
+    # tên máy viết thẳng trong mã: bỏ vi phạm nằm ở file mã
+    "deploy-code": "mà check không báo tên máy",
 }
 # phá dữ kiện hạ tầng trong `scan --json` → dòng `oracle.py` phải in ra
 DEPLOY_ORACLE_MODES = {
@@ -258,6 +265,16 @@ def sabotage_crossings(rep: dict, mode: str):
 
 def sabotage_scan(rep: dict, mode: str):
     """Làm hỏng import đầu tiên của file đầu tiên có import: Python, Rust hay notebook tuỳ kiểu."""
+    if mode.startswith("host-"):
+        for f in rep["files"]:
+            found = f.get("hosts", {}).get("found", [])
+            if f["file"].endswith(".py") and found:
+                if mode == "host-drop":
+                    found.pop(0)
+                else:
+                    found.append([found[0][0], "khong-co-that", None, None])
+                return
+        return
     prefix, ext = next((p, e) for p, e in [("rust-", ".rs"), ("nb-", ".ipynb"), ("scan-", ".py")]
                        if mode.startswith(p))
     kind = mode[len(prefix):]
@@ -339,6 +356,9 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
             rep["linksBlocked"] = []
         elif mode == "deploy-internet":
             rep["violations"] = [v for v in rep["violations"] if v["from"] != "Internet"]
+        elif mode == "deploy-code":
+            rep["violations"] = [v for v in rep["violations"]
+                                 if not (v.get("reason") == "not_linked" and v["file"].endswith((".py", ".js")))]
         out = json.dumps(rep)
     elif mode == "diff" and args[:1] == ["diff"]:
         out = "kiến trúc a → b\n"

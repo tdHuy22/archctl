@@ -51,7 +51,7 @@ impl Repo {
 
     fn load(&self) -> deploy::Deploy {
         let files = arch_core::check::deploy_files(&self.0, &[]);
-        deploy::load(&self.0, &files, &deploy::Options { k8s: true, pins: Vec::new() })
+        deploy::load(&self.0, &files, &deploy::Options { k8s: true, ..Default::default() })
     }
 }
 
@@ -888,4 +888,43 @@ fn loi_vao_cac_ca_kho() {
     let rep = r.partial(&["k8s/r.yaml"]);
     assert!(t.elapsed().as_secs_f64() < 5.0, "{:?}", t.elapsed());
     assert!(!rep.violations.is_empty() || !rep.deploy_unread.is_empty());
+}
+
+#[test]
+fn ten_may_trong_ma_qua_service_kubernetes() {
+    let r = shop("ma-k8s");
+    // Worker không có `link` tới Db; Api có `link` tới Worker.
+    r.write("worker/main.py", "import os\nDB = os.getenv('DB_HOST', 'db.default.svc.cluster.local')\n")
+        .write("api/main.py", "import os\nW = 'http://worker:8080/jobs'\n");
+    let got: Vec<String> = r.report().violations.iter().map(|v| format!("{} -> {} {}:{} {}", v.from, v.to, v.file, v.line, v.spec)).collect();
+    assert_eq!(got, ["Worker -> Db worker/main.py:2 DB_HOST → db.default.svc.cluster.local"]);
+}
+
+#[test]
+fn ten_may_trong_ma_uu_tien_cung_ung_dung() {
+    // Monorepo: `app1/k8s` và `app2/k8s` cùng có Service `api`.
+    let r = Repo::new("ma-monorepo");
+    for app in ["app1", "app2"] {
+        r.write(&format!("{app}/web/Dockerfile"), PY_DOCKERFILE).write(&format!("{app}/web/main.py"), "import requests\nrequests.get('http://api:8080/x')\n");
+        r.write(
+            &format!("{app}/k8s/all.yaml"),
+            &format!(
+                "apiVersion: apps/v1\nkind: Deployment\nmetadata: {{name: web}}\nspec:\n  template:\n    metadata: {{labels: {{app: web}}}}\n    spec: {{containers: [{{name: w, image: {app}-web}}]}}\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata: {{name: api}}\nspec:\n  template:\n    metadata: {{labels: {{app: api}}}}\n    spec: {{containers: [{{name: a, image: {app}-api}}]}}\n---\napiVersion: v1\nkind: Service\nmetadata: {{name: api}}\nspec: {{selector: {{app: api}}}}\n"
+            ),
+        );
+    }
+    r.write("skaffold.yaml", "apiVersion: skaffold/v4beta6\nkind: Config\nbuild:\n  artifacts:\n  - image: app1-web\n    context: app1/web\n  - image: app2-web\n    context: app2/web\nmanifests:\n  rawYaml: [app1/k8s/*.yaml, app2/k8s/*.yaml]\n")
+        .rules(
+            "component Web1 at app1/web/**\ncomponent Web2 at app2/web/**\n\
+             service Web1s from k8s:app1/k8s/web runs Web1\nservice Api1s from k8s:app1/k8s/api\n\
+             service Web2s from k8s:app2/k8s/web runs Web2\nservice Api2s from k8s:app2/k8s/api\n\
+             link Web1s -> Api1s\nlink Web2s -> Api2s\n",
+        );
+    let got: Vec<String> = r.report().violations.iter().map(|v| format!("{} -> {}", v.from, v.to)).collect();
+    assert!(got.is_empty(), "{got:?}");
+    // Gỡ link của app1: chỉ đích cùng ứng dụng bị báo.
+    let law = std::fs::read_to_string(r.0.join(".arch/system.arch")).unwrap().replace("link Web1s -> Api1s\n", "");
+    r.rules(&law);
+    let got: Vec<String> = r.report().violations.iter().map(|v| format!("{} -> {} {}", v.from, v.to, v.file)).collect();
+    assert_eq!(got, ["Web1s -> Api1s app1/web/main.py"]);
 }

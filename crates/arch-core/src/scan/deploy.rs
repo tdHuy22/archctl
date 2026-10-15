@@ -130,6 +130,12 @@ pub struct Deploy {
     pub unread: Vec<Unread>,
     /// Thư mục chart Helm: template trong đó không được render, nên không đọc.
     pub charts: Vec<String>,
+    /// Tên máy trong [`Options::hosts`] → service compose, workload mà nó trỏ
+    /// tới. Tên không trỏ tới gì thì không có mặt.
+    pub hosts: HashMap<String, Vec<Key>>,
+    /// Mọi tên gọi được (viết thường): tên service compose và alias, tên
+    /// Service Kubernetes. Chỉ khi [`Options::names`].
+    pub names: HashSet<String>,
 }
 
 /// Điều chỉnh một lần nạp.
@@ -140,6 +146,10 @@ pub struct Options {
     pub k8s: bool,
     /// `dockerfile:` khai cùng `k8s:` trong luật: image của container chính.
     pub pins: Vec<Pin>,
+    /// Tên máy viết thẳng trong mã (đã viết thường), cần biết trỏ tới đâu.
+    pub hosts: Vec<String>,
+    /// Ghi mọi tên gọi được của service vào [`Deploy::names`].
+    pub names: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -663,6 +673,17 @@ pub fn load(root: &Path, files: &[String], opts: &Options) -> Deploy {
             read_compose(&shared, p, 0, &mut seen, &mut records, &mut out.unread);
         }
         resolve_extends(&shared, &mut records, &mut out.unread);
+        if opts.names {
+            out.names.extend(compose_names(&records).into_keys());
+        }
+        if !opts.hosts.is_empty() {
+            let names = compose_names(&records);
+            for h in &opts.hosts {
+                if let Some(&name) = names.get(h) {
+                    out.hosts.entry(h.clone()).or_default().push(Key::Compose { dir: dir.clone(), name: name.to_string() });
+                }
+            }
+        }
         project(&shared, &dir, &records, &mut out);
         builds.extend(records.iter().filter_map(compose_build));
     }
@@ -795,9 +816,9 @@ fn resolve_extends(shared: &Shared<'_>, records: &mut [Record], unread: &mut Vec
     }
 }
 
-fn project(shared: &Shared<'_>, dir: &str, records: &[Record], out: &mut Deploy) {
-    // Tên mà service khác dùng để gọi: tên service, `hostname`, alias.
-    // DNS không phân biệt hoa thường: `DB_HOST=DB` vẫn là service `db`.
+/// Tên mà service khác dùng để gọi: tên service, `hostname`, alias. DNS không
+/// phân biệt hoa thường: `DB_HOST=DB` vẫn là service `db`.
+fn compose_names(records: &[Record]) -> HashMap<String, &str> {
     let mut names: HashMap<String, &str> = HashMap::new();
     for r in records {
         names.insert(r.s.name.to_ascii_lowercase(), &r.s.name);
@@ -807,6 +828,11 @@ fn project(shared: &Shared<'_>, dir: &str, records: &[Record], out: &mut Deploy)
             names.entry(a.to_ascii_lowercase()).or_insert(&r.s.name);
         }
     }
+    names
+}
+
+fn project(shared: &Shared<'_>, dir: &str, records: &[Record], out: &mut Deploy) {
+    let names = compose_names(records);
     // Gom bản ghi theo tên, giữ thứ tự xuất hiện. Bảng băm chứ không tìm tuần
     // tự: số service trong một file 1 MB có thể lên hàng chục nghìn.
     let mut order: Vec<&str> = Vec::new();
@@ -1309,6 +1335,36 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
         }
     }
 
+    if opts.names {
+        out.names.extend(svc_by_name.keys().cloned());
+    }
+    // Tên máy viết thẳng trong mã: mã không biết mình chạy ở namespace nào, nên
+    // như env của một pod không ghi namespace (TM-34).
+    'hosts: for h in &opts.hosts {
+        let mut keys: Vec<Key> = Vec::new();
+        // Không biết namespace của mã: dạng `pod.svc` thì tên miền ngoài hai nhãn
+        // (`firebase.app`) cũng khớp, nên không xét.
+        if h.split('.').count() == 2 && !cluster.namespaces.contains(h.split('.').nth(1).unwrap_or_default()) {
+            continue;
+        }
+        for si in resolve_host(&cluster, &svc_by_name, h, None, None) {
+            for &wi in select(si).iter() {
+                if !Shared::spend(&steps, 1) {
+                    steps_over.set(true);
+                    break 'hosts;
+                }
+                let w = &cluster.workloads[wi];
+                keys.push(Key::K8s { dir: w.dir.clone(), name: w.item.name.clone() });
+            }
+        }
+        if !keys.is_empty() {
+            let list = out.hosts.entry(h.clone()).or_default();
+            list.extend(keys);
+            list.sort();
+            list.dedup();
+        }
+    }
+
     let mut over = false;
     for (wi, placed) in cluster.workloads.iter().enumerate() {
         // Hết ngân sách thì dừng hẳn và báo một lần: đọc tiếp nửa vời là bỏ
@@ -1338,40 +1394,7 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
             exposed: exposures.remove(&wi).unwrap_or_default(),
         };
         // Tên máy → Service → workload.
-        let resolve_once = |host: &str| -> Vec<usize> {
-            let l: Vec<&str> = host.split('.').collect();
-            let find = |name: &str, ns: Option<&str>| -> Vec<usize> {
-                let all: Vec<usize> = svc_by_name
-                    .get(name)
-                    .map(|v| v.iter().copied().filter(|&si| same_ns(cluster.services[si].item.namespace.as_deref(), ns)).collect())
-                    .unwrap_or_default();
-                let same: Vec<usize> = all.iter().copied().filter(|&si| cluster.services[si].dir == placed.dir).collect();
-                if same.is_empty() { all } else { same }
-            };
-            let known = |n: &str| cluster.namespaces.contains(n);
-            match l.as_slice() {
-                [svc] => find(svc, ns),
-                // `svc.ns.svc`, `svc.ns.svc.cluster.local`.
-                [svc, n, "svc", ..] => find(svc, Some(n)),
-                // Pod của Service headless: `pod.svc.ns.svc…`.
-                [_, svc, n, "svc", ..] => find(svc, Some(n)),
-                // `svc.ns` khi `ns` là namespace có trong manifest; không thì
-                // `pod.svc`. Tên miền ngoài (`api.example`) không bị ghép.
-                [svc, n] if known(n) => find(svc, Some(n)),
-                [_, svc] => find(svc, ns),
-                [_, svc, n] if known(n) => find(svc, Some(n)),
-                _ => Vec::new(),
-            }
-        };
-        // Service `ExternalName` là bí danh: theo nó một bước tới Service thật.
-        let resolve = |host: &str| -> Vec<usize> {
-            let mut found = resolve_once(host);
-            let aliases: Vec<String> = found.iter().filter_map(|&si| cluster.services[si].item.external.clone()).collect();
-            for a in aliases {
-                found.extend(resolve_once(&a));
-            }
-            found
-        };
+        let resolve = |host: &str| resolve_host(&cluster, &svc_by_name, host, ns, Some(&placed.dir));
         // `x.y` mà `x` là Service của repo, `y` không phải namespace nào đã
         // biết: có thể là Service ở namespace chưa khai, có thể là tên miền
         // ngoài. Không đoán, nhưng báo (TM-21).
@@ -1491,6 +1514,81 @@ enum Scope<'a> {
     Names(Vec<&'a str>),
     /// Theo nhãn khác: repo không cho biết namespace nào mang nhãn đó.
     Unknown,
+}
+
+/// Tên máy trong mã của một service (chạy ở `from`) có tới được `to` không:
+/// service compose chỉ thấy tên trong cùng project, workload chỉ thấy Service
+/// của cụm. Service chỉ có Dockerfile thì không biết chạy ở đâu: coi như tới
+/// được.
+pub fn same_network(from: &[&Key], to: &Key) -> bool {
+    let mut placed = false;
+    for k in from {
+        match (k, to) {
+            (Key::Compose { dir: a, .. }, Key::Compose { dir: b, .. }) if a == b => return true,
+            (Key::K8s { .. }, Key::K8s { .. }) => return true,
+            (Key::Dockerfile(_), _) => {}
+            _ => placed = true,
+        }
+    }
+    !placed
+}
+
+/// Đích mà tên máy trong mã của một service (chạy ở `from`) trỏ tới, trong
+/// `keys` là mọi chỗ tên đó khớp. Như biến môi trường của một pod: workload
+/// cùng thư mục với service gọi được ưu tiên, vì `app1/k8s` và `app2/k8s` của
+/// một monorepo hay có Service trùng tên.
+pub fn reachable<'k>(from: &[&Key], keys: &'k [Key]) -> Vec<&'k Key> {
+    let mut out: Vec<&Key> = keys.iter().filter(|k| same_network(from, k)).collect();
+    let dirs: Vec<&str> = from.iter().filter_map(|k| if let Key::K8s { dir, .. } = k { Some(dir.as_str()) } else { None }).collect();
+    let near = |k: &&Key| matches!(k, Key::K8s { dir, .. } if dirs.contains(&dir.as_str()));
+    if out.iter().any(near) {
+        out.retain(|k| !matches!(k, Key::K8s { .. }) || near(k));
+    }
+    out
+}
+
+/// Tên máy → Service theo DNS của cụm, nhìn từ một pod ở namespace `ns`.
+/// `dir` cho trước thì ưu tiên Service cùng thư mục: `release/` và
+/// `kubernetes-manifests/` thường là hai bản của cùng một ứng dụng. Service
+/// `ExternalName` là bí danh: theo nó một bước tới Service thật.
+fn resolve_host(
+    cluster: &Cluster,
+    svc_by_name: &HashMap<String, Vec<usize>>,
+    host: &str,
+    ns: Option<&str>,
+    dir: Option<&str>,
+) -> Vec<usize> {
+    let once = |host: &str| -> Vec<usize> {
+        let l: Vec<&str> = host.split('.').collect();
+        let find = |name: &str, ns: Option<&str>| -> Vec<usize> {
+            let all: Vec<usize> = svc_by_name
+                .get(name)
+                .map(|v| v.iter().copied().filter(|&si| same_ns(cluster.services[si].item.namespace.as_deref(), ns)).collect())
+                .unwrap_or_default();
+            let same: Vec<usize> = all.iter().copied().filter(|&si| Some(cluster.services[si].dir.as_str()) == dir).collect();
+            if same.is_empty() { all } else { same }
+        };
+        let known = |n: &str| cluster.namespaces.contains(n);
+        match l.as_slice() {
+            [svc] => find(svc, ns),
+            // `svc.ns.svc`, `svc.ns.svc.cluster.local`.
+            [svc, n, "svc", ..] => find(svc, Some(n)),
+            // Pod của Service headless: `pod.svc.ns.svc…`.
+            [_, svc, n, "svc", ..] => find(svc, Some(n)),
+            // `svc.ns` khi `ns` là namespace có trong manifest; không thì
+            // `pod.svc`. Tên miền ngoài (`api.example`) không bị ghép.
+            [svc, n] if known(n) => find(svc, Some(n)),
+            [_, svc] => find(svc, ns),
+            [_, svc, n] if known(n) => find(svc, Some(n)),
+            _ => Vec::new(),
+        }
+    };
+    let mut found = once(host);
+    let aliases: Vec<String> = found.iter().filter_map(|&si| cluster.services[si].item.external.clone()).collect();
+    for a in aliases {
+        found.extend(once(&a));
+    }
+    found
 }
 
 /// Workload bị NetworkPolicy cô lập theo từng chiều, và đường được cho phép rõ

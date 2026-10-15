@@ -20,6 +20,7 @@ pub mod command;
 pub mod compose;
 pub mod deploy;
 pub mod k8s;
+pub mod hosts;
 
 use lexer::{Backtick, CharLit, LexConfig, Tok, Token};
 use std::collections::HashSet;
@@ -158,6 +159,7 @@ impl Lang {
             tables: find_tables(&toks, tables),
             foreign: foreign::scan(&toks, self),
             rpc: grpc::scan(&toks, self),
+            hosts: hosts::scan(&toks, self),
         }
     }
 }
@@ -185,6 +187,8 @@ pub struct FileScan {
     pub foreign: foreign::Foreign,
     /// Chỗ gọi stub và chỗ đăng ký server gRPC.
     pub rpc: grpc::Rpc,
+    /// Tên máy viết thẳng trong chuỗi.
+    pub hosts: hosts::CodeHosts,
 }
 
 /// Tìm tên bảng, **chỉ trong chuỗi**.

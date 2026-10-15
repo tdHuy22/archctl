@@ -759,3 +759,19 @@ fn scan_mac_dinh_khong_in_secret() {
     assert!(out.contains("danhdau4") && !out.contains("danhdau5") && !out.contains("danhdau6"), "{out}");
 }
 
+
+#[test]
+fn scan_chi_in_ten_may_la_service() {
+    // Chuỗi dạng `a:b` khác có thể là `user:mật khẩu` (TM-33): mặc định `scan` chỉ
+    // in tên máy khớp một service của repo; `--all-hosts` in mọi ứng viên.
+    let p = Project::new("scan-hosts");
+    std::fs::write(p.0.join("docker-compose.yml"), "services:\n  db:\n    image: postgres:16\n").unwrap();
+    std::fs::write(p.0.join("src/web/conn.py"), "DSN = 'postgres://app:hunter2@db:5432/x'\nx = 'alice:31337'\n").unwrap();
+    for args in [&["scan", "--json", "src/web/conn.py"][..], &["scan", "src/web/conn.py"][..]] {
+        let out = text(&p.run(args));
+        assert!(out.contains("db"), "{out}");
+        assert!(!out.contains("alice") && !out.contains("31337") && !out.contains("hunter2"), "{out}");
+    }
+    let all = text(&p.run(&["scan", "--json", "--all-hosts", "src/web/conn.py"]));
+    assert!(all.contains("alice") && !all.contains("hunter2"), "{all}");
+}

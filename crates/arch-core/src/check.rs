@@ -15,7 +15,7 @@ use crate::scan::deploy::{self, Deploy, Key, Svc};
 use crate::scan::foreign::Crossing;
 use crate::scan::grpc;
 use crate::scan::{self, Lang};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 /// Thư mục không bao giờ quét. Không cấu hình được, vì quét chúng chỉ tốn thời
@@ -337,6 +337,8 @@ fn check_with(root: &Path, doc: &Document, files: &[String], partial: bool, depl
     let mut rpc_calls: Vec<RpcSite> = Vec::new();
     let mut rpc_serves: Vec<RpcSite> = Vec::new();
     let mut rpc_impls: Vec<RpcSite> = Vec::new();
+    // Tên máy viết thẳng trong mã: chỉ cần khi luật có `service` (TM-32).
+    let mut code_hosts: Vec<(String, String, scan::hosts::CodeHost)> = Vec::new();
     let mut ffi_provides: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
     fn as_refs(v: &[String]) -> Vec<&str> {
@@ -362,9 +364,12 @@ fn check_with(root: &Path, doc: &Document, files: &[String], partial: bool, depl
             continue;
         };
 
-        let Ok(src) = std::fs::read_to_string(root.join(path)) else {
+        // Không phải UTF-8 (`# -*- coding: latin-1 -*-`) vẫn là mã chạy được:
+        // đọc thay thế byte lạ, không bỏ cả file (TM-32).
+        let Ok(bytes) = std::fs::read(root.join(path)) else {
             continue;
         };
+        let src = String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
         if src.len() as u64 > MAX_FILE_BYTES {
             report.oversized.push((path.clone(), src.len() as u64));
             continue;
@@ -407,6 +412,16 @@ fn check_with(root: &Path, doc: &Document, files: &[String], partial: bool, depl
             rpc_impls.extend(scan.rpc.implements.iter().map(site));
         }
 
+        if !doc.services.is_empty() && !scan::hosts::skipped_path(path) {
+            code_hosts.extend(scan.hosts.hosts.iter().map(|h| (from.clone(), path.clone(), h.clone())));
+            if scan.hosts.cut {
+                report.deploy_unread.push(deploy::Unread {
+                    file: path.clone(),
+                    why: format!("quá {} tên máy trong chuỗi của file; phần sau không xét", scan::hosts::MAX_PER_FILE),
+                });
+            }
+        }
+
         for hit in &scan.symbols {
             if let Some(name) = needle_set.get(hit.symbol.as_str()) {
                 sightings.entry(*name).or_default().push(Sighting {
@@ -433,10 +448,21 @@ fn check_with(root: &Path, doc: &Document, files: &[String], partial: bool, depl
     report.unresolved.retain(|u| !paired.contains(&(u.file.as_str(), u.line, u.spec.as_str())));
     judge_expectations(&expectations, &sightings, symbol_scanned, &mut report);
     let rpc_links = judge_grpc(root, doc, files, partial, rpc_calls, rpc_serves, rpc_impls, &mut report);
+    // Hook sửa một file mã có chuỗi dạng tên máy: cần cấu hình để biết tên đó
+    // trỏ tới service nào, nhưng không xét lại cả cấu hình (TM-34).
+    let full = deploy.is_some();
+    let deploy = deploy.or_else(|| (!code_hosts.is_empty()).then(|| deploy_files(root, &crate::read_ignores(root))));
     if let Some(deploy_files) = deploy {
-        report.deploy_checked = true;
-        let loaded = deploy::load(root, &deploy_files, &deploy_options(doc));
-        judge_deploy(root, doc, &resolver, &loaded, &rpc_links, &mut report);
+        let mut opts = deploy_options(doc);
+        let names: BTreeSet<&str> = code_hosts.iter().map(|(_, _, h)| h.host.name.as_str()).collect();
+        opts.hosts = names.into_iter().map(str::to_string).collect();
+        let loaded = deploy::load(root, &deploy_files, &opts);
+        let mut seen = rpc_links;
+        seen.extend(judge_code_hosts(doc, &loaded, &code_hosts, &mut report));
+        if full {
+            report.deploy_checked = true;
+            judge_deploy(root, doc, &resolver, &loaded, &seen, &mut report);
+        }
     }
 
     counts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
@@ -1321,7 +1347,7 @@ fn own_sources(s: &Service) -> impl Iterator<Item = &Source> {
 /// luật có nguồn `k8s:` (TM-18); `dockerfile:` đi cùng `k8s:` là image của
 /// container chính.
 pub fn deploy_options(doc: &Document) -> deploy::Options {
-    let mut opts = deploy::Options { k8s: doc.services.iter().any(Service::on_k8s), pins: Vec::new() };
+    let mut opts = deploy::Options { k8s: doc.services.iter().any(Service::on_k8s), ..Default::default() };
     for s in doc.services.iter().filter(|s| s.on_k8s()) {
         let Some(dockerfile) = s.sources.iter().find_map(|x| match x {
             Source::Dockerfile(p) => Some(p),
@@ -1352,6 +1378,85 @@ const UNDECLARED_K8S: &str = "workload Kubernetes ";
 /// `link` được.
 pub fn to_undeclared(v: &Violation) -> bool {
     v.reason == Reason::NotLinked && (v.rule.starts_with(UNDECLARED) || v.rule.starts_with(UNDECLARED_K8S))
+}
+
+/// Tên máy viết thẳng trong mã của một component là cạnh mạng từ mọi service
+/// chạy component đó, như tên máy trong biến môi trường: cần `link`, và đích
+/// chưa khai thì không `link` nào cho được (TM-32). Trả các cặp đã có `link`,
+/// để chúng không bị báo là "không thấy trong cấu hình".
+fn judge_code_hosts(
+    doc: &Document,
+    dep: &Deploy,
+    sites: &[(String, String, scan::hosts::CodeHost)],
+    report: &mut Report,
+) -> BTreeSet<(String, String)> {
+    let mut used = BTreeSet::new();
+    let declared = |key: &Key| doc.services.iter().find(|s| own_sources(s).any(|src| matches_source(src, key)));
+    let mut running: HashMap<&str, Vec<&Service>> = HashMap::new();
+    // Cấu hình của từng service, để biết tên máy trong mã của nó trỏ tới đâu.
+    let mut placed: HashMap<&str, Vec<&Key>> = HashMap::new();
+    for v in &dep.services {
+        if let Some(s) = doc.services.iter().find(|s| own_sources(s).any(|src| matches_source(src, &v.key))) {
+            placed.entry(s.name.as_str()).or_default().push(&v.key);
+        }
+    }
+    // Một vi phạm cho mỗi cặp service trong một file, đếm số chỗ: 1 000 chuỗi
+    // `"db:5432"` không thành 1 000 vi phạm trong context của agent (TM-34).
+    let mut reported: HashMap<(String, String, String), usize> = HashMap::new();
+    for (from, file, h) in sites {
+        let Some(keys) = dep.hosts.get(&h.host.name) else { continue };
+        let runners = running.entry(from.as_str()).or_insert_with(|| {
+            doc.services.iter().filter(|s| s.meta.status.is_enforced() && s.runs.iter().any(|r| r == from)).collect()
+        });
+        for s in runners.iter() {
+            let here = placed.get(s.name.as_str()).map_or(&[][..], Vec::as_slice);
+            for key in deploy::reachable(here, keys) {
+                let t = declared(key);
+                let to = match t {
+                    Some(t) if t.name == s.name => continue,
+                    Some(t) => t.name.clone(),
+                    None => key.text(),
+                };
+                if t.is_some() && doc.links.iter().any(|l| l.meta.status.is_enforced() && l.from == s.name && l.to.contains(&to)) {
+                    used.insert((s.name.clone(), to));
+                    continue;
+                }
+                if let Some(&at) = reported.get(&(s.name.clone(), to.clone(), file.clone())) {
+                    report.violations[at].count += 1;
+                    continue;
+                }
+                reported.insert((s.name.clone(), to.clone(), file.clone()), report.violations.len());
+                let (rule, hint) = match (t, key) {
+                    (Some(_), _) => (
+                        format!("không có link nào cho {} -> {to} (tên máy viết trong mã)", s.name),
+                        format!("thêm `link {} -> {to}`, hoặc bỏ địa chỉ này khỏi mã", s.name),
+                    ),
+                    (None, Key::K8s { name, .. }) => (
+                        format!("{UNDECLARED_K8S}`{name}` chưa khai, nên không có link nào cho {} tới nó", s.name),
+                        format!("khai `service ... from k8s:{name}` rồi thêm `link {} -> ...`", s.name),
+                    ),
+                    (None, Key::Compose { name, .. } | Key::Dockerfile(name)) => (
+                        format!("{UNDECLARED}`{name}` chưa khai, nên không có link nào cho {} tới nó", s.name),
+                        format!("khai `service ... from compose:{name}` rồi thêm `link {} -> ...`", s.name),
+                    ),
+                };
+                report.violations.push(Violation {
+                    from: s.name.clone(),
+                    to,
+                    file: file.clone(),
+                    line: h.line,
+                    spec: h.shown(),
+                    via: Via::Network,
+                    count: 1,
+                    reason: Reason::NotLinked,
+                    rule,
+                    status: Status::Accepted,
+                    hint,
+                });
+            }
+        }
+    }
+    used
 }
 
 fn judge_deploy(

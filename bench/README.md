@@ -168,8 +168,15 @@ bộ trích, nên một lỗi trong bộ trích làm cả hai sai giống nhau m
   workload lộ ra Internet (Service, Ingress, route, `hostNetwork`)
   được tính lại độc lập theo tài liệu Kubernetes ([k8s_truth.py](k8s_truth.py)).
   Cùng venv và cùng `--require deploy`.
+- Tên máy trong chuỗi: `(dòng, máy:cổng)` mà `scan --json` đọc từ chuỗi của mọi
+  file Python và Go được tính lại bằng [code_hosts.py](code_hosts.py). Chuỗi và
+  chỗ nó đứng (tham số, gán có kiểu hay không, khoá dict, giá trị mặc định của
+  `getenv`, vế sau `or`) lấy từ `ast` và `go/ast`; chuỗi ghép ngầm `'a' 'b'`
+  tách theo `tokenize`, vì `ast` gộp chúng còn mọi lexer thì không; luật đổi
+  chuỗi thành tên máy viết lại theo đặc tả trong `scan/hosts.rs`. Go cần
+  `--require go` như phần import. JS/TS chưa có thước đo.
 
-Python, notebook, binding, hạ tầng, C/C++, Go và Rust đòi khớp cả tên lẫn số dòng: thiếu, thừa hay lệch dòng đều
+Python, notebook, binding, hạ tầng, tên máy, C/C++, Go và Rust đòi khớp cả tên lẫn số dòng: thiếu, thừa hay lệch dòng đều
 là lệch. Thiếu clang, Node hay Go thì phần đó in `BỎ QUA`; `--require
 clang,node,go` biến việc thiếu thành mã thoát 2, và với Node thì đòi cả khả năng
 gỡ kiểu TS. Thước đo tự hỏng cũng là mã 2 chứ không phải "đạt": clang, Node hay
@@ -215,7 +222,8 @@ file, bỏ khoá
 thêm chú thích. Mỗi kiểu phải làm `bench.py` thoát 1, **và phải bị đúng phép
 kiểm dành cho nó bắt** — không chỉ đỏ vì một lý do khác. Ba kiểu nữa làm hỏng
 đầu ra `scan --json` — mất một import, lệch một dòng, thêm một import giả — và
-phải làm `oracle.py` thoát 1. Bốn kiểu nữa phá phần cạnh binding, mỗi nhánh
+phải làm `oracle.py` thoát 1; hai kiểu nữa làm vậy với tên máy trong chuỗi của
+file Python (mất một, thêm một giả). Bốn kiểu nữa phá phần cạnh binding, mỗi nhánh
 của thước đo một kiểu: module pybind11 của matplotlib (mất, thêm giả), lời gọi
 `torch.ops` của pytorch-image-models, op `TORCH_LIBRARY` của vllm. `--notebook-repo
 matplotlib` thêm hai kiểu y vậy ở notebook, đối chiếu bằng IPython nên cần
@@ -225,9 +233,12 @@ danh sách cạnh bắt buộc ở trên bắt được nó. `--rust-repo ripgre
 Rust, đối chiếu bằng `syn` nên cần mạng; kiểu thêm import giả nằm ngoài macro,
 nên nó cũng giữ cho phép miễn trừ import trong thân macro không rộng ra.
 
-Bốn kiểu phá tầng hạ tầng của bộ đo, trên example-voting-app: `init` mất mọi
+Năm kiểu phá tầng hạ tầng của bộ đo, trên example-voting-app: `init` mất mọi
 `link`, `check` giấu vi phạm cạnh mạng, `check` giấu vi phạm `runs`, `check`
-báo thêm một file triển khai không đọc được. `--deploy-repo example-voting-app`
+báo thêm một file triển khai không đọc được, `check` giấu vi phạm do tên máy
+viết trong mã (`consistency.DEPLOY` đòi `Redis(host="redis")` của
+`vote/app.py` và chuỗi kết nối của `result/server.js` phải bị báo ở chính dòng
+mã đó khi gỡ `link`). `--deploy-repo example-voting-app`
 thêm bốn kiểu ở dữ kiện compose và Dockerfile của `scan --json` (mất một
 `depends_on`, lệch dòng một biến môi trường, thêm một tên máy giả, sửa một chỉ
 thị Dockerfile), đối chiếu bằng PyYAML nên cần mạng. Ba kiểu đầu chạy lại trên
@@ -249,7 +260,7 @@ Currencyservice`, `Checkoutservice -> Paymentservice`).
 `rpc`, lệch dòng một `service`), đối chiếu bằng `protoc` của grpcio-tools nên
 cần mạng. CI chạy bước này sau bộ đo, với `--rust-repo ripgrep
 --notebook-repo matplotlib --deploy-repo example-voting-app --k8s-repo
-microservices-demo --proto-repo vllm`: bốn mươi bốn kiểu phá.
+microservices-demo --proto-repo vllm`: bốn mươi bảy kiểu phá.
 
 Nó có mặt vì bộ đo này từng nằm ngoài git, và lúc đưa vào, đọc lại thì bốn
 phép kiểm không kiểm gì: một cái chỉ xét file có tồn tại vì vế sau của `or`

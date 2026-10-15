@@ -135,7 +135,7 @@ pub fn discover(root: &Path, ignores: &[String]) -> Discovery {
     out.unmapped = files.iter().filter(|f| owners.of_file(f).is_none()).count();
     let deploy_files = check::deploy_files(root, ignores);
     if !deploy_files.is_empty() {
-        discover_services(root, &deploy_files, &owners, &mut out);
+        discover_services(root, &deploy_files, &owners, &scans, &mut out);
     }
     out
 }
@@ -153,9 +153,11 @@ pub fn discover(root: &Path, ignores: &[String]) -> Discovery {
 /// dựng từ cùng một chỗ là bản sao của một ứng dụng: một nguồn `k8s:<tên>`
 /// kiểm hết chúng. Dựng từ nhiều chỗ khác nhau (monorepo, hai ứng dụng cùng có
 /// `api`) thì mỗi chỗ dựng một service, nguồn ghi rõ thư mục.
-fn discover_services(root: &Path, deploy_files: &[String], owners: &Owners, out: &mut Discovery) {
+fn discover_services(root: &Path, deploy_files: &[String], owners: &Owners, scans: &[Scanned], out: &mut Discovery) {
     use crate::scan::deploy::{self, Key};
-    let dep = deploy::load(root, deploy_files, &deploy::Options { k8s: true, pins: Vec::new() });
+    let hosts: BTreeSet<&str> = scans.iter().flat_map(|s| s.hosts.iter().map(|h| h.host.name.as_str())).collect();
+    let opts = deploy::Options { k8s: true, hosts: hosts.into_iter().map(str::to_string).collect(), ..Default::default() };
+    let dep = deploy::load(root, deploy_files, &opts);
     let resolver = Resolver::new(root);
 
     let mut compose_count: BTreeMap<&str, usize> = BTreeMap::new();
@@ -339,6 +341,29 @@ fn discover_services(root: &Path, deploy_files: &[String], owners: &Owners, out:
             }
         }
     }
+    // Tên máy viết thẳng trong mã: cạnh từ mọi service chạy component chứa
+    // file, như `check` đòi.
+    let mut placed: HashMap<&str, Vec<&Key>> = HashMap::new();
+    for (k, name) in &by_key {
+        placed.entry(name).or_default().push(k);
+    }
+    for s in scans.iter().filter(|s| !s.hosts.is_empty()) {
+        let Some(c) = owners.of_file(&s.file) else { continue };
+        let runners: Vec<String> =
+            out.services.iter().filter(|x| x.runs.iter().any(|r| r == c)).map(|x| x.name.clone()).collect();
+        for h in &s.hosts {
+            let Some(keys) = dep.hosts.get(&h.host.name) else { continue };
+            for r in &runners {
+                for k in deploy::reachable(placed.get(r.as_str()).map_or(&[][..], Vec::as_slice), keys) {
+                    if let Some(to) = by_key.get(k)
+                        && *to != r.as_str()
+                    {
+                        links.entry(r.clone()).or_default().insert((*to).to_string());
+                    }
+                }
+            }
+        }
+    }
     out.links = links.into_iter().map(|(from, to)| (from, to.into_iter().collect())).collect();
 }
 
@@ -472,6 +497,8 @@ struct Scanned {
     natives: Vec<NativeImport>,
     /// Chỗ gọi stub và chỗ đăng ký server gRPC.
     rpc: crate::scan::grpc::Rpc,
+    /// Tên máy viết thẳng trong chuỗi; rỗng với file test, ví dụ.
+    hosts: Vec<crate::scan::hosts::CodeHost>,
 }
 
 impl Scanned {
@@ -495,7 +522,8 @@ fn scan_files(root: &Path, files: &[String], wanted: impl Fn(&str) -> bool) -> V
         if !wanted(file) {
             continue;
         }
-        let Ok(src) = std::fs::read_to_string(root.join(file)) else { continue };
+        let Ok(bytes) = std::fs::read(root.join(file)) else { continue };
+        let src = String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
         if src.len() as u64 > crate::check::MAX_FILE_BYTES {
             continue;
         }
@@ -513,6 +541,7 @@ fn scan_files(root: &Path, files: &[String], wanted: impl Fn(&str) -> bool) -> V
                 .collect(),
             natives: Vec::new(),
             rpc: scan.rpc,
+            hosts: if crate::scan::hosts::skipped_path(file) { Vec::new() } else { scan.hosts.hosts },
         };
         for import in scan.imports {
             // Cùng các đích như `check` thấy.

@@ -94,7 +94,7 @@ pub struct Env {
 /// Biến môi trường được giữ giá trị.
 pub const KEPT: &[&str] = &["PYTHONPATH", "FLASK_APP"];
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Host {
     pub name: String,
     pub port: Option<String>,
@@ -381,7 +381,7 @@ const HOST_SUFFIXES: &[&str] = &[
 ];
 /// Đoạn của tên khoá nói giá trị là bí mật. Khoá như vậy không bao giờ được
 /// đọc ra tên máy: `SUPABASE_SERVICE_ROLE_KEY` là một JWT trông y như tên máy.
-const SECRET_PARTS: &[&str] = &[
+pub(crate) const SECRET_PARTS: &[&str] = &[
     "KEY", "KEYS", "TOKEN", "TOKENS", "SECRET", "SECRETS", "PASSWORD", "PASSWD", "PASS", "PWD", "SALT", "CREDENTIAL",
     "CREDENTIALS", "CREDS", "AUTH", "PRIVATE", "CERT", "SIGNATURE", "JWT", "APIKEY", "OTP",
 ];
@@ -405,31 +405,39 @@ pub fn hosts_in(key: &str, value: &str) -> Vec<Host> {
 /// quá [`MAX_HOSTS`] tên máy thì phần sau không được xét, và bên gọi phải báo
 /// ra, vì một cạnh tới service có thể nằm ở đó (TM-12).
 pub fn hosts_scan(key: &str, value: &str) -> (Vec<Host>, bool) {
+    hosts_scan_within(key, value, MAX_PARTS, MAX_HOSTS)
+}
+
+/// Như [`hosts_scan`] với trần khác: chuỗi trong mã có thể dài cả trang mà
+/// vẫn chỉ là chữ, nên không cắt theo số phần tử, chỉ theo số tên máy.
+pub fn hosts_scan_within(key: &str, value: &str, max_parts: usize, max_hosts: usize) -> (Vec<Host>, bool) {
     let upper = key.to_ascii_uppercase();
     let parts: Vec<&str> = upper.split(['_', '-', '.']).filter(|p| !p.is_empty()).collect();
     let secret = parts.iter().any(|p| SECRET_PARTS.contains(p));
     let hostish = !secret && parts.last().is_some_and(|p| HOST_SUFFIXES.contains(p));
     let value: std::borrow::Cow<'_, str> = if value.contains("${") { defaults(value).into() } else { value.into() };
-    let mut out = Found::default();
+    let mut out = Found { max: max_hosts, ..Found::default() };
     // Danh sách máy thật có vài chục phần tử; giá trị dài hơn thế không phải
     // danh sách máy, và tách hết nó là tốn theo cỡ giá trị (TM-8).
     let mut parts = value.split([',', ' ', ';', '\t', '\n']).filter(|p| !p.is_empty());
-    for part in parts.by_ref().take(MAX_PARTS) {
+    for part in parts.by_ref().take(max_parts) {
         if let Some((_, after)) = part.split_once("://") {
             let end = after.find(['/', '?', '#']).unwrap_or(after.len());
             let authority = &after[..end];
             match (authority.rfind('@'), after.rfind('@')) {
                 (Some(at), _) => host_port(&mut out, &authority[at + 1..], true),
                 // `@` nằm sau một `/`: mật khẩu có `/` chưa mã hoá
-                // (`postgres://u:ab/cd@db/x`), hay `@` trong đường dẫn. Thử cả
-                // hai; vế đầu khi đó có thể là `user:mật khẩu`, nên không lấy
-                // cổng của nó.
-                (None, Some(at)) => {
+                // (`postgres://u:ab/cd@db/x`, `redis://hunt/er2@redis`), hay `@`
+                // trong đường dẫn. Thử cả hai; vế đầu khi đó có thể là `user:mật
+                // khẩu`, nên không lấy cổng của nó. Vế đầu là tên miền có dấu
+                // chấm mà không có `:` thì nó là máy, và `@` là của đường dẫn
+                // (`https://youtube.com/@excalidraw`).
+                (None, Some(at)) if authority.contains(':') || !authority.contains('.') => {
                     let rest = &after[at + 1..];
                     host_port(&mut out, &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())], true);
                     host_port(&mut out, authority, false);
                 }
-                (None, None) => host_port(&mut out, authority, true),
+                (None, _) => host_port(&mut out, authority, true),
             }
         } else if secret {
             continue;
@@ -450,6 +458,7 @@ pub fn hosts_scan(key: &str, value: &str) -> (Vec<Host>, bool) {
 struct Found {
     hosts: Vec<Host>,
     cut: bool,
+    max: usize,
 }
 
 /// `host[:port]`; `with_port` sai thì bỏ cổng.
@@ -479,7 +488,7 @@ fn push_host(out: &mut Found, name: &str, port: Option<&str>) {
     if !ok || out.hosts.iter().any(|h| h.name.eq_ignore_ascii_case(name) && h.port.as_deref() == port) {
         return;
     }
-    if out.hosts.len() >= MAX_HOSTS {
+    if out.hosts.len() >= out.max {
         out.cut = true;
         return;
     }

@@ -454,6 +454,78 @@ Chưa xét: NetworkPolicy chặn đường từ ingress controller (phải biế
 nằm đâu), `Gateway` của Gateway API không có listener nào, cổng của
 `LoadBalancer` bị `loadBalancerSourceRanges` thu hẹp.
 
+## Cạnh mạng viết trong mã
+
+Cạnh mạng lấy từ cấu hình có một lối lách: viết thẳng địa chỉ của service khác
+vào mã thì không dòng cấu hình nào đổi. Vì vậy `check` đọc cả chuỗi trong mã
+Python, JS/TS, Go, Rust, C/C++. Chuỗi trỏ tới một service của repo là cạnh mạng
+từ mọi service chạy component chứa file đó (theo `runs`), và cần `link` như cạnh
+lấy từ biến môi trường:
+
+```
+✗ VI PHẠM  Vote -> Result  (cạnh mạng không có link, #accepted)
+  vote/app.py:54  chuỗi → result:80
+  luật: không có link nào cho Vote -> Result (tên máy viết trong mã)
+  → thêm `link Vote -> Result`, hoặc bỏ địa chỉ này khỏi mã
+```
+
+Chuỗi được đọc theo đúng luật tên máy của biến môi trường (mục "Cạnh mạng" ở
+trên). Chỗ biến môi trường có tên khoá, ở đây tên khoá là chỗ chuỗi đứng:
+
+| Chuỗi | Ví dụ | Tính? |
+|---|---|---|
+| URL có `scheme://` | `requests.get("http://result:80/api")`, `'postgres://u:p@db/x'`, `mongodb://a:1,db:2/x` | có, phần `user:mật khẩu@` bị bỏ |
+| `máy:cổng` | `Addr: "cart:7070"`, `"db:5432/x"`, `("db", 5432)` | có; không có khoá kiểu máy thì cổng phải từ 80 trở lên |
+| cổng ghép lúc chạy | `f"http://db:{port}"`, `` `http://db:${port}` ``, `"http://db:" + port`; không có URL thì `"db:%d" % p`, `"db:{port}"`, hay chuỗi ở khoá kiểu máy (`db_host = f"db:{p}"`) | có, tên máy không kèm cổng; `f"cache:{key}"`, `"login:%s"` thì không: đó là khoá Redis, log |
+| chuỗi trần ở khoá kiểu máy | `Redis(host="redis")`, `{"hostname": "db"}`, `redisHost := "cache"`, `host: str = "db"`, `char host[] = "db"`, `HOSTS = ["a", "db"]` | có, khi cả chuỗi là một tên máy |
+| giá trị mặc định | `os.getenv("DB_HOST", "db")`, `cfg.get("host", "db")`, `getenv("X_HOST", default="db")`, `process.env.DB_HOST \|\| "db"`, `host = x or "db"`, `host: str = field(default="db")` | có |
+| chuỗi kết nối | `"Server=tcp:db,1433;…"`, `"host=db port=5432 …"` (libpq), `"root:pw@tcp(db:3306)/x"` | có, từng cặp `khoá=giá trị` |
+| hàm nhận tên máy | `net.JoinHostPort("db", p)`, `socket.gethostbyname("db")` | có |
+| chuỗi ba nháy làm giá trị, `#define DB_URL "…"` của C | `connect("""http://db:5432""")` | có; docstring thì không |
+| chuỗi trần ở chỗ khác | `"db"`, `name = "cache"`, `if x == "db"`, `print("API:")` | không: chữ thường trùng tên service quá nhiều |
+
+Khoá kiểu máy là tên tham số, thuộc tính, biến được gán (kể cả có kiểu) hay khoá
+chuỗi của dict có đoạn cuối `host`, `addr`, `server`, `url`, `uri`, `endpoint`,
+`dsn`, `broker` (cả số nhiều, cả camelCase `redisHost`); `service`, `cluster`
+thì không, vì trong mã chúng thường là nhãn. Chuỗi trần ở khoá `url`,
+`endpoint` phải có dấu chấm: `endpoint="login"`, `LOGIN_URL = "login"` là tên
+route. Khoá nói về bí mật (`password`, `apiKey`, `token`, và riêng trong mã
+`pw`, `login`) và khoá nhãn (`image`, `tag`, `version`) chỉ đọc URL, trừ khi
+đoạn cuối của nó là kiểu máy (`auth_server`). Khoá nói về phía gọi vào
+(`ALLOWED_HOSTS`, `CORS_ORIGINS`, `bind`, `listen`) không đọc gì: đó không phải
+cạnh đi ra. Cặp `("db", 5432)` tính khi là đối số (`connect((…))`) hay giá trị
+của một tên kiểu máy (`addr = (…)`), không tính `CACHE = ("cache", 3600)`. Chuỗi trần chỉ tính khi cả chuỗi là một tên máy: `url =
+"data:image/png;base64,"` không có máy nào tên `base64`, và câu `"Hostname of
+the redis server"` cũng không. Ký tự thoát được giải mã (`"d\x62"` là `db`),
+chuỗi liền nhau của Python và C được ghép như trình dịch (`"http://" "db:5432"`).
+
+Tên máy được ghép với cấu hình như biến môi trường: tên service compose và
+alias, tên Service Kubernetes (`svc`, `svc.ns` khi `ns` là namespace của repo,
+`svc.ns.svc.cluster.local`, qua selector tới workload). Service compose chỉ thấy
+tên trong cùng project, workload chỉ thấy Service của cụm, và ưu tiên Service
+cùng thư mục với nó: mã của `vote` chạy bằng compose gọi `result` là service
+compose `result`, không phải workload `result` trong manifest; `app1/` và
+`app2/` của một monorepo có Service `api` riêng. Tên không có trong repo
+(`api.openai.com`, `localhost`) thì như gói ngoài. Đích chưa khai trong luật là
+vi phạm, như cạnh từ cấu hình. Có `link` thì cạnh từ mã cũng làm `link` đó
+"thấy trong cấu hình". Nhiều chỗ trong một file tới cùng một service là một vi
+phạm, kèm số chỗ.
+
+Không xét file test và mock (`tests/`, `test_*.py`, `*_test.go`, `*.spec.ts`,
+`conftest.py`, `mocks/`…): chúng không chạy trong service nào mà hay có địa chỉ
+để thử. Thư mục ví dụ, tài liệu, fixture thì vẫn xét, vì mã chạy thật có thể
+import chúng. File không phải UTF-8 vẫn được đọc. Chuỗi gốc không bao giờ được
+in: `check` chỉ in `khoá → máy:cổng` với máy là tên một service; `scan` cũng chỉ
+in tên máy khớp một service của repo, `scan --all-hosts` in mọi ứng viên.
+
+Chưa đọc: `f"db:{port}"` không có URL hay khoá kiểu máy (không phân biệt được
+với khoá Redis), tên máy ghép lúc chạy (`"http://%s:5432" % host`, `Sprintf("%s",
+"db")`, nối hai nửa tên, biến), chuỗi trong mã của `{...}` của f-string, chuỗi
+trong các ngôn ngữ archctl chưa đọc (Java, C#, Ruby); đối số đầu của một lời gọi
+được gán (`db_host = Field("db")`, `Redis("db", 6379)`), `return "db"`,
+`case "db":`, khoá tính toán của JS (`{["host"]: "db"}`), `new Map([["host",
+"db"]])`, alias của `links:` trong compose (`db:database`), `\N{…}`.
+
 ## Không đọc
 
 - Helm template, overlay của Kustomize, Terraform: không render. Ai cần thì
@@ -464,8 +536,12 @@ nằm đâu), `Gateway` của Gateway API không có listener nào, cổng của
 - Cổng trong NetworkPolicy, policy của CNI riêng (Cilium, Calico).
 - `$(VAR)` trong lệnh (`command`, `args`), và trong env khi biến lấy từ
   `fieldRef` hay Secret: không thay, không đoán.
-- Cạnh chỉ có lúc chạy: URL ghép trong mã, service discovery, biến lấy từ
-  secret store, `network_mode`, ConfigMap không có trong repo.
+- Cạnh chỉ có lúc chạy: tên máy ghép trong mã (f-string, nối chuỗi, biến),
+  service discovery, biến lấy từ secret store, `network_mode`, ConfigMap không
+  có trong repo.
+- Chuỗi trong mã Java, C#, Kotlin, Ruby: archctl chưa đọc các ngôn ngữ đó
+  (`worker/Program.cs` của voting app). Các dạng chuỗi chưa đọc khác: mục "Cạnh
+  mạng viết trong mã".
 
 ## Trong hook, `init`, sơ đồ
 
@@ -475,18 +551,23 @@ nằm đâu), `Gateway` của Gateway API không có listener nào, cổng của
 file YAML, `.env`, script, `package.json`; mọi file không phải mã (trừ tài liệu và ảnh), vì `env_file`,
 `extends.file`, `dockerfile:` đặt tên tuỳ ý; file mã không thuộc component
 nào, vì đó là chỗ của điểm vào (`main.py` ở gốc); và `pyproject.toml`,
-`setup.py`, `setup.cfg`, vì chúng đổi chỗ tìm module. Repo chưa khai `service`
-nào thì không đọc compose, không tốn gì.
+`setup.py`, `setup.cfg`, vì chúng đổi chỗ tìm module. File mã có chuỗi dạng tên
+máy (URL, `máy:cổng`, chuỗi ở khoá kiểu máy) thì hook đọc cấu hình chỉ để biết
+tên đó trỏ tới service nào, không xét lại cả cấu hình; đo trên open-webui và
+Online Boutique, hook vẫn dưới 10 ms, repo cỡ 30 000 file thì thêm khoảng
+0,1 s để tìm file cấu hình. Repo chưa khai `service` nào thì không
+đọc compose, không tốn gì.
 
-**`init --from-code`** sinh `service`, `runs` và `link` (từ compose và manifest
-Kubernetes). `runs` là mọi
+**`init --from-code`** sinh `service`, `runs` và `link` (từ compose, manifest
+Kubernetes và tên máy viết trong mã). `runs` là mọi
 component mà điểm vào chạm tới theo các cạnh đã quan sát — đúng điều `check`
 đòi, nên bản nháp nâng lên `#accepted` thì không tự vi phạm.
 
 **`export`** vẽ service trong một subgraph "Triển khai", `link` thành cạnh
 "mạng". **`serve`** vẽ service thành hộp bo tròn, cạnh "chạy trong" nét chấm
 tới các component trong `runs`. **`scan`** in mọi thứ bộ đọc thấy: dữ kiện
-từng file, lệnh khởi chạy dẫn tới file nào, cạnh mạng. Mặc định nó chỉ in tên
+từng file, lệnh khởi chạy dẫn tới file nào, cạnh mạng, tên máy trong chuỗi của
+từng file mã (`khoá → máy:cổng`, đánh dấu file test, ví dụ không xét). Mặc định nó chỉ in tên
 chương trình, số đối số và dòng của mỗi lệnh, từ khoá và dòng của mỗi chỉ thị
 Dockerfile, tên khoá của mỗi biến môi trường: đối số của `command`, `RUN`,
 `ENV`, `ARG` hay chở token. Đường dẫn, image, URL (`ADD https://…`,
@@ -533,7 +614,11 @@ File compose, Dockerfile và manifest là của người khác hay do agent vi�
   `kustomization.yaml` đi qua cùng chốt chặn như trên. Vượt trần ở file compose
   hay Dockerfile thì file đó vào mục "chưa đọc được"; ở lệnh khởi chạy thì
   service vào mục "không rõ điểm vào"; ở manifest thì phần còn lại vào mục
-  "chưa đọc được".
+  "chưa đọc được". Chuỗi trong mã (TM-32 tới TM-35) được đọc hết, dài bao nhiêu
+  cũng vậy (cắt ở một độ dài là chỗ để giấu một URL), tuyến tính theo cỡ file;
+  mỗi file tối đa 1 000 tên máy (quá thì file vào mục "chưa đọc được"); khử
+  trùng và tra đích bằng bảng băm, tính vào ngân sách bước chung; f-string lồng
+  quá 32 tầng thì đọc phẳng, không đệ quy.
 
 Thứ không đọc được thì báo ra, không im lặng bỏ qua.
 
@@ -549,5 +634,10 @@ tự nhất quán; cạnh mạng và `runs` bắt buộc phải có, và gỡ ch
 phải báo (`consistency.DEPLOY`). `oracle.py --require deploy` so dữ kiện từng
 file compose và Dockerfile với PyYAML và dockerfile-parse, và dữ kiện từng
 manifest cùng mọi cạnh qua Service với `bench/k8s_truth.py` (PyYAML, cài lại
-luật DNS và selector theo tài liệu Kubernetes); `sabotage.py` phá từng phép
-kiểm để chắc nó đổ được.
+luật DNS và selector theo tài liệu Kubernetes). Tên máy trong chuỗi của mã
+Python và Go được so với `bench/code_hosts.py`: chuỗi và chỗ nó đứng lấy từ
+`ast`, `tokenize` và `go/ast`, luật đổi chuỗi thành tên máy viết lại theo đặc
+tả; JS/TS chưa có thước đo. Voting app phải có cạnh `Vote -> Redis` từ
+`Redis(host="redis")` và `Result -> Db` từ chuỗi kết nối của `result/server.js`,
+và gỡ `link` thì `check` phải báo ở chính dòng mã đó. `sabotage.py` phá từng
+phép kiểm để chắc nó đổ được.

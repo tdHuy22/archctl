@@ -23,6 +23,10 @@ Thước đo, chạy trên repo mà `bench.py` đã tải về `target/bench/rep
 - Go: `go/parser` ở chế độ `ImportsOnly`, dựng một lần thành binary tạm. Như
   archctl, không xét build tag: file nào cũng tính, `import "C"` cũng là import.
 
+- Tên máy viết thẳng trong chuỗi (`scan --json`, mục `hosts`) của file Python
+  và Go: chuỗi và chỗ nó đứng theo `ast`, `tokenize`, `go/ast`, luật đổi thành
+  tên máy viết lại theo đặc tả — xem `code_hosts.py`. JS/TS chưa có thước đo.
+
 - Rust: `syn` (bản ghim cứng trong SYN_MANIFEST), dựng thành binary dưới
   `target/bench/syn-oracle/`. Phải tải crate từ crates.io, nên chỉ chạy khi
   `--require syn`; CI bật nó, máy dev mặc định BỎ QUA. Cây `use` được trải ra
@@ -75,6 +79,7 @@ ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 
 import bench  # noqa: E402
+import code_hosts  # noqa: E402
 
 EXAMPLES = 5
 # Quá tỉ lệ này số file không parse được thì nghi chính thước đo.
@@ -366,7 +371,7 @@ INCLUDE_SPEC = re.compile(r'#\s*include\s*([<"])([^>"\n]+)[>"]')
 
 def archctl_scan(archctl, root):
     try:
-        p = subprocess.run([archctl, "scan", "--json", "--root", str(root)],
+        p = subprocess.run([archctl, "scan", "--json", "--all-hosts", "--root", str(root)],
                            capture_output=True, text=True, timeout=900)
     except subprocess.TimeoutExpired:
         bench.die(f"archctl scan ở {root}: quá 900 giây")
@@ -1000,7 +1005,8 @@ class Tally:
             self.examples.append(msg)
 
     def line(self, repo):
-        unit = {"Binding": "đầu cạnh", "Hạ tầng": "dữ kiện", "Proto": "dữ kiện", "K8s": "dữ kiện"}.get(self.label, "import")
+        unit = {"Binding": "đầu cạnh", "Hạ tầng": "dữ kiện", "Proto": "dữ kiện", "K8s": "dữ kiện",
+                "Tên máy": "tên máy"}.get(self.label, "import")
         head = f"  {repo:22} {self.label:8} {self.files:5} file, {self.imports:6} {unit}"
         tail = f", {self.unparsed} không parse được" if self.unparsed else ""
         if self.in_macro:
@@ -1084,6 +1090,7 @@ def main():
 
     workdir = tempfile.TemporaryDirectory(prefix="archctl-oracle-")
     go_helper = build_go_helper(workdir.name) if have_go else None
+    hosts_helper = code_hosts.build_go_helper(workdir.name, bench.die) if have_go else None
     syn_helper = build_syn_helper(args.cache) if use_syn else None
     nb_python = build_ipython_helper(args.cache) if use_ipython else None
     dep_python = build_venv(args.cache, "deploy-oracle", DEPLOY_REQUIREMENTS, "hạ tầng") if use_deploy else None
@@ -1174,6 +1181,27 @@ def main():
                     continue
                 check_lines(go, file, want, got[file])
             tallies.append(go)
+
+        # Tên máy trong chuỗi: Python theo `ast`, Go theo `go/ast`.
+        def have_hosts(file):
+            found = by_file[file].get("hosts", {}).get("found", [])
+            return collections.Counter((line, f"{name}:{port}" if port else name) for line, name, port, _ in found)
+        hosts = Tally("Tên máy")
+        for file in by_lang["Python"]:
+            if file.endswith(PY_EXTS):
+                want = code_hosts.python_truth(root / file)
+                if want is None:
+                    hosts.unparsed += 1
+                elif want or have_hosts(file):
+                    check_lines(hosts, file, want, have_hosts(file))
+        if hosts_helper and by_lang["Go"]:
+            for file, want in code_hosts.go_truth(hosts_helper, root, by_lang["Go"], bench.die).items():
+                if want is None:
+                    hosts.unparsed += 1
+                elif want or have_hosts(file):
+                    check_lines(hosts, file, want, have_hosts(file))
+        if hosts.files:
+            tallies.append(hosts)
 
         if syn_helper and by_lang["Rust"]:
             rs = Tally("Rust")

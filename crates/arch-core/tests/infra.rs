@@ -637,3 +637,93 @@ fn cong_compose_la_loi_vao() {
         assert_eq!(!got.is_empty(), want, "{name}: {got:?}");
     }
 }
+
+/// Hai service compose; mã của Api gọi Db bằng chuỗi viết thẳng (TM-32, TM-33).
+fn code_hosts(name: &str, code: &str, rules: &str) -> Repo {
+    let r = Repo::new(name);
+    r.write("api/main.py", code)
+        .write("api/Dockerfile", "FROM python:3.12-slim\nWORKDIR /app\nCOPY . .\nCMD [\"python\", \"main.py\"]\n")
+        .write("tests/test_api.py", "URL = 'http://cache:6379'\n")
+        .write(
+            "docker-compose.yml",
+            "services:\n  api:\n    build: api\n  db:\n    image: postgres:16\n  cache:\n    image: redis:7\n",
+        )
+        .write(
+            ".arch/system.arch",
+            &format!("component Api at api/**\ncomponent Tests at tests/**\nservice Api from compose:api runs Api, Tests\nservice Db from compose:db\nservice Cache from compose:cache\n{rules}"),
+        );
+    r
+}
+
+#[test]
+fn ten_may_viet_trong_ma_doi_link() {
+    let code = "import os\nDSN = 'postgres://app:hunter2@db:5432/app'\n";
+    let r = code_hosts("ma-thieu-link", code, "");
+    let rep = r.report();
+    let got: Vec<String> = rep.violations.iter().map(|v| format!("{} -> {} {}:{} {}", v.from, v.to, v.file, v.line, v.spec)).collect();
+    // File test không chạy trong service nào: `cache` ở đó không phải cạnh.
+    assert_eq!(got, ["Api -> Db api/main.py:2 DSN → db:5432"]);
+    assert_eq!(rep.violations[0].reason, Reason::NotLinked);
+    // Mật khẩu trong chuỗi không ra ngoài, ở mọi trường.
+    assert!(!format!("{:?}", rep.violations).contains("hunter2"));
+    // Hook sửa đúng file mã đó cũng thấy, dù không file cấu hình nào đổi.
+    let hook = r.partial(&["api/main.py"]);
+    assert_eq!(hook.violations.len(), 1, "{:?}", hook.violations);
+    // Có `link` thì yên, và `link` đó không bị coi là "không thấy trong cấu hình".
+    let r = code_hosts("ma-co-link", code, "link Api -> Db\n");
+    let rep = r.report();
+    assert!(rep.violations.is_empty(), "{:?}", rep.violations);
+    assert!(rep.links_unseen.is_empty(), "{:?}", rep.links_unseen);
+}
+
+#[test]
+fn ten_may_trong_ma_toi_service_chua_khai() {
+    let r = Repo::new("ma-chua-khai");
+    r.write("api/main.py", "r = Redis(host='queue')\n")
+        .write("docker-compose.yml", "services:\n  api:\n    build: api\n  queue:\n    image: redis:7\n")
+        .write(".arch/system.arch", "component Api at api/**\nservice Api from compose:api runs Api\n");
+    let rep = r.report();
+    let got: Vec<String> = rep.violations.iter().map(|v| format!("{} -> {} {}", v.from, v.to, v.rule)).collect();
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(got[0].starts_with("Api -> compose:queue") && got[0].contains("chưa khai"), "{got:?}");
+}
+
+#[test]
+fn ten_may_trong_ma_khong_doan() {
+    // Chữ trùng tên service ở chỗ không phải máy, tên ghép lúc chạy, tên ngoài
+    // repo, chính mình: không cạnh nào.
+    let code = "name = 'db'\nif x == 'db': pass\nurl = f'http://{svc}:80'\nu = 'https://api.github.com'\nme = 'http://api:8000'\n";
+    let r = code_hosts("ma-khong-doan", code, "");
+    assert!(r.report().violations.is_empty(), "{:?}", r.report().violations);
+}
+
+#[test]
+fn ten_may_trong_ma_lach_bang_file_va_so_luong() {
+    // Một byte không phải UTF-8 không làm cả file bị bỏ qua.
+    let r = code_hosts("ma-latin1", "", "");
+    std::fs::write(r.0.join("api/main.py"), b"# -*- coding: latin-1 -*-\n# caf\xe9\nrequests.get('http://db:5432')\n").unwrap();
+    let got: Vec<String> = r.report().violations.iter().map(|v| format!("{} -> {} {}:{}", v.from, v.to, v.file, v.line)).collect();
+    assert_eq!(got, ["Api -> Db api/main.py:3"]);
+    // 1 000 chuỗi tới cùng một service là một vi phạm, đếm số chỗ.
+    let many: String = (0..1000).map(|i| format!("h{i} = 'db:5432'\n")).collect();
+    let r = code_hosts("ma-nhieu", &many, "");
+    let rep = r.report();
+    assert_eq!(rep.violations.len(), 1, "{:?}", rep.violations.len());
+    assert_eq!(rep.violations[0].count, 1000);
+    assert!(rep.violations[0].hint.contains("khỏi mã"), "{}", rep.violations[0].hint);
+    // Thư mục ví dụ vẫn được xét: mã chạy thật có thể import nó.
+    let r = code_hosts("ma-vi-du", "from examples.conn import URL\n", "");
+    r.write("api/examples/conn.py", "URL = 'http://db:5432'\n");
+    assert_eq!(r.report().violations.len(), 1, "{:?}", r.report().violations);
+}
+
+#[test]
+fn bien_moi_truong_login_van_la_may() {
+    // Từ chỉ bí mật thêm cho mã (`LOGIN`, `PIN`) không làm mất cạnh từ biến môi trường.
+    let r = Repo::new("env-login");
+    r.write("docker-compose.yml", "services:\n  api:\n    image: x\n    environment:\n      LOGIN_HOST: login\n      PIN_SERVICE_HOST: db\n  login:\n    image: y\n  db:\n    image: postgres:16\n")
+        .write(".arch/system.arch", "service Api from compose:api\nservice Login from compose:login\nservice Db from compose:db\n");
+    let mut got: Vec<String> = r.report().violations.iter().map(|v| format!("{} -> {}", v.from, v.to)).collect();
+    got.sort();
+    assert_eq!(got, ["Api -> Db", "Api -> Login"]);
+}

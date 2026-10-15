@@ -106,13 +106,16 @@ Lệnh chung:
                                           Cho thẳng đường dẫn thì nhanh nhất.
                                           --strict: mọi cảnh báo, kể cả
                                           của file luật, thành vi phạm.
-  archctl scan [--root <dir>] [--json] [--verbatim] [<file>...]
+  archctl scan [--root <dir>] [--json] [--verbatim] [--all-hosts] [<file>...]
                                           In import archctl đọc được, đích
                                           phân giải của từng cái, cạnh qua
                                           ranh giới ngôn ngữ, và service đọc
                                           từ docker-compose, Dockerfile.
                                           --verbatim: in cả đối số của lệnh
                                           và chỉ thị (có thể chứa secret).
+                                          --all-hosts: in mọi tên máy trong
+                                          chuỗi của mã, không chỉ tên service
+                                          (có thể chứa secret).
                                           Không cần .arch/.
   archctl diff [<git-ref>] [--root <dir>] So luật hiện tại với một bản trước
   archctl parse <file.arch>               Chỉ đọc và kiểm tra file luật
@@ -922,6 +925,7 @@ fn cmd_scan(args: &[String]) -> ExitCode {
 
     let mut as_json = false;
     let mut verbatim = false;
+    let mut all_hosts = false;
     let mut only: Vec<String> = Vec::new();
     let mut root_arg: Option<PathBuf> = None;
     let mut i = 0;
@@ -929,6 +933,7 @@ fn cmd_scan(args: &[String]) -> ExitCode {
         match args[i].as_str() {
             "--json" => as_json = true,
             "--verbatim" => verbatim = true,
+            "--all-hosts" => all_hosts = true,
             "--root" => match args.get(i + 1) {
                 Some(p) => {
                     root_arg = Some(PathBuf::from(p));
@@ -991,10 +996,23 @@ fn cmd_scan(args: &[String]) -> ExitCode {
         }
         list.iter().filter(|s| !matches!(proto_index.key(s), scan::grpc::Key::NotRpc)).cloned().collect()
     };
+    // Tên máy trong chuỗi chỉ in khi là tên một service của repo: chuỗi khác
+    // dạng `a:b` có thể là `user:mật khẩu` (TM-33). `--all-hosts` in mọi ứng
+    // viên, cho thước đo.
+    let known: Option<std::collections::HashSet<String>> = (!all_hosts).then(|| {
+        let all = arch_core::check::deploy_files(&root, &arch_core::read_ignores(&root));
+        scan::deploy::load(&root, &all, &scan::deploy::Options { k8s: true, names: true, ..Default::default() }).names
+    });
+    let shown_host = |h: &scan::hosts::CodeHost| {
+        known.as_ref().is_none_or(|k| k.contains(&h.host.name) || h.host.name.split('.').next().is_some_and(|f| k.contains(f)))
+    };
     let mut json_files: Vec<String> = Vec::new();
     for file in &files {
         let Some(lang) = Lang::for_path(file) else { continue };
-        let src = match std::fs::read_to_string(root.join(file)) {
+        // Như `check`: file không phải UTF-8 vẫn đọc, byte lạ được thay thế.
+        let read = std::fs::read(root.join(file))
+            .map(|b| String::from_utf8(b).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()));
+        let src = match read {
             Ok(src) if src.len() as u64 <= arch_core::check::MAX_FILE_BYTES => src,
             Ok(_) => {
                 json_files.push(format!(
@@ -1014,7 +1032,7 @@ fn cmd_scan(args: &[String]) -> ExitCode {
                     json::string(lang.name())
                 ));
                 if !as_json {
-                    say!("{file} ({}): bỏ qua, không đọc được dạng UTF-8", lang.name());
+                    say!("{file} ({}): bỏ qua, không đọc được", lang.name());
                 }
                 continue;
             }
@@ -1081,6 +1099,11 @@ fn cmd_scan(args: &[String]) -> ExitCode {
             for c in &rpc_impls {
                 say!("  {:>5}  {}  → cài đặt server gRPC {}{}", c.line, c.shown, c.service, origin_text(&c.origin));
             }
+            // Tên máy trong chuỗi: chỉ tên và cổng, không bao giờ chuỗi gốc (TM-33).
+            let skipped = if scan::hosts::skipped_path(file) { " (file test, ví dụ: không xét)" } else { "" };
+            for h in scanned.hosts.hosts.iter().filter(|h| shown_host(h)) {
+                say!("  {:>5}  {}  → tên máy trong mã{skipped}", h.line, h.shown());
+            }
         }
         if as_json {
             let crossings = |list: &[scan::foreign::Crossing]| {
@@ -1122,7 +1145,7 @@ fn cmd_scan(args: &[String]) -> ExitCode {
                     .join(",")
             };
             json_files.push(format!(
-                r#"{{"file":{},"lang":{},"imports":[{}],"crossings":{{"calls":[{}],"provides":[{}]}},"rpc":{{"calls":[{}],"serves":[{}],"implements":[{}]}}}}"#,
+                r#"{{"file":{},"lang":{},"imports":[{}],"crossings":{{"calls":[{}],"provides":[{}]}},"rpc":{{"calls":[{}],"serves":[{}],"implements":[{}]}},"hosts":{{"skipped":{},"cut":{},"found":[{}]}}}}"#,
                 json::string(file),
                 json::string(lang.name()),
                 items.join(","),
@@ -1130,7 +1153,23 @@ fn cmd_scan(args: &[String]) -> ExitCode {
                 crossings(&foreign.provides),
                 sites(&rpc_calls),
                 sites(&rpc_serves),
-                sites(&rpc_impls)
+                sites(&rpc_impls),
+                scan::hosts::skipped_path(file),
+                scanned.hosts.cut,
+                scanned
+                    .hosts
+                    .hosts
+                    .iter()
+                    .filter(|h| shown_host(h))
+                    .map(|h| format!(
+                        "[{},{},{},{}]",
+                        h.line,
+                        json::string(&h.host.name),
+                        h.host.port.as_deref().map_or_else(|| "null".to_string(), json::string),
+                        h.key.as_deref().map_or_else(|| "null".to_string(), json::string)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(",")
             ));
         }
     }
@@ -1396,7 +1435,7 @@ fn scan_deploy(
         }
     }
 
-    let loaded = deploy::load(root, files, &deploy::Options { k8s: true, pins: Vec::new() });
+    let loaded = deploy::load(root, files, &deploy::Options { k8s: true, ..Default::default() });
     let mut services: Vec<String> = Vec::new();
     for svc in &loaded.services {
         let key = svc.key.text();

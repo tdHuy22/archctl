@@ -44,7 +44,7 @@ kiến trúc c8bd3bd9 · 15 file quét (5 Rust, 4 C/C++, 4 Python, 2 Go) · 7/8 
 | `boundary ... contain` — lỗi không được lọt ra ngoài vùng | dò định danh ngoài vùng |
 | `flow`, `contract`, `invariant state` | mọi tên khai báo phải tồn tại trong mã |
 | `verify ... runs "..."` | lệnh phải chạy xong và đạt, trên đúng bản mã này |
-| `service ... runs`, `link` — triển khai và mạng | đọc docker-compose, Dockerfile và manifest Kubernetes: lệnh khởi chạy dẫn tới mã nào, `depends_on`, tên service hay Service Kubernetes trong biến môi trường |
+| `service ... runs`, `link` — triển khai và mạng | đọc docker-compose, Dockerfile và manifest Kubernetes: lệnh khởi chạy dẫn tới mã nào, `depends_on`, tên service hay Service Kubernetes trong biến môi trường hay viết thẳng trong mã (`"http://payment:80"`, `host="redis"`) |
 | cạnh gRPC (`allow`, và `link` khi đã khai service) | chỗ gọi stub (`XStub`, `NewXClient`) ghép với chỗ đăng ký server theo `package.Service` của `.proto`; Python và Go |
 | trạng thái `#draft`…`#locked` | quyết định luật nào đang có hiệu lực |
 
@@ -170,10 +170,11 @@ https://claude.ai/code/artifact/2b26df5d-d6b0-40d0-a398-7e574c7d1387
 - **Tầng hạ tầng mới đọc docker-compose, Dockerfile, manifest Kubernetes, và
   gRPC của Python, Go, Node, Rust; NetworkPolicy được đối chiếu với `link`;
   lối vào từ Internet (Ingress, Gateway API, Istio, `LoadBalancer`, cổng
-  compose) cần `link Internet -> …`.**
+  compose) cần `link Internet -> …`; tên máy viết thẳng trong mã cũng cần
+  `link`.**
   Helm, patch Kustomize, Terraform và gRPC của Java, C# thì chưa (template Helm và patch đổi lệnh
-  được báo là chưa đọc); cạnh mạng chỉ có lúc chạy (URL ghép trong mã, service
-  discovery) thì không thấy — xem [docs/infra.md](docs/infra.md).
+  được báo là chưa đọc); cạnh mạng chỉ có lúc chạy (tên máy ghép trong mã,
+  service discovery) thì không thấy — xem [docs/infra.md](docs/infra.md).
 - **File trên 4 MB không được dò**, và được báo ra. Bộ dò giữ cả dãy token
   trong bộ nhớ, nên một bundle đã minify 32 MB ngốn hơn một gigabyte.
 - **Thứ tự bước trong `flow` chưa kiểm.** Bộ quét không phân biệt được lời gọi
