@@ -9,7 +9,7 @@ Cập nhật 2026-10-14.
 
 ### Đã xong, có bằng chứng
 
-- **Cạnh mạng viết trong mã, đợt 4 việc 8.1** (2026-10-15, chưa commit; bạn chốt "làm
+- **Cạnh mạng viết trong mã, đợt 4 việc 8.1** (2026-10-15, commit `d2ecab8`; bạn chốt "làm
   theo đề xuất, miễn hiệu quả", trang https://claude.ai/artifact/EjLmvkEkkAFPDkyNyTnTwW).
   `scan/hosts.rs` đọc tên máy trong chuỗi của mã Python, JS/TS, Go, Rust, C/C++ theo
   luật tên máy của biến môi trường, với khoá là chỗ chuỗi đứng; tên khớp service của
@@ -402,9 +402,11 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-1. Việc 8.1 (cạnh mạng từ mã) xong, chưa commit: chờ bạn cho commit.
-2. Chưa push `c5ae95d`, `781b0e9`, `bc82d75` lên GitHub; nên qua nhánh thử, CI
-   xanh rồi mới lên `main`.
+1. `c5ae95d`..`82b069a` đã lên `main` (2026-10-15) sau CI xanh 5/5 trên `thu/dot4`
+   (run 38760676354); `82b069a` nâng trần job "repo thật" lên 40 phút vì run trước
+   bị huỷ ở bước đối chiếu. Nhánh thử đã xoá.
+2. Mốc đợt 4 xong. Hướng tiếp theo chờ bạn chốt (cách B của trang D: mã đọc biến
+   môi trường; gRPC Java, C#; Helm).
 
 **Đã quyết (2026-10-11): cạnh binding Python ↔ native tự viết.** Đã tìm theo
 skill reuse-best. Không công cụ tĩnh nào phủ cả PyO3, pybind11, nanobind
@@ -640,4 +642,4 @@ không có `link` là vi phạm, có `link` mà cụm chặn là cảnh báo (`-
   trong mã, thiếu `link` là vi phạm)
 - [x] Cạnh mạng từ mã: chuỗi tên máy (URL, `máy:cổng`, `host=`) trong mã → `link`;
   bộ đo (voting app), oracle, sabotage; tài liệu.
-- [ ] Đẩy `c5ae95d`, `781b0e9`, `bc82d75` qua nhánh thử, CI xanh rồi lên `main` @ban
+- [x] Đẩy `c5ae95d`, `781b0e9`, `bc82d75` qua nhánh thử, CI xanh rồi lên `main` @ban
