@@ -10,6 +10,7 @@
 use super::command::{self, Launch};
 use super::compose;
 use super::dockerfile::{self, Command, Dockerfile, join_container};
+use super::helm;
 use super::k8s;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -57,13 +58,38 @@ const MAX_K8S_STEPS: usize = 500_000;
 const MAX_K8S_EDGES: usize = 20_000;
 
 fn facts(s: &compose::Service) -> usize {
-    s.env.len() + s.env_files.len() + s.depends_on.len() + s.links.len() + s.binds.len() + s.aliases.len() + s.ports.len()
+    s.env.len()
+        + s.env_files.len()
+        + s.depends_on.len()
+        + s.links.len()
+        + s.binds.len()
+        + s.aliases.len()
+        + s.ports.len()
 }
 
 /// Thư mục mà file compose trong đó không phải là triển khai của sản phẩm.
 pub const ASIDE: &[&str] = &[
-    "test", "tests", "testing", "selftest", "selftests", "spec", "specs", "__tests__", "e2e", "example", "examples",
-    "bench", "benches", "doc", "docs", "deps", "vendor", "third_party", "thirdparty", "fixtures", "testdata",
+    "test",
+    "tests",
+    "testing",
+    "selftest",
+    "selftests",
+    "spec",
+    "specs",
+    "__tests__",
+    "e2e",
+    "example",
+    "examples",
+    "bench",
+    "benches",
+    "doc",
+    "docs",
+    "deps",
+    "vendor",
+    "third_party",
+    "thirdparty",
+    "fixtures",
+    "testdata",
     "node_modules",
 ];
 
@@ -73,8 +99,13 @@ pub fn is_compose(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     let stem = lower.strip_prefix("docker-").unwrap_or(&lower);
     let compose = (lower.ends_with(".yml") || lower.ends_with(".yaml"))
-        && stem.strip_prefix("compose").is_some_and(|r| r.starts_with(['.', '-', '_']));
-    compose && !stem.split(['.', '-', '_']).any(|part| matches!(part, "test" | "tests" | "e2e" | "ci"))
+        && stem
+            .strip_prefix("compose")
+            .is_some_and(|r| r.starts_with(['.', '-', '_']));
+    compose
+        && !stem
+            .split(['.', '-', '_'])
+            .any(|part| matches!(part, "test" | "tests" | "e2e" | "ci"))
 }
 
 pub fn is_dockerfile(name: &str) -> bool {
@@ -90,15 +121,23 @@ pub fn is_dockerfile(name: &str) -> bool {
 /// compose trong đó là môi trường dev hay CI, không phải triển khai.
 fn aside(path: &str) -> bool {
     let dirs = path.rsplit_once('/').map_or("", |(d, _)| d);
-    dirs.split('/').any(|d| ASIDE.contains(&d) || d.starts_with('.'))
+    dirs.split('/')
+        .any(|d| ASIDE.contains(&d) || d.starts_with('.'))
 }
 
 /// File cấu hình triển khai của sản phẩm, không nằm trong thư mục test, ví dụ:
 /// compose, Dockerfile, và mọi file YAML (manifest Kubernetes, `skaffold.yaml`,
-/// `kustomization.yaml`, `Chart.yaml`), vì manifest đặt tên tuỳ ý.
+/// `kustomization.yaml`, `Chart.yaml`), vì manifest đặt tên tuỳ ý; và file
+/// `.tpl` của chart Helm (`templates/_helpers.tpl`).
 pub fn is_deploy_file(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
-    (is_compose(name) || is_dockerfile(name) || is_manifest_file(name) || k8s::is_kustomization(name)) && !aside(path)
+    let tpl = name.ends_with(".tpl") && path.contains("templates/");
+    (is_compose(name)
+        || is_dockerfile(name)
+        || is_manifest_file(name)
+        || k8s::is_kustomization(name)
+        || tpl)
+        && !aside(path)
 }
 
 /// Một service lấy từ cấu hình.
@@ -115,7 +154,13 @@ pub enum Key {
 impl Key {
     /// `compose:api`, `compose:deploy/api`, `k8s:deploy/api`, `dockerfile:x`.
     pub fn text(&self) -> String {
-        let scoped = |dir: &str| if dir.is_empty() { String::new() } else { format!("{dir}/") };
+        let scoped = |dir: &str| {
+            if dir.is_empty() {
+                String::new()
+            } else {
+                format!("{dir}/")
+            }
+        };
         match self {
             Key::Compose { dir, name } => format!("compose:{}{name}", scoped(dir)),
             Key::K8s { dir, name } => format!("k8s:{}{name}", scoped(dir)),
@@ -136,6 +181,9 @@ pub struct Deploy {
     /// Mọi tên gọi được (viết thường): tên service compose và alias, tên
     /// Service Kubernetes. Chỉ khi [`Options::names`].
     pub names: HashSet<String>,
+    /// Manifest dựng từ chart Helm `(thư mục chart, file)`, khi
+    /// [`Options::keep_rendered`].
+    pub rendered: Vec<(String, helm::Rendered)>,
 }
 
 /// Điều chỉnh một lần nạp.
@@ -150,6 +198,10 @@ pub struct Options {
     pub hosts: Vec<String>,
     /// Ghi mọi tên gọi được của service vào [`Deploy::names`].
     pub names: bool,
+    /// File values khai thêm trong luật cho chart ở thư mục: `(thư mục, file)`.
+    pub helm_values: Vec<(String, String)>,
+    /// Giữ manifest dựng từ chart trong [`Deploy::rendered`], cho `scan`.
+    pub keep_rendered: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,7 +269,12 @@ pub enum Grant {
     /// Không kết luận được: namespace chọn theo nhãn mà repo không cho biết.
     Unknown,
     /// Workload cụ thể mà một luật cho phép, kèm policy và dòng của luật.
-    Pods { keys: Rc<Vec<Key>>, policy: String, file: String, line: usize },
+    Pods {
+        keys: Rc<Vec<Key>>,
+        policy: String,
+        file: String,
+        line: usize,
+    },
 }
 
 impl Guard {
@@ -269,7 +326,11 @@ pub enum Entry {
     /// Module Python: tìm trong `roots` (thư mục trong repo, theo thứ tự),
     /// rồi theo các gói của dự án. `main`: chạy bằng `-m`, gói thì qua
     /// `__main__.py`.
-    Module { name: String, roots: Vec<String>, main: bool },
+    Module {
+        name: String,
+        roots: Vec<String>,
+        main: bool,
+    },
     /// Package Go (thư mục) trong repo.
     Dir(String),
 }
@@ -277,7 +338,8 @@ pub enum Entry {
 /// Nối `path` (do file người khác viết) vào thư mục `base` của repo. `None`
 /// nếu tuyệt đối, là URL, hay đi ra ngoài gốc dự án.
 pub fn within(base: &str, path: &str) -> Option<String> {
-    if path.starts_with('/') || path.starts_with('~') || path.contains('\\') || path.contains("://") {
+    if path.starts_with('/') || path.starts_with('~') || path.contains('\\') || path.contains("://")
+    {
         return None;
     }
     let mut parts: Vec<&str> = base.split('/').filter(|s| !s.is_empty()).collect();
@@ -331,11 +393,23 @@ fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
         // Hằng số khác nhau theo hệ điều hành và cả kiến trúc (`O_NOFOLLOW` của
         // Linux ARM là `O_LARGEFILE` của x86). Chỉ đặt ở chỗ biết chắc; chỗ
         // khác vẫn có phép so `(dev, ino)` trong [`read_in`].
-        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        ))]
         const FLAGS: i32 = 0x0100 /* O_NOFOLLOW */ | 0x0004 /* O_NONBLOCK */;
-        #[cfg(all(any(target_os = "linux", target_os = "android"), any(target_arch = "x86", target_arch = "x86_64")))]
+        #[cfg(all(
+            any(target_os = "linux", target_os = "android"),
+            any(target_arch = "x86", target_arch = "x86_64")
+        ))]
         const FLAGS: i32 = 0o400000 /* O_NOFOLLOW */ | 0o4000 /* O_NONBLOCK */;
-        #[cfg(all(any(target_os = "linux", target_os = "android"), any(target_arch = "arm", target_arch = "aarch64")))]
+        #[cfg(all(
+            any(target_os = "linux", target_os = "android"),
+            any(target_arch = "arm", target_arch = "aarch64")
+        ))]
         const FLAGS: i32 = 0o100000 /* O_NOFOLLOW */ | 0o4000 /* O_NONBLOCK */;
         #[cfg(not(any(
             target_os = "macos",
@@ -345,7 +419,12 @@ fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
             target_os = "netbsd",
             all(
                 any(target_os = "linux", target_os = "android"),
-                any(target_arch = "x86", target_arch = "x86_64", target_arch = "arm", target_arch = "aarch64")
+                any(
+                    target_arch = "x86",
+                    target_arch = "x86_64",
+                    target_arch = "arm",
+                    target_arch = "aarch64"
+                )
             )
         )))]
         const FLAGS: i32 = 0;
@@ -375,7 +454,10 @@ pub fn read_head(root: &Path, rel: &str, max: u64) -> Result<(String, bool), Str
         }
         None => return Err("không có".into()),
     }
-    let checked = root.join(rel).symlink_metadata().map_err(|e| e.to_string())?;
+    let checked = root
+        .join(rel)
+        .symlink_metadata()
+        .map_err(|e| e.to_string())?;
     let file = open_plain(&root.join(rel)).map_err(|e| e.to_string())?;
     // Kiểm lại trên chính file đã mở: giữa lúc kiểm đường dẫn và lúc mở, một
     // tiến trình khác có thể tráo vào FIFO, thiết bị, hay symlink ra ngoài
@@ -385,7 +467,9 @@ pub fn read_head(root: &Path, rel: &str, max: u64) -> Result<(String, bool), Str
         return Err("không phải file thường".into());
     }
     let mut bytes = Vec::new();
-    file.take(max + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    file.take(max + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
     let more = bytes.len() as u64 > max;
     if more {
         bytes.truncate(max as usize);
@@ -506,7 +590,10 @@ impl<'a> Shared<'a> {
             return r.clone();
         }
         let r = if self.read.get() == 0 {
-            Err(format!("quá {} MB file cấu hình cho cả repo", MAX_LOAD_READ >> 20))
+            Err(format!(
+                "quá {} MB file cấu hình cho cả repo",
+                MAX_LOAD_READ >> 20
+            ))
         } else {
             read_in(self.root, rel, MAX_DEPLOY_BYTES).map(|t| {
                 Shared::spend(&self.read, t.len());
@@ -521,8 +608,12 @@ impl<'a> Shared<'a> {
         if let Some(r) = self.dockerfiles.borrow().get(rel) {
             return r.clone();
         }
-        let r = self.read(rel).and_then(|text| Built::new(dockerfile::parse(&text)).map(Rc::new));
-        self.dockerfiles.borrow_mut().insert(rel.to_string(), r.clone());
+        let r = self
+            .read(rel)
+            .and_then(|text| Built::new(dockerfile::parse(&text)).map(Rc::new));
+        self.dockerfiles
+            .borrow_mut()
+            .insert(rel.to_string(), r.clone());
         r
     }
 
@@ -549,7 +640,9 @@ impl<'a> Shared<'a> {
                 if l.starts_with('#') {
                     continue;
                 }
-                let Some((k, v)) = l.split_once('=') else { continue };
+                let Some((k, v)) = l.split_once('=') else {
+                    continue;
+                };
                 let v = v.trim().trim_matches(['"', '\'']);
                 let (hosts, cut) = compose::hosts_scan(k.trim(), v);
                 if !hosts.is_empty() || cut {
@@ -558,7 +651,9 @@ impl<'a> Shared<'a> {
             }
             Rc::new(out)
         });
-        self.env_files.borrow_mut().insert(rel.to_string(), r.clone());
+        self.env_files
+            .borrow_mut()
+            .insert(rel.to_string(), r.clone());
         r
     }
 
@@ -567,8 +662,14 @@ impl<'a> Shared<'a> {
         if let Some(j) = self.packages.borrow().get(rel) {
             return j.clone();
         }
-        let j = self.read(rel).ok().and_then(|t| crate::jsonc::parse(&t)).map(Rc::new);
-        self.packages.borrow_mut().insert(rel.to_string(), j.clone());
+        let j = self
+            .read(rel)
+            .ok()
+            .and_then(|t| crate::jsonc::parse(&t))
+            .map(Rc::new);
+        self.packages
+            .borrow_mut()
+            .insert(rel.to_string(), j.clone());
         j
     }
 
@@ -601,7 +702,12 @@ impl Built {
         if df.stages.len() > MAX_STAGES {
             return Err(format!("quá {MAX_STAGES} stage"));
         }
-        Ok(Built { df, effective: RefCell::default(), mounts: RefCell::default(), builds: OnceCell::new() })
+        Ok(Built {
+            df,
+            effective: RefCell::default(),
+            mounts: RefCell::default(),
+            builds: OnceCell::new(),
+        })
     }
 
     fn effective(&self, stage: usize) -> Rc<dockerfile::Effective> {
@@ -618,7 +724,9 @@ impl Built {
             return m.clone();
         }
         let m = Rc::new(stage_mounts(root, context, self));
-        self.mounts.borrow_mut().insert(context.to_string(), m.clone());
+        self.mounts
+            .borrow_mut()
+            .insert(context.to_string(), m.clone());
         m
     }
 
@@ -629,8 +737,15 @@ impl Built {
             for (i, stage) in self.df.stages.iter().enumerate() {
                 for run in &stage.runs {
                     for b in go_builds(&run.text) {
-                        let pkgs = if b.1.is_empty() { vec![".".to_string()] } else { b.1 };
-                        let pkgs = pkgs.into_iter().map(|p| join_container(&run.workdir, &p)).collect();
+                        let pkgs = if b.1.is_empty() {
+                            vec![".".to_string()]
+                        } else {
+                            b.1
+                        };
+                        let pkgs = pkgs
+                            .into_iter()
+                            .map(|p| join_container(&run.workdir, &p))
+                            .collect();
                         builds.push((b.0, pkgs, i));
                     }
                 }
@@ -658,14 +773,23 @@ pub fn load(root: &Path, files: &[String], opts: &Options) -> Deploy {
     for f in files {
         let name = f.rsplit('/').next().unwrap_or(f);
         if is_compose(name) && !aside(f) {
-            projects.entry(dir_of(f).to_string()).or_default().push(f.clone());
+            projects
+                .entry(dir_of(f).to_string())
+                .or_default()
+                .push(f.clone());
         }
     }
     for (dir, mut paths) in projects {
         // File gốc trước, file override sau.
         paths.sort_by_key(|p| {
             let n = p.rsplit('/').next().unwrap_or(p).to_ascii_lowercase();
-            (!matches!(n.as_str(), "compose.yaml" | "compose.yml" | "docker-compose.yaml" | "docker-compose.yml"), p.clone())
+            (
+                !matches!(
+                    n.as_str(),
+                    "compose.yaml" | "compose.yml" | "docker-compose.yaml" | "docker-compose.yml"
+                ),
+                p.clone(),
+            )
         });
         let mut records: Vec<Record> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
@@ -680,7 +804,10 @@ pub fn load(root: &Path, files: &[String], opts: &Options) -> Deploy {
             let names = compose_names(&records);
             for h in &opts.hosts {
                 if let Some(&name) = names.get(h) {
-                    out.hosts.entry(h.clone()).or_default().push(Key::Compose { dir: dir.clone(), name: name.to_string() });
+                    out.hosts.entry(h.clone()).or_default().push(Key::Compose {
+                        dir: dir.clone(),
+                        name: name.to_string(),
+                    });
                 }
             }
         }
@@ -692,7 +819,8 @@ pub fn load(root: &Path, files: &[String], opts: &Options) -> Deploy {
     }
     // Cùng một file hỏng được nhắc từ nhiều service: báo một lần.
     let mut seen: HashSet<(String, String)> = HashSet::new();
-    out.unread.retain(|u| seen.insert((u.file.clone(), u.why.clone())));
+    out.unread
+        .retain(|u| seen.insert((u.file.clone(), u.why.clone())));
     out
 }
 
@@ -710,14 +838,20 @@ fn read_compose(
     let text = match shared.read(path) {
         Ok(t) => t,
         Err(why) => {
-            unread.push(Unread { file: path.to_string(), why });
+            unread.push(Unread {
+                file: path.to_string(),
+                why,
+            });
             return;
         }
     };
     let file = match compose::parse(&text) {
         Ok(f) => f,
         Err(e) => {
-            unread.push(Unread { file: path.to_string(), why: format!("YAML {e}") });
+            unread.push(Unread {
+                file: path.to_string(),
+                why: format!("YAML {e}"),
+            });
             return;
         }
     };
@@ -736,12 +870,19 @@ fn read_compose(
     if !Shared::spend(&shared.bytes, size) || !Shared::spend(&shared.facts, count) {
         unread.push(Unread {
             file: path.to_string(),
-            why: format!("quá {} MB hay {MAX_PROJECT_FACTS} mục cấu hình cho cả repo", MAX_LOAD_BYTES >> 20),
+            why: format!(
+                "quá {} MB hay {MAX_PROJECT_FACTS} mục cấu hình cho cả repo",
+                MAX_LOAD_BYTES >> 20
+            ),
         });
         return;
     }
     for s in file.services {
-        records.push(Record { file: path.to_string(), base: base.clone(), s });
+        records.push(Record {
+            file: path.to_string(),
+            base: base.clone(),
+            s,
+        });
     }
 }
 
@@ -765,7 +906,9 @@ fn resolve_extends(shared: &Shared<'_>, records: &mut [Record], unread: &mut Vec
         let mut guard: HashSet<(String, String)> = HashSet::new();
         while let Some(ext) = records[i].s.extends.take() {
             hops += 1;
-            if hops > MAX_HOPS || !guard.insert((ext.file.clone().unwrap_or_default(), ext.service.clone())) {
+            if hops > MAX_HOPS
+                || !guard.insert((ext.file.clone().unwrap_or_default(), ext.service.clone()))
+            {
                 break;
             }
             let base = match &ext.file {
@@ -782,7 +925,10 @@ fn resolve_extends(shared: &Shared<'_>, records: &mut [Record], unread: &mut Vec
                         break;
                     };
                     let parsed = files.entry(p.clone()).or_insert_with(|| {
-                        shared.read(&p).and_then(|t| compose::parse(&t).map_err(|e| format!("YAML {e}"))).map(|f| f.services)
+                        shared
+                            .read(&p)
+                            .and_then(|t| compose::parse(&t).map_err(|e| format!("YAML {e}")))
+                            .map(|f| f.services)
                     });
                     match parsed {
                         Ok(services) => services.iter().find(|s| s.name == ext.service).cloned(),
@@ -798,7 +944,9 @@ fn resolve_extends(shared: &Shared<'_>, records: &mut [Record], unread: &mut Vec
             };
             let Some(base) = base else { break };
             // Con nhận một bản sao của gốc: tính vào trần chung (TM-8).
-            if !Shared::spend(&shared.facts, facts(&base)) || !Shared::spend(&shared.bytes, base.size()) {
+            if !Shared::spend(&shared.facts, facts(&base))
+                || !Shared::spend(&shared.bytes, base.size())
+            {
                 unread.push(Unread {
                     file: records[i].file.clone(),
                     why: format!(
@@ -848,7 +996,10 @@ fn project(shared: &Shared<'_>, dir: &str, records: &[Record], out: &mut Deploy)
         let mine = &groups[name];
         let first = mine[0];
         let mut svc = Svc {
-            key: Key::Compose { dir: dir.to_string(), name: name.to_string() },
+            key: Key::Compose {
+                dir: dir.to_string(),
+                name: name.to_string(),
+            },
             file: first.file.clone(),
             line: first.s.line,
             image: mine.iter().find_map(|r| r.s.image.clone()),
@@ -856,7 +1007,9 @@ fn project(shared: &Shared<'_>, dir: &str, records: &[Record], out: &mut Deploy)
             // vẫn là mã của người khác; mount kèm lệnh khởi chạy riêng mới là
             // chạy mã của repo.
             code: mine.iter().any(|r| {
-                r.s.build.is_some() || (!r.s.binds.is_empty() && (r.s.command.is_some() || r.s.entrypoint.is_some()))
+                r.s.build.is_some()
+                    || (!r.s.binds.is_empty()
+                        && (r.s.command.is_some() || r.s.entrypoint.is_some()))
             }),
             edges: Vec::new(),
             starts: Vec::new(),
@@ -875,7 +1028,10 @@ fn project(shared: &Shared<'_>, dir: &str, records: &[Record], out: &mut Deploy)
             {
                 svc.edges.push(Edge {
                     to: target.to_string(),
-                    target: Key::Compose { dir: dir.to_string(), name: target.to_string() },
+                    target: Key::Compose {
+                        dir: dir.to_string(),
+                        name: target.to_string(),
+                    },
                     file: file.to_string(),
                     line,
                     shown,
@@ -891,7 +1047,12 @@ fn project(shared: &Shared<'_>, dir: &str, records: &[Record], out: &mut Deploy)
             }
             for e in &r.s.env {
                 for h in &e.hosts {
-                    push_edge(&h.name, &r.file, e.line, format!("{} → {}", e.key, h.shown()));
+                    push_edge(
+                        &h.name,
+                        &r.file,
+                        e.line,
+                        format!("{} → {}", e.key, h.shown()),
+                    );
                 }
                 if e.cut {
                     out.unread.push(cut_value(&r.file, e.line, &e.key));
@@ -938,11 +1099,16 @@ fn project(shared: &Shared<'_>, dir: &str, records: &[Record], out: &mut Deploy)
         }
         for r in mine {
             // Cổng publish ra mọi giao diện mạng của máy: lộ ra ngoài.
-            svc.exposed.extend(r.s.ports.iter().filter(|p| !p.local).map(|p| Exposure {
-                file: r.file.clone(),
-                line: p.line,
-                shown: if p.shown.starts_with("network_mode") { p.shown.clone() } else { format!("ports: {}", p.shown) },
-            }));
+            svc.exposed
+                .extend(r.s.ports.iter().filter(|p| !p.local).map(|p| Exposure {
+                    file: r.file.clone(),
+                    line: p.line,
+                    shown: if p.shown.starts_with("network_mode") {
+                        p.shown.clone()
+                    } else {
+                        format!("ports: {}", p.shown)
+                    },
+                }));
             starts(shared, r, &mut svc, &mut out.unread);
         }
         if svc.code && svc.starts.iter().all(|s| s.entries.is_empty()) && svc.unknown.is_none() {
@@ -969,7 +1135,10 @@ fn cut_value(file: &str, line: usize, key: &str) -> Unread {
 /// mục chứa nó.
 pub fn load_dockerfile(root: &Path, path: &str) -> Result<Svc, Unread> {
     let shared = Shared::new(root);
-    let built = shared.dockerfile(path).map_err(|why| Unread { file: path.to_string(), why })?;
+    let built = shared.dockerfile(path).map_err(|why| Unread {
+        file: path.to_string(),
+        why,
+    })?;
     let mut svc = Svc {
         key: Key::Dockerfile(path.to_string()),
         file: path.to_string(),
@@ -990,15 +1159,36 @@ pub fn load_dockerfile(root: &Path, path: &str) -> Result<Svc, Unread> {
         return Ok(svc);
     };
     let eff = built.effective(target);
-    let ctx = Ctx::new(&shared, dir_of(path), Some(&built), Some(target), &eff, None, &[], &[]);
-    let argv: Vec<String> = eff.entrypoint.iter().chain(&eff.cmd).flat_map(|(c, _)| c.argv()).collect();
-    let line = eff.cmd.as_ref().or(eff.entrypoint.as_ref()).map_or(1, |(_, l)| *l);
+    let ctx = Ctx::new(
+        &shared,
+        dir_of(path),
+        Some(&built),
+        Some(target),
+        &eff,
+        None,
+        &[],
+        &[],
+    );
+    let argv: Vec<String> = eff
+        .entrypoint
+        .iter()
+        .chain(&eff.cmd)
+        .flat_map(|(c, _)| c.argv())
+        .collect();
+    let line = eff
+        .cmd
+        .as_ref()
+        .or(eff.entrypoint.as_ref())
+        .map_or(1, |(_, l)| *l);
     svc.starts.push(ctx.start(&argv, path, line));
     if svc.starts.iter().all(|s| s.entries.is_empty()) {
         svc.unknown = Some(if argv.is_empty() {
             "Dockerfile không có CMD hay ENTRYPOINT".into()
         } else {
-            format!("không tìm thấy trong repo mã mà `{}` nạp", svc.starts[0].shown)
+            format!(
+                "không tìm thấy trong repo mã mà `{}` nạp",
+                svc.starts[0].shown
+            )
         });
     }
     Ok(svc)
@@ -1080,7 +1270,13 @@ struct Kust {
 }
 
 /// Nạp manifest Kubernetes: workload thành [`Svc`] với khoá [`Key::K8s`].
-fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_builds: &[BuildRef], out: &mut Deploy) {
+fn load_k8s(
+    shared: &Shared<'_>,
+    files: &[String],
+    opts: &Options,
+    compose_builds: &[BuildRef],
+    out: &mut Deploy,
+) {
     let mut charts: Vec<String> = Vec::new();
     let mut skaffolds: Vec<&String> = Vec::new();
     let mut kusts: Vec<&String> = Vec::new();
@@ -1101,24 +1297,94 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
         }
     }
     charts.sort();
-    // Template Helm không phải YAML cho tới khi render: không đọc (bạn chốt
-    // "không render Helm"), và `scan` in thư mục chart ra.
+    // Template Helm không phải YAML cho tới khi dựng: bộ đọc manifest bỏ qua
+    // chúng, còn [`helm::render`] dựng từng chart gốc (chart con nằm trong
+    // `charts/` của chart cha được dựng cùng nó).
     let in_chart = |f: &str| {
         charts.iter().any(|c| {
-            let p = if c.is_empty() { String::new() } else { format!("{c}/") };
+            let p = if c.is_empty() {
+                String::new()
+            } else {
+                format!("{c}/")
+            };
             f.starts_with(&format!("{p}templates/")) || f.starts_with(&format!("{p}charts/"))
         })
     };
     out.charts = charts.clone();
+    let mut rendered: Vec<(String, helm::Rendered)> = Vec::new();
+    let read = |p: &str| -> Result<String, String> {
+        let text = read_in(shared.root, p, MAX_DEPLOY_BYTES)?;
+        if !Shared::spend(&shared.k8s_read, text.len()) {
+            return Err(format!("quá {} MB YAML cho cả repo", MAX_K8S_READ >> 20));
+        }
+        Ok(text)
+    };
+    let sub_of = |d: &str, o: &str| {
+        d != o
+            && d.starts_with(&if o.is_empty() {
+                "charts/".to_string()
+            } else {
+                format!("{o}/charts/")
+            })
+    };
+    let tops: Vec<&String> = charts
+        .iter()
+        .filter(|d| !charts.iter().any(|o| sub_of(d, o)))
+        .collect();
+    // `values:` của service mà nguồn `k8s:` không nêu thư mục chỉ rõ chart khi
+    // repo có đúng một chart; nhiều chart thì báo, không áp bừa cho mọi chart.
+    if tops.len() > 1 {
+        let mut loose: Vec<&String> = opts
+            .helm_values
+            .iter()
+            .filter(|(d, _)| d == "*")
+            .map(|(_, f)| f)
+            .collect();
+        loose.dedup();
+        for f in loose {
+            out.unread.push(Unread {
+                file: f.clone(),
+                why: "repo có nhiều chart Helm: nguồn `k8s:` đi cùng `values:` phải nêu thư mục chart (`k8s:<thư mục>/<tên>`)".into(),
+            });
+        }
+    }
+    let single = tops.len() == 1;
+    for dir in tops {
+        // File của chart lấy từ chính thư mục chart, không qua bộ lọc file
+        // triển khai: Helm dựng mọi file trong `templates/` (cả `tests/`,
+        // `.json`, `.tpl`), và `.tgz` trong `charts/` phải được báo (TM-37).
+        let (mine, bad) = chart_files(shared.root, dir);
+        out.unread.extend(bad);
+        let mut extra: Vec<String> = opts
+            .helm_values
+            .iter()
+            .filter(|(d, _)| d == dir || (d == "*" && single))
+            .map(|(_, f)| f.clone())
+            .collect();
+        extra.dedup();
+        let chart = helm::render(dir, &mine, &extra, &read);
+        for (file, why) in chart.unread {
+            out.unread.push(Unread {
+                file,
+                why: format!("chart Helm không dựng được: {why}"),
+            });
+        }
+        rendered.extend(chart.rendered.into_iter().map(|r| (dir.clone(), r)));
+    }
 
     // Image dựng từ đâu.
     let mut builds: Vec<BuildRef> = Vec::new();
     for f in skaffolds {
-        let parsed = shared.read(f).and_then(|t| k8s::skaffold(&t).map_err(|e| format!("YAML {e}")));
+        let parsed = shared
+            .read(f)
+            .and_then(|t| k8s::skaffold(&t).map_err(|e| format!("YAML {e}")));
         let s = match parsed {
             Ok(s) => s,
             Err(why) => {
-                out.unread.push(Unread { file: f.clone(), why });
+                out.unread.push(Unread {
+                    file: f.clone(),
+                    why,
+                });
                 continue;
             }
         };
@@ -1159,7 +1425,10 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
     // hai khi skaffold có hàng chục nghìn artifact (TM-18).
     let mut by_image: HashMap<String, Vec<&BuildRef>> = HashMap::new();
     for b in &builds {
-        by_image.entry(k8s::image_name(&b.image).1.to_string()).or_default().push(b);
+        by_image
+            .entry(k8s::image_name(&b.image).1.to_string())
+            .or_default()
+            .push(b);
     }
 
     // Kustomize: file patch không phải manifest; patch và phép biến đổi đổi
@@ -1169,11 +1438,22 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
     // File mà một kustomization kéo vào được đọc kể cả khi nằm trong thư mục
     // ví dụ hay ẩn: nó được triển khai.
     let listed: HashSet<&str> = candidates.iter().map(|f| f.as_str()).collect();
-    let mut reached: Vec<String> =
-        kz.reached.iter().filter(|f| is_manifest_file(f) && !listed.contains(f.as_str())).cloned().collect();
+    let mut reached: Vec<String> = kz
+        .reached
+        .iter()
+        .filter(|f| is_manifest_file(f) && !listed.contains(f.as_str()))
+        .cloned()
+        .collect();
     reached.sort();
-    let all: Vec<String> = candidates.iter().map(|f| (*f).clone()).chain(reached).collect();
-    let mut cluster = read_manifests(shared, &all, &in_chart, &kz.patch_files, out);
+    let all: Vec<String> = candidates
+        .iter()
+        .map(|f| (*f).clone())
+        .chain(reached)
+        .collect();
+    if opts.keep_rendered {
+        out.rendered = rendered.clone();
+    }
+    let mut cluster = read_manifests(shared, &all, &in_chart, &kz.patch_files, rendered, out);
     cluster.namespaces.extend(kz.namespaces.iter().cloned());
     cluster.namespaces.insert("default".into());
     let patched = apply_patches(&kz, &cluster, &steps);
@@ -1181,12 +1461,18 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
     // Chỉ mục: Service theo tên, workload theo nhãn, ConfigMap theo tên.
     let mut svc_by_name: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, s) in cluster.services.iter().enumerate() {
-        svc_by_name.entry(s.item.name.to_ascii_lowercase()).or_default().push(i);
+        svc_by_name
+            .entry(s.item.name.to_ascii_lowercase())
+            .or_default()
+            .push(i);
     }
     let mut by_label: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
     for (i, w) in cluster.workloads.iter().enumerate() {
         for (k, v) in &w.item.labels {
-            by_label.entry((k.as_str(), v.as_str())).or_default().push(i);
+            by_label
+                .entry((k.as_str(), v.as_str()))
+                .or_default()
+                .push(i);
         }
     }
     let mut cm_by_name: HashMap<&str, Vec<usize>> = HashMap::new();
@@ -1207,11 +1493,16 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
         let mut hits: Vec<usize> = Vec::new();
         // Nhãn do controller gắn lúc chạy (`statefulset.kubernetes.io/pod-name`,
         // `job-name`) không có trong pod template: so theo tên workload.
-        let (ctl, plain): (Vec<&Label>, Vec<&Label>) =
-            s.item.selector.iter().partition(|(k, _)| CONTROLLER_LABELS.contains(&k.as_str()));
+        let (ctl, plain): (Vec<&Label>, Vec<&Label>) = s
+            .item
+            .selector
+            .iter()
+            .partition(|(k, _)| CONTROLLER_LABELS.contains(&k.as_str()));
         let everyone: Vec<usize>;
         let candidates: &[usize] = match plain.first() {
-            Some((k, v)) => by_label.get(&(k.as_str(), v.as_str())).map_or(&[][..], Vec::as_slice),
+            Some((k, v)) => by_label
+                .get(&(k.as_str(), v.as_str()))
+                .map_or(&[][..], Vec::as_slice),
             None if !ctl.is_empty() => {
                 everyone = (0..cluster.workloads.len()).collect();
                 &everyone
@@ -1231,7 +1522,11 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
                 hits.push(wi);
             }
         }
-        let same: Vec<usize> = hits.iter().copied().filter(|&wi| cluster.workloads[wi].dir == s.dir).collect();
+        let same: Vec<usize> = hits
+            .iter()
+            .copied()
+            .filter(|&wi| cluster.workloads[wi].dir == s.dir)
+            .collect();
         let r = Rc::new(if same.is_empty() { hits } else { same });
         selected.insert(si, r.clone());
         r
@@ -1249,19 +1544,27 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
         }
         let list = exposures.entry(wi).or_default();
         if list.len() < 8 {
-            list.push(Exposure { file: file.to_string(), line, shown: shown() });
+            list.push(Exposure {
+                file: file.to_string(),
+                line,
+                shown: shown(),
+            });
         }
         true
     };
     for (wi, w) in cluster.workloads.iter().enumerate() {
         if let Some(how) = &w.item.host {
-            expose(wi, &w.file, w.item.line, &|| format!("{} `{}`: {how}", w.item.kind, w.item.name));
+            expose(wi, &w.file, w.item.line, &|| {
+                format!("{} `{}`: {how}", w.item.kind, w.item.name)
+            });
         }
     }
     'services: for (si, s) in cluster.services.iter().enumerate() {
         if let Some(how) = &s.item.exposed {
             for &wi in select(si).iter() {
-                if !expose(wi, &s.file, s.item.line, &|| format!("Service `{}` {how}", s.item.name)) {
+                if !expose(wi, &s.file, s.item.line, &|| {
+                    format!("Service `{}` {how}", s.item.name)
+                }) {
                     break 'services;
                 }
             }
@@ -1271,9 +1574,18 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
     let services_named = |name: &str, ns: Option<&str>, dir: &str| -> Vec<usize> {
         let all: Vec<usize> = svc_by_name
             .get(&name.to_ascii_lowercase())
-            .map(|v| v.iter().copied().filter(|&si| same_ns(cluster.services[si].item.namespace.as_deref(), ns)).collect())
+            .map(|v| {
+                v.iter()
+                    .copied()
+                    .filter(|&si| same_ns(cluster.services[si].item.namespace.as_deref(), ns))
+                    .collect()
+            })
             .unwrap_or_default();
-        let same: Vec<usize> = all.iter().copied().filter(|&si| cluster.services[si].dir == dir).collect();
+        let same: Vec<usize> = all
+            .iter()
+            .copied()
+            .filter(|&si| cluster.services[si].dir == dir)
+            .collect();
         if same.is_empty() { all } else { same }
     };
     // `destination.host` trong cụm: `svc`, `svc.ns`, `svc.ns.svc…`. Tên miền
@@ -1305,13 +1617,19 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
             }
         }
         // Host của chính nó và của VirtualService nó `delegate` sang (một tầng).
-        let mut hosts: Vec<(&str, Option<&str>, usize)> = r.hosts.iter().map(|(h, l)| (h.as_str(), ns, *l)).collect();
+        let mut hosts: Vec<(&str, Option<&str>, usize)> =
+            r.hosts.iter().map(|(h, l)| (h.as_str(), ns, *l)).collect();
         for (name, dns, line) in &r.delegates {
             let dns = dns.as_deref().or(ns);
             for &ci in vs_by_name.get(name.as_str()).map_or(&[][..], Vec::as_slice) {
                 let child = &cluster.routes[ci].item;
                 if same_ns(child.namespace.as_deref(), dns) {
-                    hosts.extend(child.hosts.iter().map(|(h, _)| (h.as_str(), child.namespace.as_deref().or(dns), *line)));
+                    hosts.extend(
+                        child
+                            .hosts
+                            .iter()
+                            .map(|(h, _)| (h.as_str(), child.namespace.as_deref().or(dns), *line)),
+                    );
                 }
             }
         }
@@ -1320,7 +1638,9 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
             if !seen_hosts.insert(host) {
                 continue;
             }
-            let Some((svc_name, svc_ns)) = in_cluster(host, hns) else { continue };
+            let Some((svc_name, svc_ns)) = in_cluster(host, hns) else {
+                continue;
+            };
             for si in services_named(&svc_name, svc_ns.as_deref(), &route.dir) {
                 targets.entry(si).or_insert(line);
             }
@@ -1328,7 +1648,9 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
         for (si, line) in targets {
             let service = &cluster.services[si].item.name;
             for &wi in select(si).iter() {
-                if !expose(wi, &route.file, line, &|| format!("{} `{}` → Service `{service}`", r.kind, r.name)) {
+                if !expose(wi, &route.file, line, &|| {
+                    format!("{} `{}` → Service `{service}`", r.kind, r.name)
+                }) {
                     break 'routes;
                 }
             }
@@ -1344,7 +1666,11 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
         let mut keys: Vec<Key> = Vec::new();
         // Không biết namespace của mã: dạng `pod.svc` thì tên miền ngoài hai nhãn
         // (`firebase.app`) cũng khớp, nên không xét.
-        if h.split('.').count() == 2 && !cluster.namespaces.contains(h.split('.').nth(1).unwrap_or_default()) {
+        if h.split('.').count() == 2
+            && !cluster
+                .namespaces
+                .contains(h.split('.').nth(1).unwrap_or_default())
+        {
             continue;
         }
         for si in resolve_host(&cluster, &svc_by_name, h, None, None) {
@@ -1354,7 +1680,10 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
                     break 'hosts;
                 }
                 let w = &cluster.workloads[wi];
-                keys.push(Key::K8s { dir: w.dir.clone(), name: w.item.name.clone() });
+                keys.push(Key::K8s {
+                    dir: w.dir.clone(),
+                    name: w.item.name.clone(),
+                });
             }
         }
         if !keys.is_empty() {
@@ -1379,10 +1708,15 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
         let w = &placed.item;
         let ns = w.namespace.as_deref();
         let mut svc = Svc {
-            key: Key::K8s { dir: placed.dir.clone(), name: w.name.clone() },
+            key: Key::K8s {
+                dir: placed.dir.clone(),
+                name: w.name.clone(),
+            },
             file: placed.file.clone(),
             line: w.line,
-            image: w.main_container().and_then(|i| w.containers[i].image.clone()),
+            image: w
+                .main_container()
+                .and_then(|i| w.containers[i].image.clone()),
             code: false,
             edges: Vec::new(),
             starts: Vec::new(),
@@ -1394,7 +1728,8 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
             exposed: exposures.remove(&wi).unwrap_or_default(),
         };
         // Tên máy → Service → workload.
-        let resolve = |host: &str| resolve_host(&cluster, &svc_by_name, host, ns, Some(&placed.dir));
+        let resolve =
+            |host: &str| resolve_host(&cluster, &svc_by_name, host, ns, Some(&placed.dir));
         // `x.y` mà `x` là Service của repo, `y` không phải namespace nào đã
         // biết: có thể là Service ở namespace chưa khai, có thể là tên miền
         // ngoài. Không đoán, nhưng báo (TM-21).
@@ -1409,11 +1744,20 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
         let mut kept: Vec<(String, String)> = Vec::new();
         for c in &w.containers {
             // Biến môi trường, kể cả lấy từ ConfigMap.
-            let mut envs: Vec<(String, compose::Env)> = c.env.iter().map(|e| (placed.file.clone(), e.clone())).collect();
+            let mut envs: Vec<(String, compose::Env)> = c
+                .env
+                .iter()
+                .map(|e| (placed.file.clone(), e.clone()))
+                .collect();
             let config = |name: &str| -> Option<&Placed<k8s::ConfigMap>> {
                 let list = cm_by_name.get(name)?;
-                let ok = |&&i: &&usize| same_ns(cluster.config_maps[i].item.namespace.as_deref(), ns);
-                list.iter().filter(ok).find(|&&i| cluster.config_maps[i].dir == placed.dir).or_else(|| list.iter().find(ok)).map(|&i| &cluster.config_maps[i])
+                let ok =
+                    |&&i: &&usize| same_ns(cluster.config_maps[i].item.namespace.as_deref(), ns);
+                list.iter()
+                    .filter(ok)
+                    .find(|&&i| cluster.config_maps[i].dir == placed.dir)
+                    .or_else(|| list.iter().find(ok))
+                    .map(|&i| &cluster.config_maps[i])
             };
             for r in &c.refs {
                 if let Some(cm) = config(&r.config_map)
@@ -1424,7 +1768,12 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
             }
             for f in &c.env_from {
                 if let Some(cm) = config(&f.config_map) {
-                    envs.extend(cm.item.entries(&f.prefix).into_iter().map(|e| (cm.file.clone(), e)));
+                    envs.extend(
+                        cm.item
+                            .entries(&f.prefix)
+                            .into_iter()
+                            .map(|e| (cm.file.clone(), e)),
+                    );
                 }
             }
             if !Shared::spend(&shared.facts, envs.len()) {
@@ -1442,7 +1791,10 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
                     let targets = match memo.get(&h.name) {
                         Some(t) => t.clone(),
                         None => {
-                            let mut t: Vec<usize> = resolve(&h.name).into_iter().flat_map(|si| select(si).as_ref().clone()).collect();
+                            let mut t: Vec<usize> = resolve(&h.name)
+                                .into_iter()
+                                .flat_map(|si| select(si).as_ref().clone())
+                                .collect();
                             t.sort_unstable();
                             t.dedup();
                             let t = Rc::new(t);
@@ -1453,7 +1805,10 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
                     if targets.is_empty()
                         && let Some(why) = doubtful(&h.name)
                     {
-                        out.unread.push(Unread { file: format!("{file}:{}", e.line), why: format!("`{}`: {why}", e.key) });
+                        out.unread.push(Unread {
+                            file: format!("{file}:{}", e.line),
+                            why: format!("`{}`: {why}", e.key),
+                        });
                     }
                     for &ti in targets.iter() {
                         if !Shared::spend(&steps, 1) {
@@ -1464,7 +1819,10 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
                             continue;
                         }
                         let t = &cluster.workloads[ti];
-                        let target = Key::K8s { dir: t.dir.clone(), name: t.item.name.clone() };
+                        let target = Key::K8s {
+                            dir: t.dir.clone(),
+                            name: t.item.name.clone(),
+                        };
                         if t.item.name == w.name && t.dir == placed.dir {
                             continue;
                         }
@@ -1494,13 +1852,23 @@ fn load_k8s(shared: &Shared<'_>, files: &[String], opts: &Options, compose_build
                 ),
             });
         }
-        k8s_starts(shared, opts, &by_image, placed, &kept, &mut svc, &mut out.unread);
+        k8s_starts(
+            shared,
+            opts,
+            &by_image,
+            placed,
+            &kept,
+            &mut svc,
+            &mut out.unread,
+        );
         out.services.push(svc);
     }
     if steps_over.get() || steps.get() == 0 {
         out.unread.push(Unread {
             file: "manifest Kubernetes".into(),
-            why: format!("quá {MAX_K8S_STEPS} bước so selector hay lần `resources`; phần còn lại không đọc"),
+            why: format!(
+                "quá {MAX_K8S_STEPS} bước so selector hay lần `resources`; phần còn lại không đọc"
+            ),
         });
     }
 }
@@ -1539,7 +1907,16 @@ pub fn same_network(from: &[&Key], to: &Key) -> bool {
 /// một monorepo hay có Service trùng tên.
 pub fn reachable<'k>(from: &[&Key], keys: &'k [Key]) -> Vec<&'k Key> {
     let mut out: Vec<&Key> = keys.iter().filter(|k| same_network(from, k)).collect();
-    let dirs: Vec<&str> = from.iter().filter_map(|k| if let Key::K8s { dir, .. } = k { Some(dir.as_str()) } else { None }).collect();
+    let dirs: Vec<&str> = from
+        .iter()
+        .filter_map(|k| {
+            if let Key::K8s { dir, .. } = k {
+                Some(dir.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
     let near = |k: &&Key| matches!(k, Key::K8s { dir, .. } if dirs.contains(&dir.as_str()));
     if out.iter().any(near) {
         out.retain(|k| !matches!(k, Key::K8s { .. }) || near(k));
@@ -1563,9 +1940,18 @@ fn resolve_host(
         let find = |name: &str, ns: Option<&str>| -> Vec<usize> {
             let all: Vec<usize> = svc_by_name
                 .get(name)
-                .map(|v| v.iter().copied().filter(|&si| same_ns(cluster.services[si].item.namespace.as_deref(), ns)).collect())
+                .map(|v| {
+                    v.iter()
+                        .copied()
+                        .filter(|&si| same_ns(cluster.services[si].item.namespace.as_deref(), ns))
+                        .collect()
+                })
                 .unwrap_or_default();
-            let same: Vec<usize> = all.iter().copied().filter(|&si| Some(cluster.services[si].dir.as_str()) == dir).collect();
+            let same: Vec<usize> = all
+                .iter()
+                .copied()
+                .filter(|&si| Some(cluster.services[si].dir.as_str()) == dir)
+                .collect();
             if same.is_empty() { all } else { same }
         };
         let known = |n: &str| cluster.namespaces.contains(n);
@@ -1584,11 +1970,64 @@ fn resolve_host(
         }
     };
     let mut found = once(host);
-    let aliases: Vec<String> = found.iter().filter_map(|&si| cluster.services[si].item.external.clone()).collect();
+    let aliases: Vec<String> = found
+        .iter()
+        .filter_map(|&si| cluster.services[si].item.external.clone())
+        .collect();
     for a in aliases {
         found.extend(once(&a));
     }
     found
+}
+
+/// Mọi file trong thư mục chart `dir`, đệ quy, không đi theo symlink (symlink
+/// thì báo). Tối đa [`helm::MAX_CHART_FILES`] file.
+fn chart_files(root: &Path, dir: &str) -> (Vec<String>, Vec<Unread>) {
+    let mut out = Vec::new();
+    let mut bad = Vec::new();
+    let mut stack = vec![dir.to_string()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(root.join(&d)) else {
+            continue;
+        };
+        let mut names: Vec<_> = entries.flatten().collect();
+        names.sort_by_key(|e| e.file_name());
+        for e in names {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let rel = if d.is_empty() {
+                name.clone()
+            } else {
+                format!("{d}/{name}")
+            };
+            let Ok(meta) = std::fs::symlink_metadata(e.path()) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                bad.push(Unread {
+                    file: rel,
+                    why: "symlink trong chart Helm không đọc".into(),
+                });
+            } else if meta.is_dir() {
+                if !name.starts_with('.') {
+                    stack.push(rel);
+                }
+            } else if meta.is_file() {
+                if out.len() >= helm::MAX_CHART_FILES {
+                    bad.push(Unread {
+                        file: dir.to_string(),
+                        why: format!(
+                            "chart quá {} file; phần sau không đọc",
+                            helm::MAX_CHART_FILES
+                        ),
+                    });
+                    return (out, bad);
+                }
+                out.push(rel);
+            }
+        }
+    }
+    out.sort();
+    (out, bad)
 }
 
 /// Workload bị NetworkPolicy cô lập theo từng chiều, và đường được cho phép rõ
@@ -1617,11 +2056,16 @@ fn network_policies(cluster: &Cluster, steps: &Cell<usize>) -> HashMap<usize, (G
     };
     let key_of = |wi: usize| {
         let w = &cluster.workloads[wi];
-        Key::K8s { dir: w.dir.clone(), name: w.item.name.clone() }
+        Key::K8s {
+            dir: w.dir.clone(),
+            name: w.item.name.clone(),
+        }
     };
     for p in &cluster.policies {
         let pol = &p.item;
-        let Some(targets) = pick(&pol.pods, &Scope::Same(pol.namespace.as_deref())) else { return out };
+        let Some(targets) = pick(&pol.pods, &Scope::Same(pol.namespace.as_deref())) else {
+            return out;
+        };
         if targets.is_empty() {
             continue;
         }
@@ -1648,7 +2092,11 @@ fn network_policies(cluster: &Cluster, steps: &Cell<usize>) -> HashMap<usize, (G
                     let scope = match &peer.namespaces {
                         None => Scope::Same(pol.namespace.as_deref()),
                         Some(sel) if sel.is_empty() => Scope::Any,
-                        Some(sel) if sel.exprs.is_empty() && sel.labels.len() == 1 && sel.labels[0].0 == NAME => {
+                        Some(sel)
+                            if sel.exprs.is_empty()
+                                && sel.labels.len() == 1
+                                && sel.labels[0].0 == NAME =>
+                        {
                             Scope::Names(vec![sel.labels[0].1.as_str()])
                         }
                         Some(sel)
@@ -1664,10 +2112,16 @@ fn network_policies(cluster: &Cluster, steps: &Cell<usize>) -> HashMap<usize, (G
                     let pods = peer.pods.clone().unwrap_or_default();
                     // `podSelector: {}` là mọi pod: không nêu đích cụ thể nào.
                     if pods.is_empty() {
-                        grants.push(if matches!(scope, Scope::Unknown) { Grant::Unknown } else { Grant::Any });
+                        grants.push(if matches!(scope, Scope::Unknown) {
+                            Grant::Unknown
+                        } else {
+                            Grant::Any
+                        });
                         continue;
                     }
-                    let Some(hits) = pick(&pods, &scope) else { return out };
+                    let Some(hits) = pick(&pods, &scope) else {
+                        return out;
+                    };
                     if !kept.insert(hits.clone()) {
                         continue;
                     }
@@ -1717,7 +2171,10 @@ const CONTROLLER_LABELS: &[&str] = &[
 fn controller_label(k: &str, v: &str, w: &k8s::Workload) -> bool {
     match k {
         "statefulset.kubernetes.io/pod-name" => {
-            w.kind == "StatefulSet" && v.strip_prefix(&w.name).and_then(|r| r.strip_prefix('-')).is_some_and(|i| i.parse::<u32>().is_ok())
+            w.kind == "StatefulSet"
+                && v.strip_prefix(&w.name)
+                    .and_then(|r| r.strip_prefix('-'))
+                    .is_some_and(|i| i.parse::<u32>().is_ok())
         }
         "job-name" | "batch.kubernetes.io/job-name" => match w.kind.as_str() {
             "Job" => v == w.name,
@@ -1736,6 +2193,7 @@ fn read_manifests(
     candidates: &[String],
     in_chart: &dyn Fn(&str) -> bool,
     patch_files: &HashSet<String>,
+    rendered: Vec<(String, helm::Rendered)>,
     out: &mut Deploy,
 ) -> Cluster {
     let mut c = Cluster::default();
@@ -1760,7 +2218,10 @@ fn read_manifests(
             // Không phải văn bản thì không phải manifest.
             Err(why) if why == "không phải văn bản UTF-8" => continue,
             Err(why) => {
-                out.unread.push(Unread { file: (*f).clone(), why });
+                out.unread.push(Unread {
+                    file: (*f).clone(),
+                    why,
+                });
                 continue;
             }
         };
@@ -1769,7 +2230,10 @@ fn read_manifests(
             continue;
         }
         if more {
-            out.unread.push(Unread { file: (*f).clone(), why: format!("quá {} KB", MAX_DEPLOY_BYTES >> 10) });
+            out.unread.push(Unread {
+                file: (*f).clone(),
+                why: format!("quá {} KB", MAX_DEPLOY_BYTES >> 10),
+            });
             continue;
         }
         let file = match k8s::parse(&text) {
@@ -1777,63 +2241,168 @@ fn read_manifests(
             // Chắc là manifest mà không đọc được thì báo; file chỉ tình cờ có
             // chữ `kind` (cấu hình CI, OpenAPI) thì thôi.
             Err(e) if k8s::looks_like(&text) => {
-                out.unread.push(Unread { file: (*f).clone(), why: format!("YAML {e}") });
+                out.unread.push(Unread {
+                    file: (*f).clone(),
+                    why: format!("YAML {e}"),
+                });
                 continue;
             }
             Err(_) => continue,
         };
-        let facts: usize = file
-            .workloads
-            .iter()
-            .map(|w| w.labels.len() + w.containers.iter().map(|c| 1 + c.env.len() + c.refs.len() + c.env_from.len()).sum::<usize>())
-            .sum::<usize>()
-            + file.services.iter().map(|s| 1 + s.selector.len()).sum::<usize>()
-            + file.config_maps.iter().map(|m| 1 + m.keys().count()).sum::<usize>()
-            + file.routes.iter().map(|r| 1 + r.services.len() + r.hosts.len() + r.delegates.len()).sum::<usize>();
-        objects += file.workloads.len() + file.services.len() + file.config_maps.len() + file.policies.len() + file.routes.len();
-        if objects > MAX_K8S_OBJECTS || !Shared::spend(&shared.facts, facts) || !Shared::spend(&shared.bytes, file.size) {
+        if !place(shared, &mut c, &mut objects, f, dir_of(f), file, out) {
+            break;
+        }
+    }
+    // Manifest dựng từ chart Helm: dòng trỏ về template, thư mục là thư mục
+    // chart (`k8s:helm-chart/cartservice`).
+    for (dir, r) in rendered {
+        let dir: String = dir;
+        if !Shared::spend(&shared.k8s_read, r.text.len()) {
             out.unread.push(Unread {
-                file: (*f).clone(),
-                why: format!(
-                    "quá {MAX_K8S_OBJECTS} workload, Service, ConfigMap, {MAX_PROJECT_FACTS} mục hay {} MB cho cả repo; file này và các file sau không đọc",
-                    MAX_LOAD_BYTES >> 20
-                ),
+                file: r.file.clone(),
+                why: format!("quá {} MB YAML cho cả repo", MAX_K8S_READ >> 20),
             });
             break;
         }
-        for (kind, name, line) in &file.unknown {
-            out.unread.push(Unread {
-                file: format!("{f}:{line}"),
-                why: format!("`{kind}` `{name}` có pod template mà archctl không đọc loại này; mã chạy trong đó không được kiểm"),
-            });
+        if !k8s::may_be(&r.text) {
+            continue;
         }
-        let dir = dir_of(f).to_string();
-        c.namespaces.extend(file.namespaces.iter().cloned());
-        for w in file.workloads {
-            c.namespaces.extend(w.namespace.clone());
-            // Không container nào có image: mảnh patch (overlay, component),
-            // không phải workload chạy được.
-            if w.containers.iter().all(|c| c.image.as_deref().is_none_or(str::is_empty)) {
+        let mut file = match k8s::parse(&r.text) {
+            Ok(file) => file,
+            Err(e) => {
+                let line = r
+                    .lines
+                    .get(e.line.saturating_sub(1))
+                    .copied()
+                    .unwrap_or(e.line);
+                out.unread.push(Unread {
+                    file: format!("{}:{line}", r.file),
+                    why: "manifest dựng ra không phải YAML đọc được".into(),
+                });
                 continue;
             }
-            c.workloads.push(Placed { file: (*f).clone(), dir: dir.clone(), item: w });
-        }
-        for s in file.services {
-            c.namespaces.extend(s.namespace.clone());
-            c.services.push(Placed { file: (*f).clone(), dir: dir.clone(), item: s });
-        }
-        for m in file.config_maps {
-            c.namespaces.extend(m.namespace.clone());
-            c.config_maps.push(Placed { file: (*f).clone(), dir: dir.clone(), item: m });
-        }
-        for p in file.policies {
-            c.policies.push(Placed { file: (*f).clone(), dir: dir.clone(), item: p });
-        }
-        for r in file.routes {
-            c.routes.push(Placed { file: (*f).clone(), dir: dir.clone(), item: r });
+        };
+        let lines = r.lines;
+        file.remap_lines(&|l| lines.get(l.saturating_sub(1)).copied().unwrap_or(l));
+        if !place(shared, &mut c, &mut objects, &r.file, &dir, file, out) {
+            break;
         }
     }
     c
+}
+
+/// Đưa các đối tượng của một file manifest vào cụm. Trả `false` khi chạm trần
+/// chung: dừng đọc.
+fn place(
+    shared: &Shared<'_>,
+    c: &mut Cluster,
+    objects: &mut usize,
+    f: &str,
+    dir: &str,
+    file: k8s::File,
+    out: &mut Deploy,
+) -> bool {
+    let f = &f.to_string();
+    let facts: usize = file
+        .workloads
+        .iter()
+        .map(|w| {
+            w.labels.len()
+                + w.containers
+                    .iter()
+                    .map(|c| 1 + c.env.len() + c.refs.len() + c.env_from.len())
+                    .sum::<usize>()
+        })
+        .sum::<usize>()
+        + file
+            .services
+            .iter()
+            .map(|s| 1 + s.selector.len())
+            .sum::<usize>()
+        + file
+            .config_maps
+            .iter()
+            .map(|m| 1 + m.keys().count())
+            .sum::<usize>()
+        + file
+            .routes
+            .iter()
+            .map(|r| 1 + r.services.len() + r.hosts.len() + r.delegates.len())
+            .sum::<usize>();
+    *objects += file.workloads.len()
+        + file.services.len()
+        + file.config_maps.len()
+        + file.policies.len()
+        + file.routes.len();
+    if *objects > MAX_K8S_OBJECTS
+        || !Shared::spend(&shared.facts, facts)
+        || !Shared::spend(&shared.bytes, file.size)
+    {
+        out.unread.push(Unread {
+            file: (*f).clone(),
+            why: format!(
+                "quá {MAX_K8S_OBJECTS} workload, Service, ConfigMap, {MAX_PROJECT_FACTS} mục hay {} MB cho cả repo; file này và các file sau không đọc",
+                MAX_LOAD_BYTES >> 20
+            ),
+        });
+        return false;
+    }
+    for (kind, name, line) in &file.unknown {
+        out.unread.push(Unread {
+            file: format!("{f}:{line}"),
+            why: format!("`{kind}` `{name}` có pod template mà archctl không đọc loại này; mã chạy trong đó không được kiểm"),
+        });
+    }
+    let dir = dir.to_string();
+    let f = &f.to_string();
+    c.namespaces.extend(file.namespaces.iter().cloned());
+    for w in file.workloads {
+        c.namespaces.extend(w.namespace.clone());
+        // Không container nào có image: mảnh patch (overlay, component),
+        // không phải workload chạy được.
+        if w.containers
+            .iter()
+            .all(|c| c.image.as_deref().is_none_or(str::is_empty))
+        {
+            continue;
+        }
+        c.workloads.push(Placed {
+            file: (*f).clone(),
+            dir: dir.clone(),
+            item: w,
+        });
+    }
+    for s in file.services {
+        c.namespaces.extend(s.namespace.clone());
+        c.services.push(Placed {
+            file: (*f).clone(),
+            dir: dir.clone(),
+            item: s,
+        });
+    }
+    for m in file.config_maps {
+        c.namespaces.extend(m.namespace.clone());
+        c.config_maps.push(Placed {
+            file: (*f).clone(),
+            dir: dir.clone(),
+            item: m,
+        });
+    }
+    for p in file.policies {
+        c.policies.push(Placed {
+            file: (*f).clone(),
+            dir: dir.clone(),
+            item: p,
+        });
+    }
+    for r in file.routes {
+        c.routes.push(Placed {
+            file: (*f).clone(),
+            dir: dir.clone(),
+            item: r,
+        });
+    }
+    true
 }
 
 /// Cặp nhãn `khoá=giá trị`.
@@ -1883,18 +2452,30 @@ impl Kusts {
                 self.full = true;
                 out.unread.push(Unread {
                     file: file.to_string(),
-                    why: format!("quá {MAX_KUSTOMIZATIONS} file kustomization; phần còn lại không đọc"),
+                    why: format!(
+                        "quá {MAX_KUSTOMIZATIONS} file kustomization; phần còn lại không đọc"
+                    ),
                 });
             }
             return None;
         }
-        match shared.read(file).and_then(|t| k8s::kustomization(&t).map_err(|e| format!("YAML {e}"))) {
+        match shared
+            .read(file)
+            .and_then(|t| k8s::kustomization(&t).map_err(|e| format!("YAML {e}")))
+        {
             Ok(k) => {
-                self.ks.push(Kust { file: file.to_string(), dir: dir_of(file).to_string(), k });
+                self.ks.push(Kust {
+                    file: file.to_string(),
+                    dir: dir_of(file).to_string(),
+                    k,
+                });
                 Some(self.ks.len() - 1)
             }
             Err(why) => {
-                out.unread.push(Unread { file: file.to_string(), why });
+                out.unread.push(Unread {
+                    file: file.to_string(),
+                    why,
+                });
                 None
             }
         }
@@ -1906,7 +2487,13 @@ impl Kusts {
         }
         let found = ["kustomization.yaml", "kustomization.yml", "Kustomization"]
             .iter()
-            .map(|n| if dir.is_empty() { (*n).to_string() } else { format!("{dir}/{n}") })
+            .map(|n| {
+                if dir.is_empty() {
+                    (*n).to_string()
+                } else {
+                    format!("{dir}/{n}")
+                }
+            })
             .find(|p| self.kind(shared.root, p) == Some(Kind::File));
         let i = found.and_then(|p| self.add(shared, &p, out));
         self.by_dir.insert(dir.to_string(), i);
@@ -1917,7 +2504,12 @@ impl Kusts {
 /// Đọc mọi kustomization của repo và những cái chúng trỏ tới: file nào được
 /// kéo vào, patch và phép biến đổi nào đè lên chúng.
 fn kustomize(shared: &Shared<'_>, listed: &[&String], steps: &Cell<usize>, out: &mut Deploy) -> Kz {
-    let mut kb = Kusts { ks: Vec::new(), by_dir: HashMap::new(), full: false, kinds: HashMap::new() };
+    let mut kb = Kusts {
+        ks: Vec::new(),
+        by_dir: HashMap::new(),
+        full: false,
+        kinds: HashMap::new(),
+    };
     for f in listed {
         let dir = dir_of(f).to_string();
         if kb.by_dir.contains_key(&dir) {
@@ -1950,7 +2542,9 @@ fn kustomize(shared: &Shared<'_>, listed: &[&String], steps: &Cell<usize>, out: 
                 if !Shared::spend(steps, 1) {
                     return kz;
                 }
-                let Some(p) = within(&dir, &rel) else { continue };
+                let Some(p) = within(&dir, &rel) else {
+                    continue;
+                };
                 match kb.kind(shared.root, &p) {
                     Some(Kind::File) => {
                         files.insert(p);
@@ -1973,7 +2567,11 @@ fn kustomize(shared: &Shared<'_>, listed: &[&String], steps: &Cell<usize>, out: 
             for (key, line) in &k.k.transforms {
                 patches.push((
                     format!("{}:{line}", k.file),
-                    k8s::Touch { kind: None, name: None, touches: true },
+                    k8s::Touch {
+                        kind: None,
+                        name: None,
+                        touches: true,
+                    },
                     format!("`{key}` của Kustomize đổi tên, image hay giá trị env"),
                 ));
             }
@@ -2021,10 +2619,23 @@ fn kustomize(shared: &Shared<'_>, listed: &[&String], steps: &Cell<usize>, out: 
                 match &p.target {
                     // `target` thắng đích viết trong nội dung patch.
                     Some((kind, name)) if touched.iter().any(|t| t.touches) => {
-                        patches.push((at, k8s::Touch { kind: kind.clone(), name: name.clone(), touches: true }, what));
+                        patches.push((
+                            at,
+                            k8s::Touch {
+                                kind: kind.clone(),
+                                name: name.clone(),
+                                touches: true,
+                            },
+                            what,
+                        ));
                     }
                     Some(_) => {}
-                    None => patches.extend(touched.iter().filter(|t| t.touches).map(|t| (at.clone(), t.clone(), what.clone()))),
+                    None => patches.extend(
+                        touched
+                            .iter()
+                            .filter(|t| t.touches)
+                            .map(|t| (at.clone(), t.clone(), what.clone())),
+                    ),
                 }
             }
         }
@@ -2095,7 +2706,10 @@ fn k8s_starts(
 ) {
     let w = &placed.item;
     let main = w.main_container();
-    let pin = opts.pins.iter().find(|p| p.name == w.name && p.dir.as_ref().is_none_or(|d| *d == placed.dir));
+    let pin = opts
+        .pins
+        .iter()
+        .find(|p| p.name == w.name && p.dir.as_ref().is_none_or(|d| *d == placed.dir));
     let mut why_main: Option<String> = None;
     for (ci, c) in w.containers.iter().enumerate() {
         let image = c.image.as_deref().unwrap_or("");
@@ -2112,10 +2726,24 @@ fn k8s_starts(
                 &pinned
             }
             _ => {
-                let candidates = by_image.get(k8s::image_name(image).1).map_or(&[][..], Vec::as_slice);
-                let mut hits: Vec<&BuildRef> = candidates.iter().copied().filter(|b| k8s::same_image(image, &b.image)).collect();
-                hits.sort_by(|a, b| (&a.context, &a.dockerfile, &a.target).cmp(&(&b.context, &b.dockerfile, &b.target)));
-                hits.dedup_by(|a, b| (&a.context, &a.dockerfile, &a.target) == (&b.context, &b.dockerfile, &b.target));
+                let candidates = by_image
+                    .get(k8s::image_name(image).1)
+                    .map_or(&[][..], Vec::as_slice);
+                let mut hits: Vec<&BuildRef> = candidates
+                    .iter()
+                    .copied()
+                    .filter(|b| k8s::same_image(image, &b.image))
+                    .collect();
+                hits.sort_by(|a, b| {
+                    (&a.context, &a.dockerfile, &a.target).cmp(&(
+                        &b.context,
+                        &b.dockerfile,
+                        &b.target,
+                    ))
+                });
+                hits.dedup_by(|a, b| {
+                    (&a.context, &a.dockerfile, &a.target) == (&b.context, &b.dockerfile, &b.target)
+                });
                 match hits.as_slice() {
                     [] => {
                         if Some(ci) == main {
@@ -2134,7 +2762,10 @@ fn k8s_starts(
                         svc.unknown = Some(format!(
                             "image `{}` khớp nhiều nơi dựng ({}); khai `dockerfile:` trong luật để chọn",
                             shown_path(image),
-                            many.iter().map(|b| b.at.as_str()).collect::<Vec<_>>().join(", ")
+                            many.iter()
+                                .map(|b| b.at.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         ));
                         continue;
                     }
@@ -2147,39 +2778,72 @@ fn k8s_starts(
         }
         let Some(df_path) = &build.dockerfile else {
             svc.unknown.get_or_insert_with(|| {
-                format!("image `{}` dựng không qua Dockerfile ({}), nên không biết lệnh khởi chạy", shown_path(image), build.at)
+                format!(
+                    "image `{}` dựng không qua Dockerfile ({}), nên không biết lệnh khởi chạy",
+                    shown_path(image),
+                    build.at
+                )
             });
             continue;
         };
         let built = match shared.dockerfile(df_path) {
             Ok(b) => b,
             Err(why) => {
-                unread.push(Unread { file: df_path.clone(), why });
-                svc.unknown.get_or_insert_with(|| format!("không đọc được Dockerfile `{df_path}`"));
+                unread.push(Unread {
+                    file: df_path.clone(),
+                    why,
+                });
+                svc.unknown
+                    .get_or_insert_with(|| format!("không đọc được Dockerfile `{df_path}`"));
                 continue;
             }
         };
         let target = built.df.target(build.target.as_deref());
         let eff = match target {
             Some(t) => built.effective(t),
-            None => Rc::new(dockerfile::Effective { workdir: "/".into(), ..Default::default() }),
+            None => Rc::new(dockerfile::Effective {
+                workdir: "/".into(),
+                ..Default::default()
+            }),
         };
         // Kubernetes: `command` thay `ENTRYPOINT`, `args` thay `CMD`; có
         // `command` mà không có `args` thì `CMD` của image bị bỏ.
-        let from_image = |x: &Option<(Command, usize)>| x.as_ref().map(|(c, l)| (c.argv(), (df_path.clone(), *l)));
-        let from_pod = |x: &Option<(Vec<String>, usize)>| x.as_ref().map(|(a, l)| (a.clone(), (placed.file.clone(), *l)));
+        let from_image = |x: &Option<(Command, usize)>| {
+            x.as_ref().map(|(c, l)| (c.argv(), (df_path.clone(), *l)))
+        };
+        let from_pod = |x: &Option<(Vec<String>, usize)>| {
+            x.as_ref()
+                .map(|(a, l)| (a.clone(), (placed.file.clone(), *l)))
+        };
         let entry = from_pod(&c.command).or_else(|| from_image(&eff.entrypoint));
         let cmd = match (&c.args, &c.command) {
             (Some(_), _) => from_pod(&c.args),
             (None, Some(_)) => None,
             (None, None) => from_image(&eff.cmd),
         };
-        let argv: Vec<String> = entry.iter().chain(cmd.iter()).flat_map(|(a, _)| a.iter().cloned()).collect();
+        let argv: Vec<String> = entry
+            .iter()
+            .chain(cmd.iter())
+            .flat_map(|(a, _)| a.iter().cloned())
+            .collect();
         if argv.is_empty() {
             continue;
         }
-        let (file, line) = cmd.as_ref().or(entry.as_ref()).map(|(_, at)| at.clone()).unwrap_or((placed.file.clone(), c.line));
-        let ctx = Ctx::new(shared, &build.context, Some(&built), target, &eff, c.working_dir.as_deref(), &[], kept);
+        let (file, line) = cmd
+            .as_ref()
+            .or(entry.as_ref())
+            .map(|(_, at)| at.clone())
+            .unwrap_or((placed.file.clone(), c.line));
+        let ctx = Ctx::new(
+            shared,
+            &build.context,
+            Some(&built),
+            target,
+            &eff,
+            c.working_dir.as_deref(),
+            &[],
+            kept,
+        );
         svc.starts.push(ctx.start(&argv, &file, line));
     }
     // Container chính không lần được thì luôn nói ra, kể cả khi một sidecar
@@ -2208,9 +2872,15 @@ fn starts(shared: &Shared<'_>, r: &Record, svc: &mut Svc, unread: &mut Vec<Unrea
     if let Some(build) = &r.s.build {
         match within(&r.base, &build.context) {
             None => {
-                let why = format!("build context `{}` nằm ngoài dự án", shown_path(&build.context));
+                let why = format!(
+                    "build context `{}` nằm ngoài dự án",
+                    shown_path(&build.context)
+                );
                 svc.unknown = Some(why.clone());
-                unread.push(Unread { file: format!("{}:{}", r.file, build.line), why });
+                unread.push(Unread {
+                    file: format!("{}:{}", r.file, build.line),
+                    why,
+                });
                 return;
             }
             Some(ctx) => context = Some(ctx),
@@ -2220,7 +2890,10 @@ fn starts(shared: &Shared<'_>, r: &Record, svc: &mut Svc, unread: &mut Vec<Unrea
             // Viết thẳng trong compose: nằm trong trần byte của file compose.
             match Built::new(dockerfile::parse(inline)) {
                 Ok(b) => df = Some(Rc::new(b)),
-                Err(why) => unread.push(Unread { file: format!("{}:{}", r.file, build.line), why }),
+                Err(why) => unread.push(Unread {
+                    file: format!("{}:{}", r.file, build.line),
+                    why,
+                }),
             }
             df_path = r.file.clone();
         } else {
@@ -2243,27 +2916,46 @@ fn starts(shared: &Shared<'_>, r: &Record, svc: &mut Svc, unread: &mut Vec<Unrea
     if df.is_some() && svc.built.is_none() {
         svc.built = Some(df_path.clone());
     }
-    let target = df.as_ref().and_then(|d| d.df.target(r.s.build.as_ref().and_then(|b| b.target.as_deref())));
+    let target = df.as_ref().and_then(|d| {
+        d.df.target(r.s.build.as_ref().and_then(|b| b.target.as_deref()))
+    });
     let eff = match (&df, target) {
         (Some(d), Some(t)) => d.effective(t),
-        _ => Rc::new(dockerfile::Effective { workdir: "/".into(), ..Default::default() }),
+        _ => Rc::new(dockerfile::Effective {
+            workdir: "/".into(),
+            ..Default::default()
+        }),
     };
     let (entry, entry_at): (Option<&Command>, Option<(String, usize)>) = match &r.s.entrypoint {
         Some((c, l)) => (Some(c), Some((r.file.clone(), *l))),
-        None => (eff.entrypoint.as_ref().map(|(c, _)| c), eff.entrypoint.as_ref().map(|(_, l)| (df_path.clone(), *l))),
+        None => (
+            eff.entrypoint.as_ref().map(|(c, _)| c),
+            eff.entrypoint.as_ref().map(|(_, l)| (df_path.clone(), *l)),
+        ),
     };
-    let (cmd, cmd_at): (Option<&Command>, Option<(String, usize)>) = match (&r.s.command, &r.s.entrypoint) {
-        (Some((c, l)), _) => (Some(c), Some((r.file.clone(), *l))),
-        (None, Some(_)) => (None, None),
-        (None, None) => (eff.cmd.as_ref().map(|(c, _)| c), eff.cmd.as_ref().map(|(_, l)| (df_path.clone(), *l))),
-    };
-    let argv: Vec<String> = entry.iter().chain(cmd.iter()).flat_map(|c| c.argv()).collect();
+    let (cmd, cmd_at): (Option<&Command>, Option<(String, usize)>) =
+        match (&r.s.command, &r.s.entrypoint) {
+            (Some((c, l)), _) => (Some(c), Some((r.file.clone(), *l))),
+            (None, Some(_)) => (None, None),
+            (None, None) => (
+                eff.cmd.as_ref().map(|(c, _)| c),
+                eff.cmd.as_ref().map(|(_, l)| (df_path.clone(), *l)),
+            ),
+        };
+    let argv: Vec<String> = entry
+        .iter()
+        .chain(cmd.iter())
+        .flat_map(|c| c.argv())
+        .collect();
     if argv.is_empty() {
         return;
     }
     let (file, line) = cmd_at.or(entry_at).unwrap_or((r.file.clone(), r.s.line));
     let binds: Vec<(String, String)> =
-        r.s.binds.iter().filter_map(|b| within(&r.base, &b.host).map(|h| (h, b.container.clone()))).collect();
+        r.s.binds
+            .iter()
+            .filter_map(|b| within(&r.base, &b.host).map(|h| (h, b.container.clone())))
+            .collect();
     let ctx = Ctx::new(
         shared,
         context.as_deref().unwrap_or(&r.base),
@@ -2272,7 +2964,10 @@ fn starts(shared: &Shared<'_>, r: &Record, svc: &mut Svc, unread: &mut Vec<Unrea
         &eff,
         r.s.working_dir.as_deref(),
         &binds,
-        &r.s.env.iter().filter_map(|e| e.value.clone().map(|v| (e.key.clone(), v))).collect::<Vec<_>>(),
+        &r.s.env
+            .iter()
+            .filter_map(|e| e.value.clone().map(|v| (e.key.clone(), v)))
+            .collect::<Vec<_>>(),
     );
     svc.starts.push(ctx.start(&argv, &file, line));
 }
@@ -2308,7 +3003,11 @@ fn stage_mounts(root: &Path, context: &str, built: &Built) -> Vec<Vec<Mount>> {
                     let index = df
                         .stages
                         .iter()
-                        .position(|s| s.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(name)))
+                        .position(|s| {
+                            s.name
+                                .as_deref()
+                                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+                        })
                         .or_else(|| name.parse::<usize>().ok());
                     match index {
                         Some(j) if j < i => Some(&out[j]),
@@ -2329,10 +3028,17 @@ fn stage_mounts(root: &Path, context: &str, built: &Built) -> Vec<Vec<Mount>> {
                 };
                 let Some(repo) = repo else { continue };
                 match kind_in(root, &repo) {
-                    Some(Kind::Dir) => here.push(Mount { container: c.dest.clone(), repo }),
+                    Some(Kind::Dir) => here.push(Mount {
+                        container: c.dest.clone(),
+                        repo,
+                    }),
                     Some(Kind::File) => {
                         let name = repo.rsplit('/').next().unwrap_or(&repo).to_string();
-                        let container = if c.dest_dir { join_container(&c.dest, &name) } else { c.dest.clone() };
+                        let container = if c.dest_dir {
+                            join_container(&c.dest, &name)
+                        } else {
+                            c.dest.clone()
+                        };
                         here.push(Mount { container, repo });
                     }
                     None => {}
@@ -2407,21 +3113,34 @@ impl<'a> Ctx<'a> {
     ) -> Self {
         let root = shared.root;
         let stages = built.map(|b| b.mounts(root, context)).unwrap_or_default();
-        let mut mounts = target.and_then(|t| stages.get(t)).cloned().unwrap_or_default();
+        let mut mounts = target
+            .and_then(|t| stages.get(t))
+            .cloned()
+            .unwrap_or_default();
         // Biến của compose thắng `ENV` của Dockerfile.
         let var = |key: &str| {
             kept.iter()
                 .find(|(k, _)| k == key)
                 .map(|(_, v)| v.clone())
-                .or_else(|| eff.env.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v.clone()))
+                .or_else(|| {
+                    eff.env
+                        .iter()
+                        .rev()
+                        .find(|(k, _)| k == key)
+                        .map(|(_, v)| v.clone())
+                })
         };
-        mounts.extend(binds.iter().map(|(h, c)| Mount { container: join_container("/", c), repo: h.clone() }));
+        mounts.extend(binds.iter().map(|(h, c)| Mount {
+            container: join_container("/", c),
+            repo: h.clone(),
+        }));
         Ctx {
             shared,
             root,
             context: context.to_string(),
             built: built.cloned(),
-            workdir: working_dir.map_or_else(|| eff.workdir.clone(), |w| join_container(&eff.workdir, w)),
+            workdir: working_dir
+                .map_or_else(|| eff.workdir.clone(), |w| join_container(&eff.workdir, w)),
             mounts,
             stages,
             pythonpath: var("PYTHONPATH"),
@@ -2455,11 +3174,16 @@ impl<'a> Ctx<'a> {
     /// Đường dẫn trong repo mà lệnh trỏ tới, có trên đĩa nhưng không đọc được
     /// vì symlink hay không phải file thường. Chỉ hỏi có tồn tại, không đọc.
     fn unreadable(&self, path: &str) -> Option<String> {
-        let mut candidates: Vec<String> = self.to_repo(&join_container(&self.workdir, path)).into_iter().collect();
+        let mut candidates: Vec<String> = self
+            .to_repo(&join_container(&self.workdir, path))
+            .into_iter()
+            .collect();
         if !path.starts_with('/') {
             candidates.extend(within(&self.context, path));
         }
-        candidates.into_iter().find(|r| kind_in(self.root, r).is_none() && self.root.join(r).symlink_metadata().is_ok())
+        candidates.into_iter().find(|r| {
+            kind_in(self.root, r).is_none() && self.root.join(r).symlink_metadata().is_ok()
+        })
     }
 
     fn start(&self, argv: &[String], file: &str, line: usize) -> Start {
@@ -2483,7 +3207,14 @@ impl<'a> Ctx<'a> {
         if self.cut_more.get() > 0 {
             cut.push(format!("và {} chỗ khác", self.cut_more.get()));
         }
-        Start { file: file.to_string(), line, shown: shown.join(", "), entries, unresolved, cut }
+        Start {
+            file: file.to_string(),
+            line,
+            shown: shown.join(", "),
+            entries,
+            unresolved,
+            cut,
+        }
     }
 
     /// Ghi một chỗ thôi đọc, mỗi lý do một lần.
@@ -2509,14 +3240,22 @@ impl<'a> Ctx<'a> {
             return;
         }
         if !Shared::spend(&self.shared.steps, 1) {
-            self.stop(format!("quá {MAX_LOAD_STEPS} bước lần theo cho cả cấu hình"));
+            self.stop(format!(
+                "quá {MAX_LOAD_STEPS} bước lần theo cho cả cấu hình"
+            ));
             return;
         }
         self.budget.set(self.budget.get() - 1);
         match launch {
             Launch::Module { name, main, dir } => {
-                let mut roots_c = vec![join_container(&self.workdir, dir.as_deref().unwrap_or("."))];
-                for p in self.pythonpath.iter().flat_map(|p| p.split(':')).filter(|p| !p.is_empty()) {
+                let mut roots_c =
+                    vec![join_container(&self.workdir, dir.as_deref().unwrap_or("."))];
+                for p in self
+                    .pythonpath
+                    .iter()
+                    .flat_map(|p| p.split(':'))
+                    .filter(|p| !p.is_empty())
+                {
                     roots_c.push(join_container(&self.workdir, p));
                 }
                 let roots: Vec<String> = roots_c
@@ -2524,12 +3263,19 @@ impl<'a> Ctx<'a> {
                     .filter_map(|c| self.to_repo(c))
                     .filter(|r| kind_in(self.root, r) == Some(Kind::Dir))
                     .collect();
-                out.push(Entry::Module { name: name.clone(), roots, main: *main });
+                out.push(Entry::Module {
+                    name: name.clone(),
+                    roots,
+                    main: *main,
+                });
             }
             Launch::Script(path) => {
                 let Some(repo) = self.locate(path) else {
                     if let Some(r) = self.unreadable(path) {
-                        self.stop(format!("{}: có symlink trên đường dẫn, hay không phải file thường", shown_path(&r)));
+                        self.stop(format!(
+                            "{}: có symlink trên đường dẫn, hay không phải file thường",
+                            shown_path(&r)
+                        ));
                     }
                     return;
                 };
@@ -2546,13 +3292,23 @@ impl<'a> Ctx<'a> {
                 }
             }
             Launch::Npm(name) => {
-                let Some(pkg) = self.locate("package.json") else { return };
-                let Some(json) = self.shared.package(&pkg) else { return };
-                let Some(script) = json.get_path(&["scripts", name]).and_then(|v| v.as_str()) else { return };
+                let Some(pkg) = self.locate("package.json") else {
+                    return;
+                };
+                let Some(json) = self.shared.package(&pkg) else {
+                    return;
+                };
+                let Some(script) = json.get_path(&["scripts", name]).and_then(|v| v.as_str())
+                else {
+                    return;
+                };
                 self.nested(&command::launches_in_shell(script), hops, out);
             }
             Launch::OneOf(candidates) => {
-                if let Some(repo) = candidates.iter().find_map(|c| self.locate(c).filter(|r| kind_in(self.root, r) == Some(Kind::File))) {
+                if let Some(repo) = candidates.iter().find_map(|c| {
+                    self.locate(c)
+                        .filter(|r| kind_in(self.root, r) == Some(Kind::File))
+                }) {
                     out.push(Entry::File(repo));
                 }
             }
@@ -2563,12 +3319,23 @@ impl<'a> Ctx<'a> {
                 };
                 for t in targets {
                     if t.ends_with(".py") {
-                        if let Some(repo) = self.locate(&t).filter(|r| kind_in(self.root, r) == Some(Kind::File)) {
+                        if let Some(repo) = self
+                            .locate(&t)
+                            .filter(|r| kind_in(self.root, r) == Some(Kind::File))
+                        {
                             out.push(Entry::File(repo));
                             return;
                         }
                     } else {
-                        self.resolve(&Launch::Module { name: t, main: false, dir: None }, hops + 1, out);
+                        self.resolve(
+                            &Launch::Module {
+                                name: t,
+                                main: false,
+                                dir: None,
+                            },
+                            hops + 1,
+                            out,
+                        );
                         return;
                     }
                 }
@@ -2612,8 +3379,13 @@ impl<'a> Ctx<'a> {
         let Some(built) = &self.built else { return };
         let name = program.rsplit('/').next().unwrap_or(program);
         let builds = built.builds();
-        let named: Vec<&GoBuild> =
-            builds.iter().filter(|b| b.0.as_deref().is_some_and(|o| o.rsplit('/').next() == Some(name))).collect();
+        let named: Vec<&GoBuild> = builds
+            .iter()
+            .filter(|b| {
+                b.0.as_deref()
+                    .is_some_and(|o| o.rsplit('/').next() == Some(name))
+            })
+            .collect();
         let chosen: Vec<&GoBuild> = match (named.is_empty(), builds.len()) {
             (false, _) => named,
             (true, 1) => builds.iter().collect(),
@@ -2621,13 +3393,19 @@ impl<'a> Ctx<'a> {
         };
         for (_, pkgs, stage) in chosen {
             // Đường dẫn trong stage dựng, qua `COPY` của chính stage đó.
-            let Some(mounts) = self.stages.get(*stage) else { continue };
+            let Some(mounts) = self.stages.get(*stage) else {
+                continue;
+            };
             for p in pkgs {
                 // `go build main.go` truyền file: package là thư mục chứa nó.
-                let Some(repo) = map_to_repo(mounts, p) else { continue };
+                let Some(repo) = map_to_repo(mounts, p) else {
+                    continue;
+                };
                 match kind_in(self.root, &repo) {
                     Some(Kind::Dir) => out.push(Entry::Dir(repo)),
-                    Some(Kind::File) if repo.ends_with(".go") => out.push(Entry::Dir(dir_of(&repo).to_string())),
+                    Some(Kind::File) if repo.ends_with(".go") => {
+                        out.push(Entry::Dir(dir_of(&repo).to_string()))
+                    }
                     _ => {}
                 }
             }
@@ -2660,14 +3438,20 @@ pub fn entry_files(root: &Path, entry: &Entry) -> Result<Vec<String>, String> {
         Entry::Module { name, roots, main } => {
             let path = name.replace('.', "/");
             for r in roots {
-                let base = if r.is_empty() { path.clone() } else { format!("{r}/{path}") };
+                let base = if r.is_empty() {
+                    path.clone()
+                } else {
+                    format!("{r}/{path}")
+                };
                 let file = format!("{base}.py");
                 if kind_in(root, &file) == Some(Kind::File) {
                     return Ok(vec![file]);
                 }
                 let mut found: Vec<String> = Vec::new();
                 for f in [format!("{base}/__init__.py"), format!("{base}/__main__.py")] {
-                    if (*main || f.ends_with("__init__.py")) && kind_in(root, &f) == Some(Kind::File) {
+                    if (*main || f.ends_with("__init__.py"))
+                        && kind_in(root, &f) == Some(Kind::File)
+                    {
                         found.push(f);
                     }
                 }
@@ -2695,11 +3479,30 @@ pub fn touches_deploy(path: &str) -> bool {
 
 /// `go build [cờ] [-o out] [package...]` trong một lệnh `RUN`.
 fn go_builds(run: &str) -> Vec<(Option<String>, Vec<String>)> {
-    const VALUE_FLAGS: &[&str] = &["-o", "-ldflags", "-gcflags", "-asmflags", "-tags", "-mod", "-p", "-pkgdir", "-buildmode", "-compiler", "-installsuffix", "-modfile", "-overlay", "-pgo", "-C"];
+    const VALUE_FLAGS: &[&str] = &[
+        "-o",
+        "-ldflags",
+        "-gcflags",
+        "-asmflags",
+        "-tags",
+        "-mod",
+        "-p",
+        "-pkgdir",
+        "-buildmode",
+        "-compiler",
+        "-installsuffix",
+        "-modfile",
+        "-overlay",
+        "-pgo",
+        "-C",
+    ];
     let mut out = Vec::new();
     for segment in run.split(['&', ';', '|', '\n']) {
         let words = dockerfile::shell_words(segment);
-        let Some(at) = words.windows(2).position(|w| w[0].rsplit('/').next() == Some("go") && w[1] == "build") else {
+        let Some(at) = words
+            .windows(2)
+            .position(|w| w[0].rsplit('/').next() == Some("go") && w[1] == "build")
+        else {
             continue;
         };
         let mut output = None;
@@ -2732,7 +3535,10 @@ fn describe(l: &Launch) -> String {
         Launch::Module { name, .. } => name.clone(),
         Launch::Script(p) | Launch::GoRun(p) | Launch::Program(p) => p.clone(),
         Launch::Npm(n) => format!("npm run {n}"),
-        Launch::OneOf(c) => c.first().map_or_else(String::new, |f| f.rsplit_once('.').map_or(f.clone(), |(s, _)| format!("{s}.*"))),
+        Launch::OneOf(c) => c.first().map_or_else(String::new, |f| {
+            f.rsplit_once('.')
+                .map_or(f.clone(), |(s, _)| format!("{s}.*"))
+        }),
         Launch::FlaskApp => "flask run".into(),
         Launch::Opaque(why) => why.clone(),
     }
@@ -2756,21 +3562,53 @@ mod tests {
 
     #[test]
     fn nhan_ra_ten_file() {
-        for yes in ["docker-compose.yml", "compose.yaml", "docker-compose.prod.yml", "compose.override.yml", "docker-compose-dev.yaml"] {
+        for yes in [
+            "docker-compose.yml",
+            "compose.yaml",
+            "docker-compose.prod.yml",
+            "compose.override.yml",
+            "docker-compose-dev.yaml",
+        ] {
             assert!(is_compose(yes), "{yes}");
         }
-        for no in ["composer.yml", "docker-compose.json", "my-compose.yml", "compose.txt", "docker-compose.test.yml", "compose.e2e.yaml"] {
+        for no in [
+            "composer.yml",
+            "docker-compose.json",
+            "my-compose.yml",
+            "compose.txt",
+            "docker-compose.test.yml",
+            "compose.e2e.yaml",
+        ] {
             assert!(!is_compose(no), "{no}");
         }
-        assert!(is_dockerfile("Dockerfile") && is_dockerfile("Dockerfile.dev") && is_dockerfile("api.Dockerfile"));
-        assert!(!is_deploy_file("tests/docker-compose.yml") && is_deploy_file("deploy/docker-compose.yml"));
-        assert!(!is_deploy_file(".devcontainer/docker-compose.yaml") && !is_deploy_file(".github/compose.yml"));
+        assert!(
+            is_dockerfile("Dockerfile")
+                && is_dockerfile("Dockerfile.dev")
+                && is_dockerfile("api.Dockerfile")
+        );
+        assert!(
+            !is_deploy_file("tests/docker-compose.yml")
+                && is_deploy_file("deploy/docker-compose.yml")
+        );
+        assert!(
+            !is_deploy_file(".devcontainer/docker-compose.yaml")
+                && !is_deploy_file(".github/compose.yml")
+        );
     }
 
     #[test]
     fn lenh_go_build() {
-        assert_eq!(go_builds("CGO_ENABLED=0 go build -ldflags=\"-s\" -o /go/bin/app ./cmd/app"), [(Some("/go/bin/app".to_string()), vec!["./cmd/app".to_string()])]);
-        assert_eq!(go_builds("cd src && go build -o server ."), [(Some("server".to_string()), vec![".".to_string()])]);
+        assert_eq!(
+            go_builds("CGO_ENABLED=0 go build -ldflags=\"-s\" -o /go/bin/app ./cmd/app"),
+            [(
+                Some("/go/bin/app".to_string()),
+                vec!["./cmd/app".to_string()]
+            )]
+        );
+        assert_eq!(
+            go_builds("cd src && go build -o server ."),
+            [(Some("server".to_string()), vec![".".to_string()])]
+        );
         assert_eq!(go_builds("go mod download"), []);
     }
 }

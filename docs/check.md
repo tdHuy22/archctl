@@ -626,8 +626,9 @@ native/ops.cpp (C/C++)
 ```
 
 File compose, Dockerfile và manifest Kubernetes cũng được in: mỗi service hay
-workload một khối, lệnh khởi chạy dẫn tới file nào, cạnh mạng thấy ở đâu, thư
-mục chart Helm không đọc. Giá trị biến môi trường của compose, manifest và
+workload một khối, lệnh khởi chạy dẫn tới file nào, cạnh mạng thấy ở đâu, chart
+Helm (dựng từ `values.yaml`; `--json` in dữ kiện của từng template dựng ra,
+dòng là dòng của template). Giá trị biến môi trường của compose, manifest và
 ConfigMap không bao giờ được in, chỉ tên máy trong đó. Đối số của lệnh (`command`,
 `RUN`, `ENV`, `ARG`) mặc định cũng không, vì hay chở token: chỉ tên chương
 trình, số đối số, từ khoá và dòng; đường dẫn và URL bỏ phần `user:mật khẩu@`.

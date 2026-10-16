@@ -423,8 +423,11 @@ def same_ns(a, b):
     return a is None or b is None or a == b
 
 
-def edges_main(root):
+def edges_main(root, helm_json=None):
+    """`helm_json`: file JSON `{template: [thư mục chart, văn bản dựng ra]}` của
+    `helm template`, đọc như manifest ở thư mục chart."""
     root = Path(root)
+    rendered = json.loads(Path(helm_json).read_text()) if helm_json else {}
     listed = [l.strip() for l in sys.stdin if l.strip()]
     charts = [dir_of(f) for f in listed if f.rsplit("/", 1)[-1] == "Chart.yaml" and not aside(f)]
     patch_files, namespaces = set(), {"default"}
@@ -494,6 +497,7 @@ def edges_main(root):
 
     files = [f for f in listed if not aside(f)] + sorted(f for f in reached if f not in listed or aside(f))
     workloads, services, maps, policies, routes = [], [], [], [], []
+    sources = []
     for f in dict.fromkeys(files):
         name = f.rsplit("/", 1)[-1]
         if not f.endswith((".yaml", ".yml", ".json")):
@@ -506,7 +510,12 @@ def edges_main(root):
             text = Path(root, f).read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             continue
-        if not may_be(text) or len(text.encode()) > (1 << 20):
+        if len(text.encode()) > (1 << 20):
+            continue
+        sources.append((f, dir_of(f), text))
+    sources += [(f, d, t) for f, (d, t) in sorted(rendered.items())]
+    for f, d, text in sources:
+        if not may_be(text):
             continue
         try:
             docs = list(objects(text))
@@ -519,7 +528,7 @@ def edges_main(root):
                 namespaces.add(meta_ns)
             if kind == "Namespace":
                 namespaces.add(scalar(get(doc, "metadata", "name")) or "")
-            obj = {"file": f, "dir": dir_of(f), "name": scalar(get(doc, "metadata", "name")) or "", "ns": meta_ns}
+            obj = {"file": f, "dir": d, "name": scalar(get(doc, "metadata", "name")) or "", "ns": meta_ns}
             if kind == "NetworkPolicy":
                 policies.append({**obj, **policy_of(doc)})
             if kind is not None and (route := route_of(kind, doc)) is not None:
@@ -719,10 +728,23 @@ def edges_main(root):
                      ensure_ascii=False))
 
 
+def helm_facts_main(helm_json):
+    """Dữ kiện từng template theo bản dựng của `helm template`."""
+    for f, (_, text) in sorted(json.loads(Path(helm_json).read_text()).items()):
+        try:
+            facts = manifest_facts(text) if may_be(text) else []
+        except (yaml.YAMLError, ValueError, RecursionError) as e:
+            print(f"{f}\tERR {type(e).__name__}", flush=True)
+            continue
+        print(f"{f}\t{json.dumps({'facts': facts}, ensure_ascii=False)}", flush=True)
+
+
 if __name__ == "__main__":
     if sys.argv[1:2] == ["facts"]:
         facts_main()
+    elif sys.argv[1:2] == ["helmfacts"]:
+        helm_facts_main(sys.argv[2])
     elif sys.argv[1:2] == ["edges"]:
-        edges_main(sys.argv[2])
+        edges_main(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
     else:
         sys.exit("dùng: k8s_truth.py facts | edges <gốc>")

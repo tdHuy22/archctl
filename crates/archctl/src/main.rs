@@ -1293,6 +1293,12 @@ fn scan_deploy(
         format!("[{}]", v.iter().map(|(n, l)| format!("[{},{l}]", quoted(n))).collect::<Vec<_>>().join(","))
     };
 
+    let charts: Vec<String> = files
+        .iter()
+        .filter(|f| f.rsplit('/').next() == Some("Chart.yaml"))
+        .map(|f| f.rsplit_once('/').map_or(String::new(), |(d, _)| format!("{d}/")))
+        .collect();
+    let in_chart = |f: &str| charts.iter().any(|c| f.starts_with(&format!("{c}templates/")) || f.starts_with(&format!("{c}charts/")));
     let mut file_json: Vec<String> = Vec::new();
     for file in files {
         let name = file.rsplit('/').next().unwrap_or(file);
@@ -1314,7 +1320,11 @@ fn scan_deploy(
             }
         };
         if other {
-            if let Some(j) = scan_k8s_file(file, &text, &command, &quoted) {
+            // Template của chart: in bản dựng ra, ở dưới.
+            if in_chart(file) {
+                continue;
+            }
+            if let Some(j) = scan_k8s_file(file, &text, &command, &quoted, None) {
                 file_json.push(j);
             }
             continue;
@@ -1435,7 +1445,14 @@ fn scan_deploy(
         }
     }
 
-    let loaded = deploy::load(root, files, &deploy::Options { k8s: true, ..Default::default() });
+    let loaded = deploy::load(root, files, &deploy::Options { k8s: true, keep_rendered: true, ..Default::default() });
+    // Manifest dựng từ chart Helm: dữ kiện như file manifest, dòng là dòng của
+    // template.
+    for (_, r) in &loaded.rendered {
+        if let Some(j) = scan_k8s_file(&r.file, &r.text, &command, &quoted, Some(&r.lines)) {
+            file_json.push(j);
+        }
+    }
     let mut services: Vec<String> = Vec::new();
     for svc in &loaded.services {
         let key = svc.key.text();
@@ -1539,7 +1556,7 @@ fn scan_deploy(
             say!("chưa đọc được {} — {}", u.file, u.why);
         }
         for c in &loaded.charts {
-            say!("không đọc (chart Helm, không render) {}", if c.is_empty() { "." } else { c });
+            say!("chart Helm {} (dựng từ values.yaml)", if c.is_empty() { "." } else { c });
         }
     }
     let unread: Vec<String> = loaded
@@ -1567,6 +1584,7 @@ fn scan_k8s_file(
     text: &str,
     command: CommandJson<'_>,
     quoted: &dyn Fn(&str) -> String,
+    lines: Option<&[usize]>,
 ) -> Option<String> {
     use arch_core::scan::{dockerfile::Command, k8s};
     let name = file.rsplit('/').next().unwrap_or(file);
@@ -1614,11 +1632,20 @@ fn scan_k8s_file(
             f
         }
         Ok(_) => return None,
+        Err(e) if lines.is_some() => {
+            // Bản dựng hỏng: chỉ dòng của template, không trích văn bản (TM-38).
+            let line = lines.and_then(|m| m.get(e.line.saturating_sub(1)).copied()).unwrap_or(e.line);
+            return Some(format!(r#"{{"file":{},"kind":"k8s","rendered":true,"error":"dòng {line}: YAML dựng ra hỏng"}}"#, json::string(file)));
+        }
         Err(e) if k8s::looks_like(text) => {
             return Some(format!(r#"{{"file":{},"kind":"k8s","error":{}}}"#, json::string(file), json::string(&e.to_string())));
         }
         Err(_) => return None,
     };
+    let mut f = f;
+    if let Some(map) = lines {
+        f.remap_lines(&|l| map.get(l.saturating_sub(1)).copied().unwrap_or(l));
+    }
     let words = |w: &Option<(Vec<String>, usize)>| command(&w.as_ref().map(|(a, l)| (Command::Exec(a.clone()), *l)));
     let workloads: Vec<String> = f
         .workloads
@@ -1780,8 +1807,9 @@ fn scan_k8s_file(
         })
         .collect();
     Some(format!(
-        r#"{{"file":{},"kind":"k8s","workloads":[{}],"services":[{}],"configMaps":[{}],"policies":[{}],"routes":[{}],"unknown":[{}]}}"#,
+        r#"{{"file":{},"kind":"k8s","rendered":{},"workloads":[{}],"services":[{}],"configMaps":[{}],"policies":[{}],"routes":[{}],"unknown":[{}]}}"#,
         json::string(file),
+        lines.is_some(),
         workloads.join(","),
         services.join(","),
         maps.join(","),

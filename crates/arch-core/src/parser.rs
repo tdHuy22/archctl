@@ -40,7 +40,14 @@ pub fn parse(src: &str) -> (Document, Vec<Diag>) {
 
         match keyword {
             "component" | "external" => {
-                parse_component(rest, keyword == "external", meta, line.no, &mut doc, &mut diags);
+                parse_component(
+                    rest,
+                    keyword == "external",
+                    meta,
+                    line.no,
+                    &mut doc,
+                    &mut diags,
+                );
                 i += 1;
             }
             "store" => {
@@ -48,7 +55,11 @@ pub fn parse(src: &str) -> (Document, Vec<Diag>) {
                 i += 1;
             }
             "allow" | "deny" => {
-                let kind = if keyword == "allow" { RuleKind::Allow } else { RuleKind::Deny };
+                let kind = if keyword == "allow" {
+                    RuleKind::Allow
+                } else {
+                    RuleKind::Deny
+                };
                 parse_rule(rest, kind, meta, line.no, &mut doc, &mut diags);
                 i += 1;
             }
@@ -117,14 +128,21 @@ fn collect_lines(src: &str) -> Vec<Line<'_>> {
             if text.is_empty() || text.starts_with('#') {
                 return None;
             }
-            Some(Line { no: idx + 1, indent: trimmed.len() - text.len(), text })
+            Some(Line {
+                no: idx + 1,
+                indent: trimmed.len() - text.len(),
+                text,
+            })
         })
         .collect()
 }
 
 /// Thu các dòng lùi vào liên tiếp làm thân khối. Trả về chỉ số dòng kế tiếp.
 fn take_block<'a, 'b>(lines: &'b [Line<'a>], start: usize) -> (&'b [Line<'a>], usize) {
-    let end = lines[start..].iter().position(|l| l.indent == 0).map_or(lines.len(), |p| start + p);
+    let end = lines[start..]
+        .iter()
+        .position(|l| l.indent == 0)
+        .map_or(lines.len(), |p| start + p);
     (&lines[start..end], end)
 }
 
@@ -163,7 +181,10 @@ fn split_meta<'a>(line: &'a str, no: usize, diags: &mut Vec<Diag>) -> (&'a str, 
     }
     annotations.reverse();
 
-    let mut meta = Meta { line: no, ..Meta::default() };
+    let mut meta = Meta {
+        line: no,
+        ..Meta::default()
+    };
     let mut saw_owner = false;
     let mut saw_status = false;
     for token in annotations {
@@ -172,7 +193,11 @@ fn split_meta<'a>(line: &'a str, no: usize, diags: &mut Vec<Diag>) -> (&'a str, 
                 if saw_owner {
                     diags.push(Diag::warning(no, "có nhiều hơn một chú thích chủ sở hữu"));
                 }
-                meta.owner = if token == "@ai" { Owner::Ai } else { Owner::Human };
+                meta.owner = if token == "@ai" {
+                    Owner::Ai
+                } else {
+                    Owner::Human
+                };
                 saw_owner = true;
             }
             "#draft" | "#proposed" | "#accepted" | "#locked" => {
@@ -262,18 +287,11 @@ fn unescape_quotes(command: &str) -> String {
 ///
 /// Lệnh nằm trong dấu nháy kép, vì nó gần như luôn có khoảng trắng và vì dấu
 /// nháy làm rõ đâu là ranh giới của nó.
-fn parse_verify(
-    rest: &str,
-    meta: Meta,
-    line: usize,
-    doc: &mut Document,
-    diags: &mut Vec<Diag>,
-) {
+fn parse_verify(rest: &str, meta: Meta, line: usize, doc: &mut Document, diags: &mut Vec<Diag>) {
     let Some((name, command)) = rest.split_once(" runs ") else {
         diags.push(
-            Diag::error(line, "thiếu `runs` trong khai báo verify").with_hint(
-                "dạng đúng: verify <tên> runs \"<lệnh>\"",
-            ),
+            Diag::error(line, "thiếu `runs` trong khai báo verify")
+                .with_hint("dạng đúng: verify <tên> runs \"<lệnh>\""),
         );
         return;
     };
@@ -290,7 +308,10 @@ fn parse_verify(
         return;
     };
     if command.trim().is_empty() {
-        diags.push(Diag::error(line, format!("cách kiểm `{name}` có lệnh rỗng")));
+        diags.push(Diag::error(
+            line,
+            format!("cách kiểm `{name}` có lệnh rỗng"),
+        ));
         return;
     }
     doc.verifies.push(Verify {
@@ -327,7 +348,9 @@ fn push_item(out: &mut Vec<String>, current: &mut String) {
 }
 
 fn is_ident(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
 }
 
 fn check_ident(name: &str, what: &str, no: usize, diags: &mut Vec<Diag>) -> bool {
@@ -360,7 +383,12 @@ fn parse_component(
     if !check_ident(name, "tên component", no, diags) {
         return;
     }
-    doc.components.push(Component { name: name.to_string(), paths, external, meta });
+    doc.components.push(Component {
+        name: name.to_string(),
+        paths,
+        external,
+        meta,
+    });
 }
 
 fn parse_store(rest: &str, meta: Meta, no: usize, doc: &mut Document, diags: &mut Vec<Diag>) {
@@ -420,13 +448,23 @@ fn parse_rule(
         diags.push(Diag::error(no, "quan hệ không có đích nào"));
         return;
     }
-    let Some(from) = parse_target(from.trim(), no, diags) else { return };
+    let Some(from) = parse_target(from.trim(), no, diags) else {
+        return;
+    };
     let mut to_targets = Vec::with_capacity(items.len());
     for item in &items {
-        let Some(target) = parse_target(item, no, diags) else { return };
+        let Some(target) = parse_target(item, no, diags) else {
+            return;
+        };
         to_targets.push(target);
     }
-    doc.rules.push(Rule { kind, from, to: to_targets, except, meta });
+    doc.rules.push(Rule {
+        kind,
+        from,
+        to: to_targets,
+        except,
+        meta,
+    });
 }
 
 fn parse_target(s: &str, no: usize, diags: &mut Vec<Diag>) -> Option<Target> {
@@ -453,7 +491,9 @@ fn parse_service(rest: &str, meta: Meta, no: usize, doc: &mut Document, diags: &
         Some((n, f)) => (n.trim(), Some(f.trim())),
         None => (head.trim(), None),
     };
-    let from: Vec<&str> = from.map(|f| f.split(',').map(str::trim).collect()).unwrap_or_default();
+    let from: Vec<&str> = from
+        .map(|f| f.split(',').map(str::trim).collect())
+        .unwrap_or_default();
     if name.contains(" runs") || from.iter().any(|f| f.is_empty() || f.contains(' ')) {
         diags.push(
             Diag::error(no, "`service` viết sai thứ tự hay thừa chữ")
@@ -476,13 +516,18 @@ fn parse_service(rest: &str, meta: Meta, no: usize, doc: &mut Document, diags: &
             Err(why) => {
                 diags.push(Diag::error(no, format!("`from {text}`: {why}")).with_hint(
                     "dạng đúng: from compose:<service>, compose:<thư mục>/<service>, \
-                     k8s:<workload>, k8s:<thư mục>/<workload>, dockerfile:<đường dẫn>",
+                     k8s:<workload>, k8s:<thư mục>/<workload>, dockerfile:<đường dẫn>, values:<đường dẫn>",
                 ));
                 return;
             }
         }
     }
-    doc.services.push(Service { name: name.to_string(), sources, runs, meta });
+    doc.services.push(Service {
+        name: name.to_string(),
+        sources,
+        runs,
+        meta,
+    });
 }
 
 /// Đường dẫn trong `from` là tương đối với gốc dự án và không được ra khỏi đó:
@@ -493,7 +538,9 @@ fn parse_source(text: &str) -> Result<Source, String> {
         !path.is_empty()
             && !path.starts_with('/')
             && !path.contains('\\')
-            && path.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+            && path
+                .split('/')
+                .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
     };
     // `compose:<thư mục>/<tên>` và `k8s:<thư mục>/<tên>`: `./` là gốc dự án.
     let scoped = |rest: &str, what: &str| -> Result<(Option<String>, String), String> {
@@ -507,7 +554,9 @@ fn parse_source(text: &str) -> Result<Source, String> {
         let dir = match dir {
             Some(".") => Some(""),
             Some(d) if !relative(d) => {
-                return Err(format!("thư mục `{d}` phải là đường dẫn tương đối nằm trong dự án"));
+                return Err(format!(
+                    "thư mục `{d}` phải là đường dẫn tương đối nằm trong dự án"
+                ));
             }
             d => d,
         };
@@ -523,16 +572,28 @@ fn parse_source(text: &str) -> Result<Source, String> {
     }
     if let Some(path) = text.strip_prefix("dockerfile:") {
         if !relative(path) {
-            return Err(format!("`{path}` phải là đường dẫn tương đối nằm trong dự án"));
+            return Err(format!(
+                "`{path}` phải là đường dẫn tương đối nằm trong dự án"
+            ));
         }
         return Ok(Source::Dockerfile(path.to_string()));
+    }
+    if let Some(path) = text.strip_prefix("values:") {
+        if !relative(path) {
+            return Err(format!(
+                "`{path}` phải là đường dẫn tương đối nằm trong dự án"
+            ));
+        }
+        return Ok(Source::Values(path.to_string()));
     }
     Err("không nhận ra nguồn cấu hình".into())
 }
 
 /// Tên service mà compose chấp nhận.
 fn is_compose_name(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
 /// `link Api -> Qdrant, Db`
@@ -558,7 +619,11 @@ fn parse_link(rest: &str, meta: Meta, no: usize, doc: &mut Document, diags: &mut
             return;
         }
     }
-    doc.links.push(Link { from: from.to_string(), to, meta });
+    doc.links.push(Link {
+        from: from.to_string(),
+        to,
+        meta,
+    });
 }
 
 fn parse_view(rest: &str, meta: Meta, no: usize, doc: &mut Document, diags: &mut Vec<Diag>) {
@@ -592,18 +657,26 @@ fn parse_api(rest: &str, meta: Meta, no: usize, doc: &mut Document, diags: &mut 
     }
     let symbols = split_list(symbols);
     if symbols.is_empty() {
-        diags.push(Diag::error(no, format!("api `{}` không liệt kê ký hiệu nào", name.trim())));
+        diags.push(Diag::error(
+            no,
+            format!("api `{}` không liệt kê ký hiệu nào", name.trim()),
+        ));
         return;
     }
-    doc.apis.push(Api { name: name.trim().to_string(), symbols, meta });
+    doc.apis.push(Api {
+        name: name.trim().to_string(),
+        symbols,
+        meta,
+    });
 }
 
 fn parse_invariant(rest: &str, meta: Meta, no: usize, doc: &mut Document, diags: &mut Vec<Diag>) {
     let mut cursor = rest.trim();
     let Some(kind_end) = cursor.find(char::is_whitespace) else {
         diags.push(
-            Diag::error(no, "`invariant` thiếu nội dung")
-                .with_hint("dạng đúng: invariant <loại> [<phạm vi>] <mệnh đề> [verify <cách kiểm>]"),
+            Diag::error(no, "`invariant` thiếu nội dung").with_hint(
+                "dạng đúng: invariant <loại> [<phạm vi>] <mệnh đề> [verify <cách kiểm>]",
+            ),
         );
         return;
     };
@@ -657,11 +730,21 @@ fn parse_flow(
         diags.push(Diag::error(no, "`flow` thiếu dấu hai chấm ở cuối"));
     }
     if body.is_empty() {
-        diags.push(Diag::warning(no, format!("flow `{name}` không có bước nào")));
+        diags.push(Diag::warning(
+            no,
+            format!("flow `{name}` không có bước nào"),
+        ));
     }
 
-    let lines = body.iter().filter_map(|l| parse_flow_line(l, diags)).collect();
-    doc.flows.push(Flow { name: name.to_string(), lines, meta });
+    let lines = body
+        .iter()
+        .filter_map(|l| parse_flow_line(l, diags))
+        .collect();
+    doc.flows.push(Flow {
+        name: name.to_string(),
+        lines,
+        meta,
+    });
 }
 
 fn parse_flow_line(line: &Line<'_>, diags: &mut Vec<Diag>) -> Option<FlowLine> {
@@ -694,8 +777,11 @@ fn parse_flow_line(line: &Line<'_>, diags: &mut Vec<Diag>) -> Option<FlowLine> {
         });
     }
     if text.contains("->") {
-        let steps: Vec<String> =
-            text.split("->").map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        let steps: Vec<String> = text
+            .split("->")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
         if steps.len() < 2 {
             diags.push(Diag::error(line.no, "chuỗi bước cần ít nhất hai bước"));
             return None;
@@ -703,9 +789,8 @@ fn parse_flow_line(line: &Line<'_>, diags: &mut Vec<Diag>) -> Option<FlowLine> {
         return Some(FlowLine::Sequence(steps));
     }
     diags.push(
-        Diag::error(line.no, format!("không hiểu dòng trong flow: `{text}`")).with_hint(
-            "dạng hợp lệ: `a -> b`, `parallel: a, b`, `if <đk>: a`, `on_fail(a): b`",
-        ),
+        Diag::error(line.no, format!("không hiểu dòng trong flow: `{text}`"))
+            .with_hint("dạng hợp lệ: `a -> b`, `parallel: a, b`, `if <đk>: a`, `on_fail(a): b`"),
     );
     None
 }
@@ -784,7 +869,11 @@ fn parse_fields(body: &[Line<'_>]) -> Vec<Field> {
         };
         fields.push(Field {
             key: key.trim_end_matches(':').to_string(),
-            values: if value.is_empty() { Vec::new() } else { vec![value.to_string()] },
+            values: if value.is_empty() {
+                Vec::new()
+            } else {
+                vec![value.to_string()]
+            },
             line: line.no,
         });
     }

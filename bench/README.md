@@ -168,6 +168,13 @@ bộ trích, nên một lỗi trong bộ trích làm cả hai sai giống nhau m
   workload lộ ra Internet (Service, Ingress, route, `hostNetwork`)
   được tính lại độc lập theo tài liệu Kubernetes ([k8s_truth.py](k8s_truth.py)).
   Cùng venv và cùng `--require deploy`.
+- Helm: chart (không nằm trong thư mục ví dụ) được `helm template` bản ghim dựng
+  (tải từ get.helm.sh, kiểm sha256, chỉ khi `--require helm`; CI bật). Bản dựng
+  tách theo `# Source:` thành từng template; dữ kiện từng template (như mục
+  Kubernetes, không kèm dòng vì helm chỉ có dòng của văn bản dựng ra) so với bản
+  archctl tự dựng, và bản dựng của helm đi vào phần tính cạnh, lối vào,
+  NetworkPolicy của `k8s_truth.py`. Không có helm thì mọi thứ archctl dựng từ
+  chart bị bỏ khỏi phép so.
 - Tên máy trong chuỗi: `(dòng, máy:cổng)` mà `scan --json` đọc từ chuỗi của mọi
   file Python và Go được tính lại bằng [code_hosts.py](code_hosts.py). Chuỗi và
   chỗ nó đứng (tham số, gán có kiểu hay không, khoá dict, giá trị mặc định của
@@ -245,10 +252,13 @@ thị Dockerfile), đối chiếu bằng PyYAML nên cần mạng. Ba kiểu đ�
 microservices-demo, nơi `link` và `runs` đến từ manifest Kubernetes, cùng kiểu
 `rpc` cho cạnh gRPC khác ngôn ngữ, cộng hai kiểu ở NetworkPolicy (`check` giấu vi phạm do policy cho phép, giấu cảnh báo
 `link` bị chặn), một kiểu ở lối vào từ Internet (`check` giấu vi phạm từ
-`Internet`). `--k8s-repo microservices-demo` thêm bảy kiểu ở dữ kiện
-manifest, cạnh qua Service và NetworkPolicy (mất một biến môi trường, lệch dòng
-một workload, mất một cạnh, đổi đích một cạnh, mất một peer của policy, đổi một
-workload bị cô lập thành không, bỏ lối vào của một workload).
+`Internet`), một kiểu ở chart Helm (`check` giấu vi phạm nằm ở template;
+`consistency.DEPLOY` đòi gỡ `link Frontend -> Cartservice` thì phải báo ở
+`helm-chart/templates/frontend.yaml`). `--k8s-repo microservices-demo` thêm tám
+kiểu ở dữ kiện manifest, cạnh qua Service và NetworkPolicy (mất một biến môi
+trường, lệch dòng một workload, mất một cạnh, đổi đích một cạnh, mất một peer
+của policy, đổi một workload bị cô lập thành không, bỏ lối vào của một workload,
+mất một biến môi trường của manifest dựng từ chart).
 
 Kiểu `rpc` xoá cạnh gRPC bắt buộc (`consistency.RPC`: etcd `Client -> Server`,
 `Api -> Server`) khỏi cả luật `init` sinh ra lẫn vi phạm `check` báo.
@@ -260,7 +270,7 @@ Currencyservice`, `Checkoutservice -> Paymentservice`).
 `rpc`, lệch dòng một `service`), đối chiếu bằng `protoc` của grpcio-tools nên
 cần mạng. CI chạy bước này sau bộ đo, với `--rust-repo ripgrep
 --notebook-repo matplotlib --deploy-repo example-voting-app --k8s-repo
-microservices-demo --proto-repo vllm`: bốn mươi bảy kiểu phá.
+microservices-demo --proto-repo vllm`: bốn mươi chín kiểu phá.
 
 Nó có mặt vì bộ đo này từng nằm ngoài git, và lúc đưa vào, đọc lại thì bốn
 phép kiểm không kiểm gì: một cái chỉ xét file có tồn tại vì vế sau của `or`

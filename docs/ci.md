@@ -120,16 +120,18 @@ cạnh qua Service ([k8s_truth.py](../bench/k8s_truth.py)). Bốn cái đầu c�
 mở lại mạng cho cargo (`CARGO_NET_OFFLINE: "false"`); archctl đã dựng xong ở
 bước trước khi còn offline, và crate tải về chỉ vào trình đọc của bộ đo, ghim
 cứng bằng `=`. IPython, PyYAML và dockerfile-parse cài bằng pip vào venv riêng,
-mọi gói ghim `==` kèm sha256; grpcio-tools (`protoc`) cũng vậy. `--require
-clang,node,go,syn,ipython,deploy,proto` để ngày thiếu một cái thì bước này đỏ
-chứ không lặng lẽ bỏ qua. Hai mươi bảy trong bốn mươi bảy kiểu phá của
+mọi gói ghim `==` kèm sha256; grpcio-tools (`protoc`) cũng vậy. `helm` bản ghim
+tải từ get.helm.sh, kiểm sha256 của tarball. `--require
+clang,node,go,syn,ipython,deploy,proto,helm` để ngày thiếu một cái thì bước này
+đỏ chứ không lặng lẽ bỏ qua. Hai mươi tám trong bốn mươi chín kiểu phá của
 `sabotage.py` nhắm vào bước này: ba ở import Python, hai ở tên máy trong chuỗi
 của mã Python, ba ở import Rust, hai ở
 notebook, bốn ở cạnh Python ↔ native, bốn ở compose và Dockerfile, bảy ở
 manifest Kubernetes, cạnh qua Service, NetworkPolicy và lối vào từ Internet,
-hai ở `.proto`. Mười một kiểu khác nhắm vào phần hạ tầng của chính bộ đo (năm
-trên compose gồm một ở tên máy viết trong mã, sáu trên manifest Kubernetes gồm
-hai ở NetworkPolicy, một ở lối vào), một kiểu vào cạnh gRPC bắt buộc (chạy
+một ở manifest dựng từ chart Helm, hai ở `.proto`. Mười hai kiểu khác nhắm vào
+phần hạ tầng của chính bộ đo (năm trên compose gồm một ở tên máy viết trong mã,
+bảy trên manifest Kubernetes gồm hai ở NetworkPolicy, một ở lối vào, một ở
+chart Helm), một kiểu vào cạnh gRPC bắt buộc (chạy
 trên etcd, và trên microservices-demo cho cạnh khác ngôn ngữ: Python ↔ Go, Go →
 Node). Phần Rust cũng cần `syn`, nên bước
 sabotage mở mạng giống bước đối chiếu.

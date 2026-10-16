@@ -172,7 +172,8 @@ https://claude.ai/code/artifact/2b26df5d-d6b0-40d0-a398-7e574c7d1387
   lối vào từ Internet (Ingress, Gateway API, Istio, `LoadBalancer`, cổng
   compose) cần `link Internet -> …`; tên máy viết thẳng trong mã cũng cần
   `link`.**
-  Helm, patch Kustomize, Terraform và gRPC của Java, C# thì chưa (template Helm và patch đổi lệnh
+  Chart Helm được tự dựng từ `values.yaml` (tập con template; ngoài tập con thì
+  báo chưa đọc). Patch Kustomize, Terraform và gRPC của Java, C# thì chưa (patch đổi lệnh
   được báo là chưa đọc); cạnh mạng chỉ có lúc chạy (tên máy ghép trong mã,
   service discovery) thì không thấy — xem [docs/infra.md](docs/infra.md).
 - **File trên 4 MB không được dò**, và được báo ra. Bộ dò giữ cả dãy token

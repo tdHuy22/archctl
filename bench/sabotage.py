@@ -139,6 +139,8 @@ K8S_BENCH_MODES |= {
     "rpc": RPC_MODES["rpc"],
     # lối vào từ Internet
     "deploy-internet": "gỡ link Internet",
+    # cạnh từ manifest dựng từ chart Helm
+    "deploy-helm": "mà check không báo ở chart",
 }
 # phá dữ kiện manifest và cạnh qua Service trong `scan --json` → dòng `oracle.py` phải in ra
 K8S_ORACLE_MODES = {
@@ -149,6 +151,8 @@ K8S_ORACLE_MODES = {
     "k8s-policy": "thiếu:",
     "k8s-guard": "lệch NetworkPolicy",
     "k8s-exposed": "thiếu lối vào từ Internet",
+    # manifest dựng từ chart Helm: mất một biến môi trường
+    "helm-drop": "thiếu:",
 }
 
 # phá dữ kiện `.proto` trong `scan --json` → dòng `oracle.py` phải in ra
@@ -201,6 +205,14 @@ def sabotage_k8s(rep: dict, mode: str):
     """Làm hỏng dữ kiện manifest đầu tiên đúng loại, hay cạnh qua Service đầu
     tiên, trong `scan --json`."""
     dep = rep.get("deploy", {})
+    if mode == "helm-drop":
+        for f in dep.get("files", []):
+            for w in f.get("workloads", []) if f.get("rendered") else []:
+                for c in w["containers"]:
+                    if c["env"]:
+                        c["env"].pop(0)
+                        return
+        return
     if mode == "k8s-exposed":
         for s in dep.get("services", []):
             if s["key"].startswith("k8s:") and s.get("exposed"):
@@ -356,6 +368,8 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
             rep["linksBlocked"] = []
         elif mode == "deploy-internet":
             rep["violations"] = [v for v in rep["violations"] if v["from"] != "Internet"]
+        elif mode == "deploy-helm":
+            rep["violations"] = [v for v in rep["violations"] if "/templates/" not in v["file"]]
         elif mode == "deploy-code":
             rep["violations"] = [v for v in rep["violations"]
                                  if not (v.get("reason") == "not_linked" and v["file"].endswith((".py", ".js")))]
@@ -464,6 +478,9 @@ def main():
             if mode in DEPLOY_ORACLE_MODES or mode in K8S_ORACLE_MODES \
                     or (script == "oracle.py" and repo in (args.deploy_repo, args.k8s_repo) and not mode):
                 need = ["deploy"]
+            # Repo manifest Kubernetes có chart Helm: đối chiếu với `helm template`.
+            if script == "oracle.py" and repo == args.k8s_repo and (mode in K8S_ORACLE_MODES or not mode):
+                need = [*need, "helm"]
             binding_repos = {r for _, r, _ in BINDING_ORACLE_RUNS}
             if mode in BINDING_ORACLE_MODES or (script == "oracle.py" and not mode and repo in binding_repos
                                                 and repo not in (args.notebook_repo, args.rust_repo, args.repo)):

@@ -171,7 +171,7 @@ jobs:
         run: python3 bench/bench.py --archctl target/release/archctl --rounds 1
 
       # Bộ đo bắt được lỗi chỉ khi từng phép kiểm của nó đổ được. Bước này phá
-      # archctl bốn mươi bảy kiểu và đòi bộ đo bắt đúng từng kiểu — nếu một lần sửa sau
+      # archctl bốn mươi chín kiểu và đòi bộ đo bắt đúng từng kiểu — nếu một lần sửa sau
       # này vô tình làm một phép kiểm luôn đạt, nó đỏ ở đây.
       #
       # `--rust-repo` phá thêm phần Rust của bước đối chiếu bên dưới, phần dùng
@@ -211,11 +211,13 @@ jobs:
       # ghim, không `setup.py` nào chạy lúc cài. Job chỉ có quyền đọc, không secret.
       # Compose và Dockerfile đối chiếu với PyYAML và dockerfile-parse, cài y như
       # vậy từ `bench/deploy-requirements.txt`. File `.proto` đối chiếu với
-      # `protoc` (grpcio-tools), từ `bench/proto-requirements.txt`.
+      # `protoc` (grpcio-tools), từ `bench/proto-requirements.txt`. Chart Helm đối
+      # chiếu với `helm template` bản ghim (tải từ get.helm.sh, kiểm sha256 của
+      # tarball, xem `HELM_SHA256` trong `bench/oracle.py`).
       - name: đối chiếu với parser chuẩn
         env:
           CARGO_NET_OFFLINE: "false"
-        run: python3 bench/oracle.py --archctl target/release/archctl --require clang,node,go,syn,ipython,deploy,proto
+        run: python3 bench/oracle.py --archctl target/release/archctl --require clang,node,go,syn,ipython,deploy,proto,helm
 
   mo-hinh:
     name: kiến trúc mô hình

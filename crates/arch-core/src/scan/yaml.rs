@@ -44,6 +44,10 @@ impl std::fmt::Display for Error {
 #[derive(Debug, Clone, Default)]
 pub struct Yaml {
     nodes: Vec<Raw>,
+    /// Node là vô hướng viết trần (không nháy, không `|`/`>`): `false`, `3` là
+    /// bool, số; `"false"` là chuỗi. Template Helm cần phân biệt. Mảng riêng để
+    /// `Raw` không phình ra.
+    plain: Vec<bool>,
     docs: Vec<usize>,
 }
 
@@ -83,7 +87,9 @@ impl std::fmt::Debug for Node<'_> {
 
 impl Yaml {
     pub fn documents(&self) -> impl Iterator<Item = Node<'_>> {
-        self.docs.iter().map(move |&index| Node { yaml: self, index })
+        self.docs
+            .iter()
+            .map(move |&index| Node { yaml: self, index })
     }
 
     /// Cả cây dưới dạng JSON, mỗi tài liệu một phần tử. Mọi giá trị là chuỗi
@@ -158,6 +164,11 @@ impl<'a> Node<'a> {
         }
     }
 
+    /// Vô hướng viết trần, không nháy: có thể là bool hay số.
+    pub fn is_plain(self) -> bool {
+        self.yaml.plain.get(self.index).copied().unwrap_or(false)
+    }
+
     pub fn is_null(self) -> bool {
         matches!(self.raw().value, Value::Null)
     }
@@ -173,10 +184,10 @@ impl<'a> Node<'a> {
     /// Giá trị của một khoá, đã tính khoá gộp `<<`.
     pub fn get(self, key: &str) -> Option<Node<'a>> {
         match &self.raw().value {
-            Value::Map(entries) => entries
-                .iter()
-                .find(|e| e.key == key)
-                .map(|e| Node { yaml: self.yaml, index: e.value }),
+            Value::Map(entries) => entries.iter().find(|e| e.key == key).map(|e| Node {
+                yaml: self.yaml,
+                index: e.value,
+            }),
             _ => None,
         }
     }
@@ -188,7 +199,16 @@ impl<'a> Node<'a> {
             Value::Map(e) => e,
             _ => &[],
         };
-        entries.iter().map(move |e| (e.key.as_str(), e.line, Node { yaml, index: e.value }))
+        entries.iter().map(move |e| {
+            (
+                e.key.as_str(),
+                e.line,
+                Node {
+                    yaml,
+                    index: e.value,
+                },
+            )
+        })
     }
 
     /// Phần tử của sequence. Rỗng nếu không phải sequence.
@@ -207,7 +227,11 @@ pub fn parse(text: &str) -> Result<Yaml, Error> {
     let text = crate::strip_bom(text);
     let mut p = Parser::new(text);
     p.documents()?;
-    Ok(Yaml { nodes: p.nodes, docs: p.docs })
+    Ok(Yaml {
+        nodes: p.nodes,
+        plain: p.plains,
+        docs: p.docs,
+    })
 }
 
 struct Line {
@@ -222,6 +246,7 @@ struct Parser<'a> {
     i: usize,
     col: usize,
     nodes: Vec<Raw>,
+    plains: Vec<bool>,
     docs: Vec<usize>,
     anchors: HashMap<String, usize>,
     merged: usize,
@@ -229,13 +254,19 @@ struct Parser<'a> {
 }
 
 fn err<T>(line: usize, msg: impl Into<String>) -> Result<T, Error> {
-    Err(Error { line, msg: msg.into() })
+    Err(Error {
+        line,
+        msg: msg.into(),
+    })
 }
 
 /// Dòng bắt đầu bằng `---` hay `...` ở cột 0, theo sau là khoảng trắng hay hết dòng.
 fn is_marker(text: &str) -> bool {
     (text.starts_with("---") || text.starts_with("..."))
-        && text[3..].chars().next().is_none_or(|c| c == ' ' || c == '\t')
+        && text[3..]
+            .chars()
+            .next()
+            .is_none_or(|c| c == ' ' || c == '\t')
 }
 
 fn is_seq_item(text: &str) -> bool {
@@ -267,8 +298,8 @@ fn key_end(text: &str) -> Option<usize> {
             }
             None
         }
-        b'[' | b'{' | b']' | b'}' | b',' | b'#' | b'&' | b'*' | b'!' | b'|' | b'>' | b'%' | b'@'
-        | b'`' | b'?' => None,
+        b'[' | b'{' | b']' | b'}' | b',' | b'#' | b'&' | b'*' | b'!' | b'|' | b'>' | b'%'
+        | b'@' | b'`' | b'?' => None,
         b'-' if bytes.len() == 1 || matches!(bytes[1], b' ' | b'\t') => None,
         _ => {
             for j in 0..bytes.len() {
@@ -311,13 +342,20 @@ impl<'a> Parser<'a> {
         let mut start = 0;
         for (idx, b) in text.bytes().enumerate() {
             if b == b'\n' {
-                let end = if idx > start && text.as_bytes()[idx - 1] == b'\r' { idx - 1 } else { idx };
+                let end = if idx > start && text.as_bytes()[idx - 1] == b'\r' {
+                    idx - 1
+                } else {
+                    idx
+                };
                 lines.push(Line { start, end });
                 start = idx + 1;
             }
         }
         if start < text.len() {
-            lines.push(Line { start, end: text.len() });
+            lines.push(Line {
+                start,
+                end: text.len(),
+            });
         }
         Parser {
             text,
@@ -325,6 +363,7 @@ impl<'a> Parser<'a> {
             i: 0,
             col: 0,
             nodes: Vec::new(),
+            plains: Vec::new(),
             docs: Vec::new(),
             anchors: HashMap::new(),
             merged: 0,
@@ -365,7 +404,10 @@ impl<'a> Parser<'a> {
         self.skip_spaces();
         let rest = self.rest();
         if !rest.is_empty() && !rest.starts_with('#') {
-            return err(self.line_no(), format!("thừa nội dung sau giá trị, ở cột {}", self.col + 1));
+            return err(
+                self.line_no(),
+                format!("thừa nội dung sau giá trị, ở cột {}", self.col + 1),
+            );
         }
         self.next_line();
         Ok(())
@@ -402,12 +444,21 @@ impl<'a> Parser<'a> {
 
     fn push(&mut self, line: usize, value: Value) -> usize {
         self.nodes.push(Raw { line, value });
+        self.plains.push(false);
+        self.nodes.len() - 1
+    }
+
+    fn push_plain(&mut self, line: usize, value: Value) -> usize {
+        self.nodes.push(Raw { line, value });
+        self.plains.push(true);
         self.nodes.len() - 1
     }
 
     fn documents(&mut self) -> Result<(), Error> {
         loop {
-            let Some((i, indent)) = self.peek()? else { return Ok(()) };
+            let Some((i, indent)) = self.peek()? else {
+                return Ok(());
+            };
             self.i = i;
             self.col = 0;
             let t = self.line_text(i);
@@ -441,7 +492,9 @@ impl<'a> Parser<'a> {
     /// `khoá:` rồi `- a` cùng cột.
     fn block(&mut self, parent: isize, compact: Option<usize>) -> Result<usize, Error> {
         let line = self.line_no();
-        let Some((i, indent)) = self.peek()? else { return Ok(self.push(line, Value::Null)) };
+        let Some((i, indent)) = self.peek()? else {
+            return Ok(self.push(line, Value::Null));
+        };
         let t = self.line_text(i);
         if indent == 0 && is_marker(t) {
             return Ok(self.push(line, Value::Null));
@@ -471,7 +524,10 @@ impl<'a> Parser<'a> {
             self.block(parent, compact)?
         } else {
             if compact.is_some() && (is_seq_item(rest) || key_end(rest).is_some()) {
-                return err(self.line_no(), "sau `khoá:` không mở được sequence hay mapping trên cùng dòng");
+                return err(
+                    self.line_no(),
+                    "sau `khoá:` không mở được sequence hay mapping trên cùng dòng",
+                );
             }
             self.inline(parent)?
         };
@@ -486,6 +542,11 @@ impl<'a> Parser<'a> {
     /// Giá trị rỗng có tag (`!!python/name:x` không có gì sau) là chuỗi rỗng,
     /// không phải null: tag đã nói nó là gì.
     fn untag_null(&mut self, node: usize, tagged: bool) {
+        // Có tag (`!!str false`) thì không còn là vô hướng trần: không đọc
+        // thành bool hay số.
+        if tagged {
+            self.plains[node] = false;
+        }
         if tagged && matches!(self.nodes[node].value, Value::Null) {
             self.nodes[node].value = Value::Str(String::new());
         }
@@ -499,7 +560,9 @@ impl<'a> Parser<'a> {
         loop {
             self.skip_spaces();
             let rest = self.rest();
-            let Some(first) = rest.chars().next() else { break };
+            let Some(first) = rest.chars().next() else {
+                break;
+            };
             if first != '&' && first != '!' {
                 break;
             }
@@ -524,7 +587,9 @@ impl<'a> Parser<'a> {
         let rest = self.rest();
         let line = self.line_no();
         let column = self.col;
-        let Some(first) = rest.chars().next() else { return Ok(self.push(line, Value::Null)) };
+        let Some(first) = rest.chars().next() else {
+            return Ok(self.push(line, Value::Null));
+        };
         match first {
             '*' => {
                 let len = rest.find([' ', '\t']).unwrap_or(rest.len());
@@ -562,7 +627,10 @@ impl<'a> Parser<'a> {
 
     /// Đặt vị trí đọc vào byte `at` của cả văn bản.
     fn seek(&mut self, at: usize) {
-        let i = self.lines.partition_point(|l| l.start <= at).saturating_sub(1);
+        let i = self
+            .lines
+            .partition_point(|l| l.start <= at)
+            .saturating_sub(1);
         self.i = i;
         self.col = at.saturating_sub(self.lines.get(i).map_or(0, |l| l.start));
     }
@@ -574,7 +642,9 @@ impl<'a> Parser<'a> {
         loop {
             self.col = column + 1; // sau dấu `-`
             items.push(self.value(column as isize, None)?);
-            let Some((i, indent)) = self.peek()? else { break };
+            let Some((i, indent)) = self.peek()? else {
+                break;
+            };
             let t = self.line_text(i);
             if indent == 0 && is_marker(t) {
                 break;
@@ -606,12 +676,22 @@ impl<'a> Parser<'a> {
                 merges.push((value, key_line));
             } else if let Some(&at) = index.get(&key) {
                 // Khoá trùng: khoá sau thắng, như PyYAML.
-                entries[at] = Entry { key, line: key_line, value };
+                entries[at] = Entry {
+                    key,
+                    line: key_line,
+                    value,
+                };
             } else {
                 index.insert(key.clone(), entries.len());
-                entries.push(Entry { key, line: key_line, value });
+                entries.push(Entry {
+                    key,
+                    line: key_line,
+                    value,
+                });
             }
-            let Some((i, indent)) = self.peek()? else { break };
+            let Some((i, indent)) = self.peek()? else {
+                break;
+            };
             let t = self.line_text(i);
             if indent == 0 && is_marker(t) {
                 break;
@@ -642,7 +722,11 @@ impl<'a> Parser<'a> {
 
     /// Gộp mục của các mapping mà `<<` trỏ tới. Mục viết thẳng thắng mục gộp,
     /// mapping đứng trước trong danh sách `<<` thắng mapping đứng sau.
-    fn merge(&mut self, entries: &mut Vec<Entry>, merges: Vec<(usize, usize)>) -> Result<(), Error> {
+    fn merge(
+        &mut self,
+        entries: &mut Vec<Entry>,
+        merges: Vec<(usize, usize)>,
+    ) -> Result<(), Error> {
         if merges.is_empty() {
             return Ok(());
         }
@@ -676,7 +760,10 @@ impl<'a> Parser<'a> {
     fn key(&mut self) -> Result<(String, bool), Error> {
         let rest = self.rest();
         let Some(end) = key_end(rest) else {
-            return err(self.line_no(), format!("cần một khoá `tên:` ở cột {}", self.col + 1));
+            return err(
+                self.line_no(),
+                format!("cần một khoá `tên:` ở cột {}", self.col + 1),
+            );
         };
         let raw = rest[..end].trim_end();
         let (key, plain) = if raw.starts_with(['"', '\'']) {
@@ -707,7 +794,10 @@ impl<'a> Parser<'a> {
                     continue;
                 }
                 let indent = t.len() - t.trim_start_matches(' ').len();
-                if indent as isize <= parent || content.starts_with('#') || (indent == 0 && is_marker(t)) {
+                if indent as isize <= parent
+                    || content.starts_with('#')
+                    || (indent == 0 && is_marker(t))
+                {
                     break;
                 }
                 if key_end(content).is_some() {
@@ -728,8 +818,12 @@ impl<'a> Parser<'a> {
             }
             self.col = 0;
         }
-        let value = if is_null_plain(&out) { Value::Null } else { Value::Str(out) };
-        Ok(self.push(line, value))
+        let value = if is_null_plain(&out) {
+            Value::Null
+        } else {
+            Value::Str(out)
+        };
+        Ok(self.push_plain(line, value))
     }
 
     /// Chuỗi trong nháy đơn hay nháy kép bắt đầu ở byte `at`, có thể nhiều
@@ -797,10 +891,11 @@ impl<'a> Parser<'a> {
                             _ => return err(line_of(pos), "ký tự thoát không hợp lệ".to_string()),
                         };
                         let hex = text.get(pos + 2..pos + 2 + width).unwrap_or("");
-                        let code = (hex.len() == width && hex.bytes().all(|b| b.is_ascii_hexdigit()))
-                            .then(|| u32::from_str_radix(hex, 16).ok())
-                            .flatten()
-                            .and_then(char::from_u32);
+                        let code = (hex.len() == width
+                            && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+                        .then(|| u32::from_str_radix(hex, 16).ok())
+                        .flatten()
+                        .and_then(char::from_u32);
                         let Some(c) = code else {
                             return err(line_of(pos), "mã thoát không hợp lệ".to_string());
                         };
@@ -862,7 +957,13 @@ impl<'a> Parser<'a> {
         let min_indent = (parent + 1).max(1) as usize;
         // Bắt đầu ở đầu dòng sau.
         let mut pos = self.lines.get(self.i + 1).map_or(text.len(), |l| l.start);
-        let column = |pos: usize| pos - self.lines[self.lines.partition_point(|l| l.start <= pos).saturating_sub(1)].start;
+        let column = |pos: usize| {
+            pos - self.lines[self
+                .lines
+                .partition_point(|l| l.start <= pos)
+                .saturating_sub(1)]
+            .start
+        };
         let mut breaks: Vec<&str> = Vec::new();
         let indent = match increment {
             None => {
@@ -896,7 +997,9 @@ impl<'a> Parser<'a> {
                 chunks.push_str(b);
             }
             let leading_non_space = !matches!(bytes[pos], b' ' | b'\t');
-            let end = text[pos..].find(['\n', '\r']).map_or(text.len(), |n| pos + n);
+            let end = text[pos..]
+                .find(['\n', '\r'])
+                .map_or(text.len(), |n| pos + n);
             chunks.push_str(&text[pos..end]);
             pos = end;
             line_break = if pos < text.len() {
@@ -907,7 +1010,11 @@ impl<'a> Parser<'a> {
             };
             pos = block_breaks(text, pos, indent, &column, &mut breaks);
             if pos < text.len() && column(pos) == indent {
-                if folded && line_break == "\n" && leading_non_space && !matches!(bytes[pos], b' ' | b'\t') {
+                if folded
+                    && line_break == "\n"
+                    && leading_non_space
+                    && !matches!(bytes[pos], b' ' | b'\t')
+                {
                     if breaks.is_empty() {
                         chunks.push(' ');
                     }
@@ -930,7 +1037,10 @@ impl<'a> Parser<'a> {
         self.i = if pos >= text.len() {
             self.lines.len()
         } else {
-            self.lines.partition_point(|l| l.start <= pos).saturating_sub(1).max(self.i + 1)
+            self.lines
+                .partition_point(|l| l.start <= pos)
+                .saturating_sub(1)
+                .max(self.i + 1)
         };
         self.col = 0;
         Ok(self.push(line, Value::Str(chunks)))
@@ -963,7 +1073,10 @@ impl<'a> Parser<'a> {
             let (first, after) = self.flow_node(pos)?;
             pos = flow_space(text, after);
             let paired = text[pos..].starts_with(':')
-                && text[pos + 1..].chars().next().is_none_or(|c| c.is_whitespace() || flow_stop(c));
+                && text[pos + 1..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| c.is_whitespace() || flow_stop(c));
             if paired || !seq {
                 // Cặp `khoá: giá trị`. Trong `[...]` nó thành mapping một mục.
                 let key = match &self.nodes[first].value {
@@ -985,15 +1098,27 @@ impl<'a> Parser<'a> {
                     self.push(item_line, Value::Null)
                 };
                 if seq {
-                    let entry = Entry { key, line: item_line, value };
+                    let entry = Entry {
+                        key,
+                        line: item_line,
+                        value,
+                    };
                     items.push(self.push(item_line, Value::Map(vec![entry])));
                 } else if key == "<<" {
                     merges.push((value, item_line));
                 } else if let Some(&i) = index.get(&key) {
-                    entries[i] = Entry { key, line: item_line, value };
+                    entries[i] = Entry {
+                        key,
+                        line: item_line,
+                        value,
+                    };
                 } else {
                     index.insert(key.clone(), entries.len());
-                    entries.push(Entry { key, line: item_line, value });
+                    entries.push(Entry {
+                        key,
+                        line: item_line,
+                        value,
+                    });
                 }
             } else {
                 items.push(first);
@@ -1052,8 +1177,12 @@ impl<'a> Parser<'a> {
             }
             _ => {
                 let (s, end) = flow_plain(text, pos);
-                let value = if is_null_plain(&s) { Value::Null } else { Value::Str(s) };
-                (self.push(line, value), end)
+                let value = if is_null_plain(&s) {
+                    Value::Null
+                } else {
+                    Value::Str(s)
+                };
+                (self.push_plain(line, value), end)
             }
         };
         self.untag_null(node, tagged);
@@ -1143,7 +1272,12 @@ fn flow_plain(text: &str, start: usize) -> (String, usize) {
             if flow_stop(c) || c == '\n' || c == '\r' {
                 break;
             }
-            if c == ':' && text[pos + 1..].chars().next().is_none_or(|n| n.is_whitespace() || flow_stop(n)) {
+            if c == ':'
+                && text[pos + 1..]
+                    .chars()
+                    .next()
+                    .is_none_or(|n| n.is_whitespace() || flow_stop(n))
+            {
                 break;
             }
             if c == '#' && pos > seg_start && matches!(bytes[pos - 1], b' ' | b'\t') {
@@ -1194,13 +1328,25 @@ mod tests {
 
     #[test]
     fn mapping_va_sequence_long_nhau() {
-        let y = doc("services:\n  api:\n    image: x\n    ports:\n      - \"8080:80\"\n  db:\n    image: postgres\n");
+        let y = doc(
+            "services:\n  api:\n    image: x\n    ports:\n      - \"8080:80\"\n  db:\n    image: postgres\n",
+        );
         let root = y.documents().next().unwrap();
         let api = root.get("services").unwrap().get("api").unwrap();
         assert_eq!(api.get("image").unwrap().as_str(), Some("x"));
-        let ports: Vec<_> = api.get("ports").unwrap().items().map(|n| n.as_str().unwrap()).collect();
+        let ports: Vec<_> = api
+            .get("ports")
+            .unwrap()
+            .items()
+            .map(|n| n.as_str().unwrap())
+            .collect();
         assert_eq!(ports, ["8080:80"]);
-        let services: Vec<_> = root.get("services").unwrap().entries().map(|(k, line, _)| (k, line)).collect();
+        let services: Vec<_> = root
+            .get("services")
+            .unwrap()
+            .entries()
+            .map(|(k, line, _)| (k, line))
+            .collect();
         assert_eq!(services, [("api", 2), ("db", 6)], "dòng của khoá");
     }
 
@@ -1234,19 +1380,39 @@ mod tests {
         let y = doc(text);
         let root = y.documents().next().unwrap();
         let api = root.get("api").unwrap();
-        assert_eq!(api.get("image").unwrap().as_str(), Some("base"), "lấy từ `<<`");
-        assert_eq!(api.get("environment").unwrap().get("B").unwrap().as_str(), Some("override"), "viết thẳng thắng gộp");
-        assert_eq!(api.get("environment").unwrap().get("A").unwrap().as_str(), Some("1"));
+        assert_eq!(
+            api.get("image").unwrap().as_str(),
+            Some("base"),
+            "lấy từ `<<`"
+        );
+        assert_eq!(
+            api.get("environment").unwrap().get("B").unwrap().as_str(),
+            Some("override"),
+            "viết thẳng thắng gộp"
+        );
+        assert_eq!(
+            api.get("environment").unwrap().get("A").unwrap().as_str(),
+            Some("1")
+        );
         let worker = root.get("worker").unwrap();
         assert_eq!(worker.get("restart").unwrap().as_str(), Some("always"));
-        assert_eq!(worker.get("command").unwrap().get("B").unwrap().as_str(), Some("two"));
-        assert_eq!(api.get("image").unwrap().line(), 2, "dòng của node gộp là dòng gốc của nó");
+        assert_eq!(
+            worker.get("command").unwrap().get("B").unwrap().as_str(),
+            Some("two")
+        );
+        assert_eq!(
+            api.get("image").unwrap().line(),
+            2,
+            "dòng của node gộp là dòng gốc của nó"
+        );
     }
 
     #[test]
     fn flow_nhieu_dong_va_cap_trong_sequence() {
         assert_eq!(
-            json("b: {x: 1,\n    y: [a,\n        b], z: }\nd: [a: b, c]\ne: {url: http://x:1/y}\nh: [ multi\n     line, x ]\n"),
+            json(
+                "b: {x: 1,\n    y: [a,\n        b], z: }\nd: [a: b, c]\ne: {url: http://x:1/y}\nh: [ multi\n     line, x ]\n"
+            ),
             r#"[{"b":{"x":"1","y":["a","b"],"z":null},"d":[{"a":"b"},"c"],"e":{"url":"http://x:1/y"},"h":["multi line","x"]}]"#
         );
     }
@@ -1254,16 +1420,28 @@ mod tests {
     #[test]
     fn chu_thich_null_va_nhieu_tai_lieu() {
         assert_eq!(
-            json("key: # c\n  sub: 1   # t\nempty:\nn: [~, null, '', \"null\"]\nurl: http://e.com/a#frag\nhash: a #c\nnc: a#b\n"),
+            json(
+                "key: # c\n  sub: 1   # t\nempty:\nn: [~, null, '', \"null\"]\nurl: http://e.com/a#frag\nhash: a #c\nnc: a#b\n"
+            ),
             r#"[{"key":{"sub":"1"},"empty":null,"n":[null,null,"","null"],"url":"http://e.com/a#frag","hash":"a","nc":"a#b"}]"#
         );
-        assert_eq!(json("%YAML 1.1\n---\na: 1\n...\n---\n- x\n--- |\n  text doc\n---\n"), r#"[{"a":"1"},["x"],"text doc\n",null]"#);
-        assert_eq!(json("a: 1\r\nb:\r\n  - \"y\r\n    z\"\r\n"), r#"[{"a":"1","b":["y z"]}]"#, "CRLF");
+        assert_eq!(
+            json("%YAML 1.1\n---\na: 1\n...\n---\n- x\n--- |\n  text doc\n---\n"),
+            r#"[{"a":"1"},["x"],"text doc\n",null]"#
+        );
+        assert_eq!(
+            json("a: 1\r\nb:\r\n  - \"y\r\n    z\"\r\n"),
+            r#"[{"a":"1","b":["y z"]}]"#,
+            "CRLF"
+        );
     }
 
     #[test]
     fn tag_bo_qua_nhung_gia_tri_rong_co_tag_la_chuoi_rong() {
-        assert_eq!(json("a: !!python/name:x.y\nb: !!null\nc: !reset []\n"), r#"[{"a":"","b":null,"c":[]}]"#);
+        assert_eq!(
+            json("a: !!python/name:x.y\nb: !!null\nc: !reset []\n"),
+            r#"[{"a":"","b":null,"c":[]}]"#
+        );
     }
 
     #[test]
@@ -1274,7 +1452,10 @@ mod tests {
         assert_eq!(fails("? k\n: v\n").line, 1);
         assert_eq!(fails("a: \"open\nb: c\n").line, 1);
         assert!(fails("a: *missing\n").msg.contains("anchor chưa có"));
-        assert!(fails("a: &x [*x]\n").msg.contains("anchor chưa có"), "alias không trỏ ngược lên node đang dựng");
+        assert!(
+            fails("a: &x [*x]\n").msg.contains("anchor chưa có"),
+            "alias không trỏ ngược lên node đang dựng"
+        );
     }
 
     /// TM-8: lồng sâu không làm tràn stack.
@@ -1284,9 +1465,13 @@ mod tests {
         assert!(fails(&flow).msg.contains("lồng sâu"));
         let flow_map = format!("a: {}", "{b: ".repeat(100_000));
         assert!(fails(&flow_map).msg.contains("lồng sâu"));
-        let block: String = (0..200).map(|d| format!("{}k{d}:\n", "  ".repeat(d))).collect();
+        let block: String = (0..200)
+            .map(|d| format!("{}k{d}:\n", "  ".repeat(d)))
+            .collect();
         assert!(fails(&block).msg.contains("lồng sâu"));
-        let seq: String = (0..200).map(|d| format!("{}- \n", "  ".repeat(d))).collect();
+        let seq: String = (0..200)
+            .map(|d| format!("{}- \n", "  ".repeat(d)))
+            .collect();
         assert!(fails(&seq).msg.contains("lồng sâu"));
     }
 
@@ -1304,7 +1489,11 @@ mod tests {
         assert!(y.nodes.len() < 1_000, "{} node", y.nodes.len());
         let out = y.to_json();
         assert!(out.len() < 32 << 20, "{} byte", out.len());
-        assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
     }
 
     /// TM-8: `<<` toả nhánh dừng ở ngân sách.
@@ -1317,7 +1506,11 @@ mod tests {
         }
         let start = Instant::now();
         assert!(fails(&text).msg.contains("gộp `<<`"));
-        assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
     }
 
     /// TM-8: khoá rất dài gộp nhiều lần cũng dừng ở ngân sách, vì ngân sách
@@ -1359,7 +1552,20 @@ mod tests {
         }
         let start = Instant::now();
         let y = doc(&text);
-        assert_eq!(y.documents().next().unwrap().get("services").unwrap().entries().count(), n);
-        assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+        assert_eq!(
+            y.documents()
+                .next()
+                .unwrap()
+                .get("services")
+                .unwrap()
+                .entries()
+                .count(),
+            n
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
     }
 }

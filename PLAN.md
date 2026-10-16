@@ -5,7 +5,7 @@ Mô tả sản phẩm ở [README.md](README.md); file này chỉ ghi trạng th
 
 ## §0 Đang ở đâu, việc tiếp theo
 
-Cập nhật 2026-10-14.
+Cập nhật 2026-10-16.
 
 ### Đã xong, có bằng chứng
 
@@ -405,8 +405,22 @@ git, `cargo clean` dọn.
 1. `c5ae95d`..`82b069a` đã lên `main` (2026-10-15) sau CI xanh 5/5 trên `thu/dot4`
    (run 38760676354); `82b069a` nâng trần job "repo thật" lên 40 phút vì run trước
    bị huỷ ở bước đối chiếu. Nhánh thử đã xoá.
-2. Mốc đợt 4 xong. Hướng tiếp theo chờ bạn chốt (cách B của trang D: mã đọc biến
-   môi trường; gRPC Java, C#; Helm).
+2. Đọc chart Helm (đợt 5) đang dở, CHƯA COMMIT (cây làm việc có thay đổi, file mới
+   `crates/arch-core/src/scan/helm.rs`, `bench/fixtures/`). Đã có: tự dựng tập con
+   template, nguồn `values:`, `scan` in bản dựng, oracle so với `helm template`
+   v3.15.4 (sha256 ghim), 2 kiểu phá mới, CI `--require ...,helm`, tài liệu.
+   Review opus vòng 1 (10 mục) và vòng 2 (11 mục, 2026-10-16) đã sửa hết. Vòng 2 gồm:
+   `(x) .Field` đọc nhầm thành `(x).Field` (token `Chain`), alias của chart con
+   (`.Chart.Name`, một chart hai alias), gộp values mặc định của chart con trước khi
+   xét `condition` (`build`/`flatten`), tràn stack do `list $d` lồng (trần độ lồng
+   khi dựng), thời gian bậc ba theo số chart con (800 chart con: 213 s xuống 0,4 s),
+   dependency thiếu trong `charts/` báo, define của chart tắt không tham gia,
+   `values:` mơ hồ khi nhiều chart, số trong toYaml/toJson, `gt` với số thực. So với
+   helm thật trên các chart thử của reviewer đều khớp. TM-36..39 đã có.
+   Kiểm chứng cuối có biên nhận (2026-10-16, máy rảnh) ALL-OK: test, clippy, MSRV,
+   release, bộ đo, oracle `--require ...,helm`, sabotage, verify, `check --strict`.
+   Việc còn lại: chờ bạn cho commit. Test thời gian `alias_nhan_env_bi_chan` trượt
+   khi máy bận (CPU ngang HEAD): cân nhắc đo bằng thời gian CPU.
 
 **Đã quyết (2026-10-11): cạnh binding Python ↔ native tự viết.** Đã tìm theo
 skill reuse-best. Không công cụ tĩnh nào phủ cả PyO3, pybind11, nanobind
@@ -643,3 +657,8 @@ không có `link` là vi phạm, có `link` mà cụm chặn là cảnh báo (`-
 - [x] Cạnh mạng từ mã: chuỗi tên máy (URL, `máy:cổng`, `host=`) trong mã → `link`;
   bộ đo (voting app), oracle, sabotage; tài liệu.
 - [x] Đẩy `c5ae95d`, `781b0e9`, `bc82d75` qua nhánh thử, CI xanh rồi lên `main` @ban
+
+### Tầng hạ tầng, đợt 5: Helm
+
+- [x] Chốt 4 câu về đọc chart Helm @ban: bạn chốt "làm theo đề xuất"; trang https://claude.ai/artifact/EhNC8dx9sjp8jmMgYqoL16 (khuyên tự render tập con template với values.yaml)
+- [ ] Đọc chart Helm: render tập con template, manifest dựng ra đi qua bộ đọc Kubernetes; bộ đo so với `helm template`; tài liệu.

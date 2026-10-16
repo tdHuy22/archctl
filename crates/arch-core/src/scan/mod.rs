@@ -7,20 +7,21 @@
 pub mod lexer;
 
 mod clang;
+pub mod command;
+pub mod compose;
+pub mod deploy;
+pub mod dockerfile;
 pub mod foreign;
 mod golang;
+pub mod grpc;
+pub mod helm;
+pub mod hosts;
+pub mod k8s;
 mod notebook;
 mod python;
 mod rustlang;
 mod ts;
 pub mod yaml;
-pub mod grpc;
-pub mod dockerfile;
-pub mod command;
-pub mod compose;
-pub mod deploy;
-pub mod k8s;
-pub mod hosts;
 
 use lexer::{Backtick, CharLit, LexConfig, Tok, Token};
 use std::collections::HashSet;
@@ -55,7 +56,12 @@ pub struct Import {
 
 impl Import {
     fn local(spec: impl Into<String>, line: usize) -> Self {
-        Import { spec: spec.into(), line, system: false, names: Vec::new() }
+        Import {
+            spec: spec.into(),
+            line,
+            system: false,
+            names: Vec::new(),
+        }
     }
 }
 
@@ -120,7 +126,10 @@ impl Lang {
                 multiline_strings: true,
                 ..LexConfig::base()
             },
-            Lang::Go => LexConfig { backtick: Backtick::Raw, ..LexConfig::base() },
+            Lang::Go => LexConfig {
+                backtick: Backtick::Raw,
+                ..LexConfig::base()
+            },
         }
     }
 
@@ -208,7 +217,9 @@ fn find_tables(toks: &[Token], needles: &[&str]) -> Vec<SymbolHit> {
     }
     let mut out = Vec::new();
     for t in toks {
-        let (Tok::Str(text) | Tok::SystemStr(text)) = &t.tok else { continue };
+        let (Tok::Str(text) | Tok::SystemStr(text)) = &t.tok else {
+            continue;
+        };
         for needle in needles {
             if in_text(text, needle) {
                 out.push(SymbolHit {
@@ -257,7 +268,11 @@ fn find_symbols(toks: &[Token], needles: &Needles, lang: Lang) -> Vec<SymbolHit>
         if let Some(tail) = last_segment(word)
             && let Some(found) = needles.get(tail)
         {
-            out.push(SymbolHit { symbol: (*found).to_string(), line: t.line, defines: false });
+            out.push(SymbolHit {
+                symbol: (*found).to_string(),
+                line: t.line,
+                defines: false,
+            });
         }
     }
     out
@@ -270,14 +285,30 @@ fn find_symbols(toks: &[Token], needles: &Needles, lang: Lang) -> Vec<SymbolHit>
 /// động giả ngay trong mã của người dùng.
 fn declaring_keywords(lang: Lang) -> &'static [&'static str] {
     match lang {
-        Lang::TypeScript => {
-            &["function", "class", "interface", "type", "enum", "const", "let", "var", "namespace"]
-        }
+        Lang::TypeScript => &[
+            "function",
+            "class",
+            "interface",
+            "type",
+            "enum",
+            "const",
+            "let",
+            "var",
+            "namespace",
+        ],
         Lang::Python => &["def", "class"],
         // Hàm C không có từ khoá mở đầu, nên chỉ nhận được các kiểu dữ liệu.
         Lang::C => &["struct", "union", "enum", "typedef", "class", "namespace"],
         Lang::Rust => &[
-            "fn", "struct", "enum", "trait", "type", "const", "static", "union", "mod",
+            "fn",
+            "struct",
+            "enum",
+            "trait",
+            "type",
+            "const",
+            "static",
+            "union",
+            "mod",
             "macro_rules",
         ],
         Lang::Go => &["func", "type", "const", "var", "package"],
@@ -286,7 +317,9 @@ fn declaring_keywords(lang: Lang) -> &'static [&'static str] {
 
 /// Token thứ `at` có phải là một cái tên vừa được đặt ra không.
 fn declares(toks: &[Token], at: usize, lang: Lang) -> bool {
-    let Some(prev) = at.checked_sub(1).and_then(|i| toks.get(i)) else { return false };
+    let Some(prev) = at.checked_sub(1).and_then(|i| toks.get(i)) else {
+        return false;
+    };
     match &prev.tok {
         Tok::Word(keyword) => declaring_keywords(lang).contains(&keyword.as_str()),
         // `func (r *Repo) Save()` — tên phương thức nằm sau ngoặc nhận.
@@ -356,14 +389,22 @@ pub fn source_view<'a>(path: &str, src: &'a str) -> std::borrow::Cow<'a, str> {
     if !path.ends_with(".vue") {
         return std::borrow::Cow::Borrowed(src);
     }
-    let blank = |s: &str| s.chars().map(|c| if c == '\n' { '\n' } else { ' ' }).collect::<String>();
+    let blank = |s: &str| {
+        s.chars()
+            .map(|c| if c == '\n' { '\n' } else { ' ' })
+            .collect::<String>()
+    };
     let mut out = String::with_capacity(src.len());
     let mut rest = src;
     while let Some(open) = rest.find("<script") {
         // Thẻ mở kết thúc ở `>` đầu tiên sau nó.
-        let Some(tag_end) = rest[open..].find('>').map(|k| open + k + 1) else { break };
+        let Some(tag_end) = rest[open..].find('>').map(|k| open + k + 1) else {
+            break;
+        };
         out.push_str(&blank(&rest[..tag_end]));
-        let body_end = rest[tag_end..].find("</script").map_or(rest.len(), |k| tag_end + k);
+        let body_end = rest[tag_end..]
+            .find("</script")
+            .map_or(rest.len(), |k| tag_end + k);
         out.push_str(&rest[tag_end..body_end]);
         rest = &rest[body_end..];
     }

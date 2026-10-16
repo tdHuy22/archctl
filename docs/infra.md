@@ -339,10 +339,41 @@ tầng. Workload không container nào có image là mảnh patch, không phải
 workload. Manifest chỉ được đọc khi luật có nguồn `k8s:` (hay khi `init`,
 `scan`): repo chỉ dùng compose không tốn gì thêm.
 
-- **Helm:** template trong thư mục chart (`templates/`, `charts/` cạnh
-  `Chart.yaml`) không được đọc, vì nó chưa phải YAML cho tới khi render.
-  `scan` in thư mục chart ra. Không tính vào `--strict`. Muốn kiểm thì khai
-  `verify` gọi `helm template`.
+- **Helm:** chart (`Chart.yaml`, `values.yaml`, `templates/`, chart con trong
+  `charts/`) được archctl tự dựng, không chạy `helm`, rồi đọc như manifest
+  thường ở thư mục chart: `k8s:helm-chart/cartservice`. Dòng trong vi phạm là
+  dòng của template. Giá trị lấy từ `values.yaml` của chart; luật khai thêm
+  file values bằng nguồn `values:` cùng service:
+  `service Web from k8s:chart/web, values:deploy/prod.yaml` (gộp sâu như Helm,
+  file sau thắng, áp cho chart ở thư mục các nguồn `k8s:` của service đó; nguồn
+  `k8s:` không nêu thư mục chỉ dùng được khi repo có đúng một chart; file
+  khai mà không có là "chưa đọc được"). `.Release.Name` là `release-name`,
+  namespace `default`, như `helm template`.
+
+  Dựng được: `.Values`, `.Release`, `.Chart`, `.Template`, biến (`$x :=`,
+  `$`), `if`/`else if`/`else`, `with`, `range` (list, map, số), `define`,
+  `include`, `template`, `block`, chú thích, `{{-`/`-}}`, và các hàm `toYaml`,
+  `toJson`, `nindent`, `indent`, `quote`, `squote`, `default`, `required`,
+  `empty`, `not`, `and`, `or`, `coalesce`, `ternary`, `eq`, `ne`, `lt`…,
+  `print`, `printf` (`%s %d %v %q`), `toString`, `int`, `lower`, `upper`,
+  `title`, `trim`, `trimSuffix`, `trimPrefix`, `trunc`, `replace`, `contains`,
+  `hasPrefix`, `hasSuffix`, `len`, `list`, `dict`, `get`, `hasKey`, `keys`,
+  `join`, `first`, `index`, `kindIs`, `kindOf`, `b64enc`. Chart con dựng như
+  Helm: mỗi mục `dependencies` là một chart con (cùng chart dưới hai `alias`
+  là hai chart, `.Chart.Name` là alias); `values.yaml` của chart con gộp lên
+  chart cha dưới khoá alias (chart cha thắng) cùng `.Values.global`, rồi mới
+  xét `condition` và `tags`; chart con tắt không góp values hay `define`.
+  Chart con khai mà không có trong `charts/` (chưa `helm dependency build`)
+  là "chưa đọc được".
+
+  Thứ ngoài tập con (`tpl`, `lookup`, `.Files`, `.Capabilities`,
+  `semverCompare`, hàm sinh ngẫu nhiên, hàm lạ), chart con nén `.tgz`, hay
+  template hỏng làm cả file vào mục "chưa đọc được" (`--strict` tính): không
+  đoán nhánh nào. Template là input đối kháng chạy trong hook: mỗi chart tối
+  đa 2 000 000 bước dựng, 8 MB dựng ra, `include`, khối và giá trị dựng bằng
+  `list`/`dict` lồng tối đa 64 tầng, chart con lồng tối đa 8 tầng,
+  200 000 giá trị đọc từ values (TM-36 tới TM-39). Không in manifest dựng ra
+  hay giá trị values; lỗi chỉ có file, dòng, tên hàm.
 - **Kustomize:** file trong `resources` đọc như manifest thường; file patch
   (`patches`, `patchesStrategicMerge`, `patchesJson6902`) không phải manifest.
   Patch không được áp. Patch đổi lệnh, biến môi trường hay image của một
@@ -528,8 +559,9 @@ trong các ngôn ngữ archctl chưa đọc (Java, C#, Ruby); đối số đầu
 
 ## Không đọc
 
-- Helm template, overlay của Kustomize, Terraform: không render. Ai cần thì
-  khai `verify` gọi `helm template`, `terraform graph`, kube-linter, checkov.
+- Overlay của Kustomize, Terraform: không render; template Helm ngoài tập con
+  ở trên. Ai cần thì khai `verify` gọi `helm template`, `terraform graph`,
+  kube-linter, checkov.
 - gRPC của Java, C#, C++: đợt sau. Node qua
   `makeGenericClientConstructor`, nice-grpc, ts-proto; client Node gán vào biến
   rồi mới `new`.

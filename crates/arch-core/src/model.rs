@@ -44,7 +44,11 @@ impl Default for Meta {
     /// Thiếu chú thích thì mặc định là ý định của người và có hiệu lực ngay.
     /// Mặc định theo hướng chặt chẽ hơn là lỏng lẻo.
     fn default() -> Self {
-        Meta { owner: Owner::Human, status: Status::Accepted, line: 0 }
+        Meta {
+            owner: Owner::Human,
+            status: Status::Accepted,
+            line: 0,
+        }
     }
 }
 
@@ -153,7 +157,10 @@ pub struct Invariant {
 impl Invariant {
     /// Tên các cách kiểm mà invariant này trỏ tới, tách y như lúc đọc file.
     pub fn verify_names(&self) -> Vec<String> {
-        self.verify.iter().flat_map(|v| split_names(v, &[','])).collect()
+        self.verify
+            .iter()
+            .flat_map(|v| split_names(v, &[',']))
+            .collect()
     }
 }
 
@@ -222,18 +229,34 @@ pub enum Source {
     /// Kubernetes. `dir` là thư mục chứa manifest, khi nhiều thư mục cùng có
     /// workload tên đó.
     K8s { dir: Option<String>, name: String },
+    /// File values của Helm khai thêm, gộp vào `values.yaml` của chart ở thư
+    /// mục của các nguồn `k8s:` cùng service: `values:deploy/prod.yaml`.
+    Values(String),
 }
 
 impl Source {
     pub fn text(&self) -> String {
         match self {
-            Source::Compose { dir: Some(dir), name } if dir.is_empty() => format!("compose:./{name}"),
-            Source::Compose { dir: Some(dir), name } => format!("compose:{dir}/{name}"),
+            Source::Compose {
+                dir: Some(dir),
+                name,
+            } if dir.is_empty() => format!("compose:./{name}"),
+            Source::Compose {
+                dir: Some(dir),
+                name,
+            } => format!("compose:{dir}/{name}"),
             Source::Compose { dir: None, name } => format!("compose:{name}"),
             Source::Dockerfile(path) => format!("dockerfile:{path}"),
-            Source::K8s { dir: Some(dir), name } if dir.is_empty() => format!("k8s:./{name}"),
-            Source::K8s { dir: Some(dir), name } => format!("k8s:{dir}/{name}"),
+            Source::K8s {
+                dir: Some(dir),
+                name,
+            } if dir.is_empty() => format!("k8s:./{name}"),
+            Source::K8s {
+                dir: Some(dir),
+                name,
+            } => format!("k8s:{dir}/{name}"),
             Source::K8s { dir: None, name } => format!("k8s:{name}"),
+            Source::Values(path) => format!("values:{path}"),
         }
     }
 }
@@ -244,7 +267,11 @@ impl Service {
         if self.sources.is_empty() {
             return "-".into();
         }
-        self.sources.iter().map(Source::text).collect::<Vec<_>>().join(", ")
+        self.sources
+            .iter()
+            .map(Source::text)
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// Có workload Kubernetes: khi đó `dockerfile:` là image của nó, không
@@ -298,7 +325,14 @@ pub struct Element {
 
 impl Element {
     fn new(kind: &'static str, key: String, body: String, meta: &Meta) -> Self {
-        Element { kind, key, body, owner: meta.owner, status: meta.status, line: meta.line }
+        Element {
+            kind,
+            key,
+            body,
+            owner: meta.owner,
+            status: meta.status,
+            line: meta.line,
+        }
     }
 
     /// Phần tử có tên riêng thì ghép được giữa hai phiên bản để báo "đã đổi".
@@ -376,17 +410,21 @@ impl Document {
         for c in &self.contracts {
             let label = format!("contract {}.{}", c.component, c.capability);
             for f in c.fields.iter().filter(|f| f.key == "verify") {
-                out.extend(split_names(&f.values.join(" "), &[',']).into_iter().map(|n| {
-                    (n, label.clone(), f.line)
-                }));
+                out.extend(
+                    split_names(&f.values.join(" "), &[','])
+                        .into_iter()
+                        .map(|n| (n, label.clone(), f.line)),
+                );
             }
         }
         for b in &self.boundaries {
             let label = format!("boundary {}", b.name);
             for f in b.fields.iter().filter(|f| f.key == "verify") {
-                out.extend(split_names(&f.values.join(" "), &[',']).into_iter().map(|n| {
-                    (n, label.clone(), f.line)
-                }));
+                out.extend(
+                    split_names(&f.values.join(" "), &[','])
+                        .into_iter()
+                        .map(|n| (n, label.clone(), f.line)),
+                );
             }
         }
         for i in &self.invariants {
@@ -435,8 +473,15 @@ impl Document {
 
     /// Số luật đang có hiệu lực. Dùng cho báo cáo độ phủ.
     pub fn enforced_count(&self) -> usize {
-        self.rules.iter().filter(|r| r.meta.status.is_enforced()).count()
-            + self.stores.iter().filter(|s| s.meta.status.is_enforced()).count()
+        self.rules
+            .iter()
+            .filter(|r| r.meta.status.is_enforced())
+            .count()
+            + self
+                .stores
+                .iter()
+                .filter(|s| s.meta.status.is_enforced())
+                .count()
     }
 
     /// Mọi tên mà khai báo kiến trúc nói là phải có trong mã.
@@ -463,7 +508,10 @@ impl Document {
             // `order.charge` là biến chứ không phải component, nên chỉ dò tên
             // sau dấu chấm mà không ràng buộc nơi chứa.
             Some((head, tail)) if is_identifier(tail) => {
-                let within = self.component(head).map(|c| vec![c.name.clone()]).unwrap_or_default();
+                let within = self
+                    .component(head)
+                    .map(|c| vec![c.name.clone()])
+                    .unwrap_or_default();
                 Some((tail.to_string(), within))
             }
             _ => is_identifier(step).then(|| (step.to_string(), Vec::new())),
@@ -476,7 +524,9 @@ impl Document {
         for flow in &self.flows {
             for line in &flow.lines {
                 for step in flow_steps(line) {
-                    let Some((name, within)) = self.step_expectation(&step) else { continue };
+                    let Some((name, within)) = self.step_expectation(&step) else {
+                        continue;
+                    };
                     out.push(Expectation {
                         name,
                         source: format!("bước của flow {}", flow.name),
@@ -494,7 +544,9 @@ impl Document {
             out.push(Expectation {
                 name: contract.capability.clone(),
                 source: format!("năng lực trong contract {label}"),
-                expect: Expect::Exists { within: within.clone() },
+                expect: Expect::Exists {
+                    within: within.clone(),
+                },
                 line: contract.meta.line,
                 status: contract.meta.status,
             });
@@ -506,7 +558,9 @@ impl Document {
                     out.push(Expectation {
                         name,
                         source: format!("loại lỗi trong contract {label}"),
-                        expect: Expect::Exists { within: within.clone() },
+                        expect: Expect::Exists {
+                            within: within.clone(),
+                        },
                         line: field.line,
                         status: contract.meta.status,
                     });
@@ -524,7 +578,9 @@ impl Document {
                             out.push(Expectation {
                                 name,
                                 source: format!("`contain` của boundary {}", boundary.name),
-                                expect: Expect::Confined { to: boundary.contains.clone() },
+                                expect: Expect::Confined {
+                                    to: boundary.contains.clone(),
+                                },
                                 line: field.line,
                                 status: boundary.meta.status,
                             });
@@ -536,7 +592,9 @@ impl Document {
                             out.push(Expectation {
                                 name,
                                 source: format!("`compensate` của boundary {}", boundary.name),
-                                expect: Expect::Exists { within: boundary.contains.clone() },
+                                expect: Expect::Exists {
+                                    within: boundary.contains.clone(),
+                                },
                                 line: field.line,
                                 status: boundary.meta.status,
                             });
@@ -561,7 +619,9 @@ impl Document {
                 out.push(Expectation {
                     name,
                     source: "trạng thái trong invariant state".into(),
-                    expect: Expect::Exists { within: within.clone() },
+                    expect: Expect::Exists {
+                        within: within.clone(),
+                    },
                     line: inv.meta.line,
                     status: inv.meta.status,
                 });
@@ -579,7 +639,12 @@ impl Document {
 
         for c in &self.components {
             let kind = if c.external { "external" } else { "component" };
-            out.push(Element::new(kind, c.name.clone(), format!("at {}", list(&c.paths)), &c.meta));
+            out.push(Element::new(
+                kind,
+                c.name.clone(),
+                format!("at {}", list(&c.paths)),
+                &c.meta,
+            ));
         }
         for s in &self.stores {
             out.push(Element::new(
@@ -607,7 +672,12 @@ impl Document {
             ));
         }
         for f in &self.flows {
-            let body = f.lines.iter().map(flow_line_text).collect::<Vec<_>>().join("; ");
+            let body = f
+                .lines
+                .iter()
+                .map(flow_line_text)
+                .collect::<Vec<_>>()
+                .join("; ");
             out.push(Element::new("flow", f.name.clone(), body, &f.meta));
         }
         for c in &self.contracts {
@@ -622,7 +692,11 @@ impl Document {
             out.push(Element::new(
                 "boundary",
                 b.name.clone(),
-                format!("contains {} · {}", list(&b.contains), fields_text(&b.fields)),
+                format!(
+                    "contains {} · {}",
+                    list(&b.contains),
+                    fields_text(&b.fields)
+                ),
                 &b.meta,
             ));
         }
@@ -633,10 +707,20 @@ impl Document {
             out.push(Element::new("invariant", key, body, &i.meta));
         }
         for v in &self.views {
-            out.push(Element::new("view", v.name.clone(), list(&v.components), &v.meta));
+            out.push(Element::new(
+                "view",
+                v.name.clone(),
+                list(&v.components),
+                &v.meta,
+            ));
         }
         for a in &self.apis {
-            out.push(Element::new("api", a.name.clone(), list(&a.symbols), &a.meta));
+            out.push(Element::new(
+                "api",
+                a.name.clone(),
+                list(&a.symbols),
+                &a.meta,
+            ));
         }
         for s in &self.services {
             let from = s.sources_text();
@@ -666,8 +750,18 @@ impl Document {
         self.elements()
             .iter()
             .map(|e| {
-                let owner = if e.owner == Owner::Ai { "@ai" } else { "@human" };
-                format!("{}|{}|{}|{owner}|{}", e.kind, e.key, e.body, e.status.as_str())
+                let owner = if e.owner == Owner::Ai {
+                    "@ai"
+                } else {
+                    "@human"
+                };
+                format!(
+                    "{}|{}|{}|{owner}|{}",
+                    e.kind,
+                    e.key,
+                    e.body,
+                    e.status.as_str()
+                )
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -677,7 +771,11 @@ impl Document {
 impl Rule {
     /// Luật viết lại thành một dòng, dùng làm cả danh tính lẫn thông báo.
     pub fn one_line(&self) -> String {
-        let kind = if self.kind == RuleKind::Allow { "allow" } else { "deny" };
+        let kind = if self.kind == RuleKind::Allow {
+            "allow"
+        } else {
+            "deny"
+        };
         let targets: Vec<&str> = self.to.iter().map(Target::as_str).collect();
         let mut out = format!("{kind} {} -> {}", self.from.as_str(), targets.join(", "));
         if !self.except.is_empty() {
@@ -735,5 +833,9 @@ fn flow_line_text(line: &FlowLine) -> String {
 }
 
 fn fields_text(fields: &[Field]) -> String {
-    fields.iter().map(|f| format!("{} {}", f.key, f.values.join(" / "))).collect::<Vec<_>>().join("; ")
+    fields
+        .iter()
+        .map(|f| format!("{} {}", f.key, f.values.join(" / ")))
+        .collect::<Vec<_>>()
+        .join("; ")
 }

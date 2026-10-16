@@ -1,0 +1,13 @@
+apiVersion: v2
+name: shop
+version: 0.1.0
+dependencies:
+  - name: redis
+    version: 0.1.0
+  - name: kv
+    version: 0.1.0
+    alias: cache
+    condition: cache.enabled,global.cache.enabled
+  - name: extra
+    version: 0.1.0
+    tags: [optional]

@@ -1,0 +1,12 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kv
+spec:
+  template:
+    metadata:
+      labels: {app: kv}
+    spec:
+      containers:
+      - name: kv
+        image: {{ .Values.image }}

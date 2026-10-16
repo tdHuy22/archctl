@@ -1,0 +1,11 @@
+# Chart mẫu cho bộ đo: mỗi ca là một chỗ archctl từng dựng khác `helm template`.
+global:
+  registry: example.org
+  cache:
+    enabled: true
+cache:
+  image: kv:override
+flag: !!str false
+replicas: 1000000
+tags:
+  optional: false

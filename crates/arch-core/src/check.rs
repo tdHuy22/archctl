@@ -250,7 +250,8 @@ pub fn check(root: &Path, doc: &Document, extra_ignores: &[String]) -> Report {
 /// của cả repo, nên chỉ chạy khi một file trong tập có thể là thứ cấu hình trỏ
 /// tới ([`may_touch_deploy`]).
 pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool) -> Report {
-    let wanted = !doc.services.is_empty() && (!partial || files.iter().any(|f| may_touch_deploy(doc, f)));
+    let wanted =
+        !doc.services.is_empty() && (!partial || files.iter().any(|f| may_touch_deploy(doc, f)));
     let deploy = wanted.then(|| deploy_files(root, &crate::read_ignores(root)));
     check_with(root, doc, files, partial, deploy)
 }
@@ -262,7 +263,9 @@ pub fn check_files(root: &Path, doc: &Document, files: &[String], partial: bool)
 /// chỗ của điểm vào (`main.py` ở gốc); và file khai gói Python, vì nó đổi chỗ
 /// tìm module. Tài liệu và ảnh thì không.
 pub fn may_touch_deploy(doc: &Document, path: &str) -> bool {
-    const INERT: &[&str] = &["md", "rst", "adoc", "png", "jpg", "jpeg", "gif", "svg", "ico", "webp", "pdf"];
+    const INERT: &[&str] = &[
+        "md", "rst", "adoc", "png", "jpg", "jpeg", "gif", "svg", "ico", "webp", "pdf",
+    ];
     let name = path.rsplit('/').next().unwrap_or(path);
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
     if deploy::touches_deploy(path) || matches!(name, "pyproject.toml" | "setup.cfg" | "setup.py") {
@@ -290,8 +293,17 @@ pub fn deploy_files(root: &Path, extra_ignores: &[String]) -> Vec<String> {
     files
 }
 
-fn check_with(root: &Path, doc: &Document, files: &[String], partial: bool, deploy: Option<Vec<String>>) -> Report {
-    let mut report = Report { partial, ..Report::default() };
+fn check_with(
+    root: &Path,
+    doc: &Document,
+    files: &[String],
+    partial: bool,
+    deploy: Option<Vec<String>>,
+) -> Report {
+    let mut report = Report {
+        partial,
+        ..Report::default()
+    };
 
     for (name, _) in classify(doc) {
         if opted_in(doc, &name) {
@@ -318,10 +330,12 @@ fn check_with(root: &Path, doc: &Document, files: &[String], partial: bool, depl
     let table_needles = dedup(&tables);
     // Kỳ vọng từ flow, contract, boundary và invariant cũng là tên cần dò,
     // nên gộp chung một lượt quét với nhóm `api`.
-    let expectations: Vec<_> =
-        doc.expectations().into_iter().filter(|e| e.status.is_enforced()).collect();
-    let mut needle_set: crate::scan::Needles =
-        needles.iter().map(String::as_str).collect();
+    let expectations: Vec<_> = doc
+        .expectations()
+        .into_iter()
+        .filter(|e| e.status.is_enforced())
+        .collect();
+    let mut needle_set: crate::scan::Needles = needles.iter().map(String::as_str).collect();
     needle_set.extend(expectations.iter().map(|e| e.name.as_str()));
     // Tên nào xuất hiện ở component nào, để biết cái gì thiếu và cái gì lọt ra.
     let mut sightings: std::collections::BTreeMap<&str, Vec<Sighting>> =
@@ -369,7 +383,8 @@ fn check_with(root: &Path, doc: &Document, files: &[String], partial: bool, depl
         let Ok(bytes) = std::fs::read(root.join(path)) else {
             continue;
         };
-        let src = String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+        let src = String::from_utf8(bytes)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
         if src.len() as u64 > MAX_FILE_BYTES {
             report.oversized.push((path.clone(), src.len() as u64));
             continue;
@@ -384,15 +399,33 @@ fn check_with(root: &Path, doc: &Document, files: &[String], partial: bool, depl
                 natives.push((from.clone(), path.clone(), import.line, native));
             }
         }
-        inspect_hits(doc, &watched, path, from, &scan.symbols, Via::Symbol, &mut report);
-        inspect_hits(doc, &tables, path, from, &scan.tables, Via::Table, &mut report);
+        inspect_hits(
+            doc,
+            &watched,
+            path,
+            from,
+            &scan.symbols,
+            Via::Symbol,
+            &mut report,
+        );
+        inspect_hits(
+            doc,
+            &tables,
+            path,
+            from,
+            &scan.tables,
+            Via::Table,
+            &mut report,
+        );
 
         for call in &scan.foreign.calls {
             ffi_calls.push((from.clone(), path.clone(), call.clone()));
         }
         for provided in &scan.foreign.provides {
             // `TORCH_EXTENSION_NAME` thành tên thật, hoặc bỏ nếu không biết chắc.
-            let Some(key) = resolver.bind_extension(path, &provided.symbol) else { continue };
+            let Some(key) = resolver.bind_extension(path, &provided.symbol) else {
+                continue;
+            };
             // Cùng một tên được hai component cung cấp thì không biết chọn
             // đâu, nên bỏ cả hai: đoán sai sinh ra một cạnh không có thật.
             ffi_provides
@@ -406,18 +439,31 @@ fn check_with(root: &Path, doc: &Document, files: &[String], partial: bool, depl
         }
 
         if !grpc::generated_stub_path(path) {
-            let site = |s: &grpc::Site| RpcSite { from: from.clone(), file: path.clone(), lang, site: s.clone() };
+            let site = |s: &grpc::Site| RpcSite {
+                from: from.clone(),
+                file: path.clone(),
+                lang,
+                site: s.clone(),
+            };
             rpc_calls.extend(scan.rpc.calls.iter().map(site));
             rpc_serves.extend(scan.rpc.serves.iter().map(site));
             rpc_impls.extend(scan.rpc.implements.iter().map(site));
         }
 
         if !doc.services.is_empty() && !scan::hosts::skipped_path(path) {
-            code_hosts.extend(scan.hosts.hosts.iter().map(|h| (from.clone(), path.clone(), h.clone())));
+            code_hosts.extend(
+                scan.hosts
+                    .hosts
+                    .iter()
+                    .map(|h| (from.clone(), path.clone(), h.clone())),
+            );
             if scan.hosts.cut {
                 report.deploy_unread.push(deploy::Unread {
                     file: path.clone(),
-                    why: format!("quá {} tên máy trong chuỗi của file; phần sau không xét", scan::hosts::MAX_PER_FILE),
+                    why: format!(
+                        "quá {} tên máy trong chuỗi của file; phần sau không xét",
+                        scan::hosts::MAX_PER_FILE
+                    ),
                 });
             }
         }
@@ -437,24 +483,43 @@ fn check_with(root: &Path, doc: &Document, files: &[String], partial: bool, depl
     let settled = crate::resolve::settle_natives(natives.iter().map(|(_, _, _, n)| n));
     for (from, path, line, n) in &natives {
         if settled.contains(&(n.module.as_str(), n.at.as_str())) {
-            let crossing =
-                Crossing { symbol: format!("py:{}", n.module), shown: n.shown.clone(), line: *line };
+            let crossing = Crossing {
+                symbol: format!("py:{}", n.module),
+                shown: n.shown.clone(),
+                line: *line,
+            };
             ffi_calls.push((from.clone(), path.clone(), crossing));
         }
     }
     let paired = judge_ffi(doc, &ffi_calls, &ffi_provides, &mut report);
     // Import của module mở rộng không ra file nào, nhưng đã tìm thấy nơi định
     // nghĩa nó ở phía native: nó đã được phân giải.
-    report.unresolved.retain(|u| !paired.contains(&(u.file.as_str(), u.line, u.spec.as_str())));
+    report
+        .unresolved
+        .retain(|u| !paired.contains(&(u.file.as_str(), u.line, u.spec.as_str())));
     judge_expectations(&expectations, &sightings, symbol_scanned, &mut report);
-    let rpc_links = judge_grpc(root, doc, files, partial, rpc_calls, rpc_serves, rpc_impls, &mut report);
+    let rpc_links = judge_grpc(
+        root,
+        doc,
+        files,
+        partial,
+        rpc_calls,
+        rpc_serves,
+        rpc_impls,
+        &mut report,
+    );
     // Hook sửa một file mã có chuỗi dạng tên máy: cần cấu hình để biết tên đó
     // trỏ tới service nào, nhưng không xét lại cả cấu hình (TM-34).
     let full = deploy.is_some();
-    let deploy = deploy.or_else(|| (!code_hosts.is_empty()).then(|| deploy_files(root, &crate::read_ignores(root))));
+    let deploy = deploy.or_else(|| {
+        (!code_hosts.is_empty()).then(|| deploy_files(root, &crate::read_ignores(root)))
+    });
     if let Some(deploy_files) = deploy {
         let mut opts = deploy_options(doc);
-        let names: BTreeSet<&str> = code_hosts.iter().map(|(_, _, h)| h.host.name.as_str()).collect();
+        let names: BTreeSet<&str> = code_hosts
+            .iter()
+            .map(|(_, _, h)| h.host.name.as_str())
+            .collect();
         opts.hosts = names.into_iter().map(str::to_string).collect();
         let loaded = deploy::load(root, &deploy_files, &opts);
         let mut seen = rpc_links;
@@ -468,8 +533,12 @@ fn check_with(root: &Path, doc: &Document, files: &[String], partial: bool, depl
     counts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     report.by_lang = counts;
 
-    report.violations.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
-    report.unresolved.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
+    report
+        .violations
+        .sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
+    report
+        .unresolved
+        .sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
     report.oversized.sort();
     report.unproven = unproven(root, doc, files);
     report
@@ -480,11 +549,7 @@ fn check_with(root: &Path, doc: &Document, files: &[String], partial: bool, depl
 /// Chỉ **đọc** biên nhận. `check` chạy trong hook của agent sau mỗi lần sửa
 /// file, nên nó không được chạy lệnh shell nào — đó là việc của
 /// `archctl verify`, và chỉ khi người gõ lệnh đó.
-fn unproven(
-    root: &Path,
-    doc: &Document,
-    files: &[String],
-) -> Vec<(String, crate::verify::Stale)> {
+fn unproven(root: &Path, doc: &Document, files: &[String]) -> Vec<(String, crate::verify::Stale)> {
     if doc.verifies.is_empty() {
         return Vec::new();
     }
@@ -522,8 +587,19 @@ fn judge_ffi<'a>(
         if to == from {
             continue;
         }
-        pulled_in(doc, from, to, file, call.line, &call.shown, Via::Ffi, report);
-        let Some((reason, rule, status)) = judge(doc, from, to) else { continue };
+        pulled_in(
+            doc,
+            from,
+            to,
+            file,
+            call.line,
+            &call.shown,
+            Via::Ffi,
+            report,
+        );
+        let Some((reason, rule, status)) = judge(doc, from, to) else {
+            continue;
+        };
         report.violations.push(Violation {
             from: from.clone(),
             to: to.clone(),
@@ -587,7 +663,10 @@ fn judge_grpc(
         report.unresolved.push(Unresolved {
             file: ".proto".into(),
             line: 0,
-            spec: format!("quá {} service trong các file .proto; phần sau không ghép", grpc::MAX_INDEX),
+            spec: format!(
+                "quá {} service trong các file .proto; phần sau không ghép",
+                grpc::MAX_INDEX
+            ),
             lang: Lang::Python,
             reason: UnresolvedReason::Rpc,
         });
@@ -595,13 +674,29 @@ fn judge_grpc(
     // Mỗi (service, nguồn gốc) tra một lần: một file có thể có hàng chục
     // nghìn chỗ gọi (TM-13).
     let mut keys: HashMap<(String, grpc::Origin), grpc::Key> = HashMap::new();
-    let mut key_of = |s: &grpc::Site| keys.entry((s.service.clone(), s.origin.clone())).or_insert_with(|| index.key(s)).clone();
+    let mut key_of = |s: &grpc::Site| {
+        keys.entry((s.service.clone(), s.origin.clone()))
+            .or_insert_with(|| index.key(s))
+            .clone()
+    };
     // Hàm `NewXClient` không phải gRPC thì không đáng đi tìm phía bên kia.
     calls.retain(|s| !matches!(key_of(&s.site), grpc::Key::NotRpc));
     serves.retain(|s| !matches!(key_of(&s.site), grpc::Key::NotRpc));
-    let impls: Vec<RpcSite> = impls.into_iter().filter(|s| !matches!(key_of(&s.site), grpc::Key::NotRpc)).collect();
+    let impls: Vec<RpcSite> = impls
+        .into_iter()
+        .filter(|s| !matches!(key_of(&s.site), grpc::Key::NotRpc))
+        .collect();
     if partial && !(calls.is_empty() && serves.is_empty() && impls.is_empty()) {
-        other_side(root, doc, files, &ignores, &impls, &mut calls, &mut serves, report);
+        other_side(
+            root,
+            doc,
+            files,
+            &ignores,
+            &impls,
+            &mut calls,
+            &mut serves,
+            report,
+        );
     }
 
     let ambiguous = |s: &RpcSite, candidates: Vec<String>, report: &mut Report| {
@@ -645,7 +740,10 @@ fn judge_grpc(
                 report.unresolved.push(Unresolved {
                     file: c.file.clone(),
                     line: c.site.line,
-                    spec: format!("{} ({key}: chỉ thấy server trong file test hay mock)", c.site.shown),
+                    spec: format!(
+                        "{} ({key}: chỉ thấy server trong file test hay mock)",
+                        c.site.shown
+                    ),
                     lang: c.lang,
                     reason: UnresolvedReason::Rpc,
                 });
@@ -661,12 +759,17 @@ fn judge_grpc(
     // biến mất. Nói ra thay vì im lặng (TM-12).
     let mut said: HashSet<String> = HashSet::new();
     for s in impls.iter().filter(|s| !grpc::fake_server_path(&s.file)) {
-        let grpc::Key::Found(key) = key_of(&s.site) else { continue };
+        let grpc::Key::Found(key) = key_of(&s.site) else {
+            continue;
+        };
         if !servers.contains_key(&key) && !fake.contains(&key) && said.insert(key.clone()) {
             report.unresolved.push(Unresolved {
                 file: s.file.clone(),
                 line: s.site.line,
-                spec: format!("{} ({key}: cài đặt server mà không thấy chỗ đăng ký)", s.site.shown),
+                spec: format!(
+                    "{} ({key}: cài đặt server mà không thấy chỗ đăng ký)",
+                    s.site.shown
+                ),
                 lang: s.lang,
                 reason: UnresolvedReason::Rpc,
             });
@@ -674,7 +777,9 @@ fn judge_grpc(
     }
     for (c, to, key) in &edges {
         let shown = format!("{} ({})", c.site.shown, key);
-        let Some((reason, rule, status)) = judge(doc, &c.from, to) else { continue };
+        let Some((reason, rule, status)) = judge(doc, &c.from, to) else {
+            continue;
+        };
         report.violations.push(Violation {
             from: c.from.clone(),
             to: to.clone(),
@@ -709,22 +814,36 @@ fn other_side(
 ) {
     // Server của service được gọi, hay được cài đặt ở đây mà đăng ký ở file khác.
     // So tên không phân biệt hoa thường: Rust viết service `KV` thành `Kv`.
-    let want_servers: HashSet<String> = calls.iter().chain(impls).map(|c| grpc::norm(&c.site.service)).collect();
-    let want_callers: HashSet<String> = serves.iter().map(|s| grpc::norm(&s.site.service)).collect();
+    let want_servers: HashSet<String> = calls
+        .iter()
+        .chain(impls)
+        .map(|c| grpc::norm(&c.site.service))
+        .collect();
+    let want_callers: HashSet<String> =
+        serves.iter().map(|s| grpc::norm(&s.site.service)).collect();
     let scanned: HashSet<&str> = files.iter().map(String::as_str).collect();
     let mut budget = MAX_RPC_SEARCH_BYTES;
     for f in source_files(root, ignores) {
-        let Some(lang) = Lang::for_path(&f).filter(|l| !matches!(l, Lang::C)) else { continue };
+        let Some(lang) = Lang::for_path(&f).filter(|l| !matches!(l, Lang::C)) else {
+            continue;
+        };
         if scanned.contains(f.as_str()) {
             continue;
         }
-        let Some(from) = owners_of(doc, &f).into_iter().next() else { continue };
-        let Ok(text) = deploy::read_in(root, &f, MAX_FILE_BYTES) else { continue };
+        let Some(from) = owners_of(doc, &f).into_iter().next() else {
+            continue;
+        };
+        let Ok(text) = deploy::read_in(root, &f, MAX_FILE_BYTES) else {
+            continue;
+        };
         if text.len() > budget {
             report.unresolved.push(Unresolved {
                 file: f.clone(),
                 line: 0,
-                spec: format!("tìm phía bên kia của lời gọi gRPC dừng ở trần {} MB", MAX_RPC_SEARCH_BYTES >> 20),
+                spec: format!(
+                    "tìm phía bên kia của lời gọi gRPC dừng ở trần {} MB",
+                    MAX_RPC_SEARCH_BYTES >> 20
+                ),
                 lang,
                 reason: UnresolvedReason::Rpc,
             });
@@ -735,9 +854,26 @@ fn other_side(
             continue;
         }
         let found = grpc::scan(&lang.tokens(&scan::source_view(&f, &text)), lang);
-        let site = |s: &grpc::Site| RpcSite { from: from.clone(), file: f.clone(), lang, site: s.clone() };
-        serves.extend(found.serves.iter().filter(|s| want_servers.contains(&grpc::norm(&s.service))).map(site));
-        calls.extend(found.calls.iter().filter(|s| want_callers.contains(&grpc::norm(&s.service))).map(site));
+        let site = |s: &grpc::Site| RpcSite {
+            from: from.clone(),
+            file: f.clone(),
+            lang,
+            site: s.clone(),
+        };
+        serves.extend(
+            found
+                .serves
+                .iter()
+                .filter(|s| want_servers.contains(&grpc::norm(&s.service)))
+                .map(site),
+        );
+        calls.extend(
+            found
+                .calls
+                .iter()
+                .filter(|s| want_callers.contains(&grpc::norm(&s.service)))
+                .map(site),
+        );
     }
 }
 
@@ -746,9 +882,18 @@ fn other_side(
 /// gọi gRPC biện minh cho `link a -> b` có thể nằm ở file khác; khi đó không
 /// báo `link` là "không thấy". Lần kiểm cả repo thì thấy hết và báo đúng.
 fn may_call(doc: &Document, a: &str, b: &str) -> bool {
-    let runs = |name: &str| doc.services.iter().find(|s| s.name == name).map(|s| s.runs.clone()).unwrap_or_default();
+    let runs = |name: &str| {
+        doc.services
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.runs.clone())
+            .unwrap_or_default()
+    };
     let (from, to) = (runs(a), runs(b));
-    from.iter().any(|x| to.iter().any(|y| x != y && matching(doc, RuleKind::Allow, x, y).is_some()))
+    from.iter().any(|x| {
+        to.iter()
+            .any(|y| x != y && matching(doc, RuleKind::Allow, x, y).is_some())
+    })
 }
 
 /// File có nhắc tới phía bên kia không: một lượt qua các định danh, tra bảng
@@ -756,28 +901,47 @@ fn may_call(doc: &Document, a: &str, b: &str) -> bool {
 /// generic (`"/pkg.KV/Get"`, `method_handlers_generic_handler("pkg.KV", …)`)
 /// thì tên service đứng một mình.
 fn mentions(text: &str, servers: &HashSet<String>, callers: &HashSet<String>) -> bool {
-    let generic = ["generic_handler", "unary_", "stream_", "Invoke", "NewStream"].iter().any(|g| text.contains(g));
-    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).any(|w| {
-        let cut = |p: &str, s: &str| w.strip_prefix(p).and_then(|r| r.strip_suffix(s)).map(grpc::norm);
-        // Python, Go, mã sinh của Node (`XService`), tonic (`XServer`); Node
-        // nạp `.proto` lúc chạy thì tên service đứng một mình.
-        [
-            cut("add_", "Servicer_to_server"),
-            cut("Register", "Server"),
-            cut("", "_ServiceDesc"),
-            cut("", "Server"),
-            cut("", "Service"),
-            Some(grpc::norm(w)),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|x| servers.contains(&x))
-            || [cut("", "Stub"), cut("New", "Client"), cut("", "Client"), Some(grpc::norm(w))]
+    let generic = [
+        "generic_handler",
+        "unary_",
+        "stream_",
+        "Invoke",
+        "NewStream",
+    ]
+    .iter()
+    .any(|g| text.contains(g));
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|w| {
+            let cut = |p: &str, s: &str| {
+                w.strip_prefix(p)
+                    .and_then(|r| r.strip_suffix(s))
+                    .map(grpc::norm)
+            };
+            // Python, Go, mã sinh của Node (`XService`), tonic (`XServer`); Node
+            // nạp `.proto` lúc chạy thì tên service đứng một mình.
+            [
+                cut("add_", "Servicer_to_server"),
+                cut("Register", "Server"),
+                cut("", "_ServiceDesc"),
+                cut("", "Server"),
+                cut("", "Service"),
+                Some(grpc::norm(w)),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|x| servers.contains(&x))
+                || [
+                    cut("", "Stub"),
+                    cut("New", "Client"),
+                    cut("", "Client"),
+                    Some(grpc::norm(w)),
+                ]
                 .into_iter()
                 .flatten()
                 .any(|x| callers.contains(&x))
-            || (generic && (servers.contains(&grpc::norm(w)) || callers.contains(&grpc::norm(w))))
-    })
+                || (generic
+                    && (servers.contains(&grpc::norm(w)) || callers.contains(&grpc::norm(w))))
+        })
 }
 
 /// Lời gọi gRPC giữa hai component chạy ở hai service khác nhau cần `link`.
@@ -794,9 +958,16 @@ fn judge_rpc_links(
         return used;
     }
     let running = |c: &str| -> Vec<&Service> {
-        doc.services.iter().filter(|s| s.meta.status.is_enforced() && s.runs.iter().any(|r| r == c)).collect()
+        doc.services
+            .iter()
+            .filter(|s| s.meta.status.is_enforced() && s.runs.iter().any(|r| r == c))
+            .collect()
     };
-    let linked = |a: &str, b: &str| doc.links.iter().any(|l| l.meta.status.is_enforced() && l.from == a && l.to.iter().any(|t| t == b));
+    let linked = |a: &str, b: &str| {
+        doc.links
+            .iter()
+            .any(|l| l.meta.status.is_enforced() && l.from == a && l.to.iter().any(|t| t == b))
+    };
     let mut reported: HashSet<(String, String, usize)> = HashSet::new();
     for (c, to, key) in edges {
         let targets = running(to);
@@ -857,7 +1028,10 @@ fn judge_expectations(
     use crate::model::Expect;
 
     for want in expectations {
-        let seen = sightings.get(want.name.as_str()).map(Vec::as_slice).unwrap_or_default();
+        let seen = sightings
+            .get(want.name.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         match &want.expect {
             Expect::Exists { within } => {
                 // Chỗ **khai báo** là bằng chứng mạnh hơn hẳn một lần gặp bất
@@ -872,8 +1046,11 @@ fn judge_expectations(
                 // bằng chứng mình không biết cách tìm là tự sinh báo động giả.
                 let declared: Vec<&Sighting> = seen.iter().filter(|s| s.defines).collect();
                 let by_declaration = !declared.is_empty();
-                let evidence: Vec<&Sighting> =
-                    if by_declaration { declared } else { seen.iter().collect() };
+                let evidence: Vec<&Sighting> = if by_declaration {
+                    declared
+                } else {
+                    seen.iter().collect()
+                };
 
                 let ok = evidence
                     .iter()
@@ -899,9 +1076,16 @@ fn judge_expectations(
                     continue;
                 }
 
-                let what = if by_declaration { "khai báo" } else { "thấy" };
+                let what = if by_declaration {
+                    "khai báo"
+                } else {
+                    "thấy"
+                };
                 let hint = if within.is_empty() {
-                    format!("`{}` không có trong mã — sửa mã, hoặc sửa khai báo", want.name)
+                    format!(
+                        "`{}` không có trong mã — sửa mã, hoặc sửa khai báo",
+                        want.name
+                    )
                 } else if evidence.is_empty() {
                     format!("`{}` không có trong mã", want.name)
                 } else {
@@ -963,9 +1147,13 @@ fn judge_expectations(
             }
         }
     }
-    report.missing.sort_by(|a, b| (&a.source, &a.name).cmp(&(&b.source, &b.name)));
+    report
+        .missing
+        .sort_by(|a, b| (&a.source, &a.name).cmp(&(&b.source, &b.name)));
     report.missing.dedup();
-    report.vacuous.sort_by(|a, b| (&a.source, &a.name).cmp(&(&b.source, &b.name)));
+    report
+        .vacuous
+        .sort_by(|a, b| (&a.source, &a.name).cmp(&(&b.source, &b.name)));
     report.vacuous.dedup();
 }
 
@@ -1027,7 +1215,16 @@ fn inspect(
         if to == from {
             continue;
         }
-        pulled_in(doc, from, &to, path, import.line, &import.spec, Via::Import, report);
+        pulled_in(
+            doc,
+            from,
+            &to,
+            path,
+            import.line,
+            &import.spec,
+            Via::Import,
+            report,
+        );
         if let Some((reason, rule, status)) = judge(doc, from, &to) {
             report.violations.push(Violation {
                 from: from.to_string(),
@@ -1127,7 +1324,11 @@ fn judge(doc: &Document, from: &str, to: &str) -> Option<(Reason, String, Status
     if !opted_in(doc, from) {
         return None;
     }
-    Some((Reason::NoAllow, format!("không có allow nào cho {from} -> {to}"), Status::Accepted))
+    Some((
+        Reason::NoAllow,
+        format!("không có allow nào cho {from} -> {to}"),
+        Status::Accepted,
+    ))
 }
 
 fn matching<'a>(doc: &'a Document, kind: RuleKind, from: &str, to: &str) -> Option<&'a Rule> {
@@ -1166,13 +1367,18 @@ fn hint_for(doc: &Document, from: &str, to: &str, reason: Reason, via: Via) -> S
     {
         return match via {
             Via::Import => format!("gọi {only} thay vì truy cập thẳng {to}"),
-            Via::Symbol | Via::Table | Via::Ffi | Via::Network | Via::Entry | Via::Rpc => format!("chỉ {only} được dùng {to}"),
+            Via::Symbol | Via::Table | Via::Ffi | Via::Network | Via::Entry | Via::Rpc => {
+                format!("chỉ {only} được dùng {to}")
+            }
         };
     }
     if reason == Reason::NotOwner
         && let Some(store) = doc.store(to)
     {
-        return format!("gọi {} thay vì chạm thẳng vào dữ liệu của nó", store.owned_by);
+        return format!(
+            "gọi {} thay vì chạm thẳng vào dữ liệu của nó",
+            store.owned_by
+        );
     }
     if reason == Reason::NotLinked {
         return format!("thêm `link {from} -> {to}`, hoặc bỏ cạnh này khỏi cấu hình");
@@ -1230,8 +1436,13 @@ fn classify(doc: &Document) -> Vec<(String, Vec<String>)> {
 /// chọn, nên phải hỏi người viết.
 fn ambiguous(doc: &Document, path: &str, owners: &[String]) -> bool {
     let top = |name: &str| {
-        doc.component(name)
-            .map(|c| c.paths.iter().filter(|p| glob::matches(p, path)).map(|p| specificity(p)).max())
+        doc.component(name).map(|c| {
+            c.paths
+                .iter()
+                .filter(|p| glob::matches(p, path))
+                .map(|p| specificity(p))
+                .max()
+        })
     };
     matches!(owners, [a, b, ..] if top(a) == top(b))
 }
@@ -1259,7 +1470,10 @@ fn owners_of(doc: &Document, path: &str) -> Vec<String> {
         })
         .collect();
     matched.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
-    matched.into_iter().map(|(_, name)| name.to_string()).collect()
+    matched
+        .into_iter()
+        .map(|(_, name)| name.to_string())
+        .collect()
 }
 
 /// Số đoạn nói rõ một cái tên. `src/web/**` là 2, `src/**` là 1, `*` là 0.
@@ -1286,7 +1500,11 @@ fn external_named(doc: &Document, package: &str) -> Option<String> {
 }
 
 fn describe(rule: &Rule) -> String {
-    let kind = if rule.kind == RuleKind::Allow { "allow" } else { "deny" };
+    let kind = if rule.kind == RuleKind::Allow {
+        "allow"
+    } else {
+        "deny"
+    };
     let targets: Vec<&str> = rule.to.iter().map(Target::as_str).collect();
     let mut out = format!("{kind} {} -> {}", rule.from.as_str(), targets.join(", "));
     if !rule.except.is_empty() {
@@ -1302,7 +1520,16 @@ fn describe(rule: &Rule) -> String {
 /// mọi thứ nó phụ thuộc cũng chạy ở đó, kể cả khi chỉ một file của nó dùng tới.
 /// Nhờ vậy `runs` kiểm được từng file một, trong hook.
 #[allow(clippy::too_many_arguments)]
-fn pulled_in(doc: &Document, from: &str, to: &str, file: &str, line: usize, spec: &str, via: Via, report: &mut Report) {
+fn pulled_in(
+    doc: &Document,
+    from: &str,
+    to: &str,
+    file: &str,
+    line: usize,
+    spec: &str,
+    via: Via,
+    report: &mut Report,
+) {
     if doc.services.is_empty() || !doc.component(to).is_some_and(|c| !c.external) {
         return;
     }
@@ -1330,7 +1557,9 @@ fn pulled_in(doc: &Document, from: &str, to: &str, file: &str, line: usize, spec
 fn matches_source(source: &Source, key: &Key) -> bool {
     match (source, key) {
         (Source::Compose { dir, name }, Key::Compose { dir: d, name: n })
-        | (Source::K8s { dir, name }, Key::K8s { dir: d, name: n }) => n == name && dir.as_ref().is_none_or(|x| x == d),
+        | (Source::K8s { dir, name }, Key::K8s { dir: d, name: n }) => {
+            n == name && dir.as_ref().is_none_or(|x| x == d)
+        }
         (Source::Dockerfile(p), Key::Dockerfile(q)) => p == q,
         _ => false,
     }
@@ -1340,14 +1569,36 @@ fn matches_source(source: &Source, key: &Key) -> bool {
 /// image của workload, không phải một cấu hình riêng.
 fn own_sources(s: &Service) -> impl Iterator<Item = &Source> {
     let k8s = s.on_k8s();
-    s.sources.iter().filter(move |x| !(k8s && matches!(x, Source::Dockerfile(_))))
+    s.sources.iter().filter(move |x| {
+        !(k8s && matches!(x, Source::Dockerfile(_))) && !matches!(x, Source::Values(_))
+    })
 }
 
 /// Cách nạp cấu hình mà file luật cần: manifest Kubernetes chỉ được đọc khi
 /// luật có nguồn `k8s:` (TM-18); `dockerfile:` đi cùng `k8s:` là image của
 /// container chính.
 pub fn deploy_options(doc: &Document) -> deploy::Options {
-    let mut opts = deploy::Options { k8s: doc.services.iter().any(Service::on_k8s), ..Default::default() };
+    let mut opts = deploy::Options {
+        k8s: doc.services.iter().any(Service::on_k8s),
+        ..Default::default()
+    };
+    // `values:` của Helm: gộp vào chart ở thư mục các nguồn `k8s:` cùng service.
+    for s in &doc.services {
+        for v in s.sources.iter().filter_map(|x| {
+            if let Source::Values(p) = x {
+                Some(p)
+            } else {
+                None
+            }
+        }) {
+            for x in &s.sources {
+                if let Source::K8s { dir, .. } = x {
+                    opts.helm_values
+                        .push((dir.clone().unwrap_or_else(|| "*".into()), v.clone()));
+                }
+            }
+        }
+    }
     for s in doc.services.iter().filter(|s| s.on_k8s()) {
         let Some(dockerfile) = s.sources.iter().find_map(|x| match x {
             Source::Dockerfile(p) => Some(p),
@@ -1357,7 +1608,11 @@ pub fn deploy_options(doc: &Document) -> deploy::Options {
         };
         for x in &s.sources {
             if let Source::K8s { dir, name } = x {
-                opts.pins.push(deploy::Pin { dir: dir.clone(), name: name.clone(), dockerfile: dockerfile.clone() });
+                opts.pins.push(deploy::Pin {
+                    dir: dir.clone(),
+                    name: name.clone(),
+                    dockerfile: dockerfile.clone(),
+                });
             }
         }
     }
@@ -1377,7 +1632,8 @@ const UNDECLARED_K8S: &str = "workload Kubernetes ";
 /// `to` là tên trong cấu hình, và phải khai `service` cho nó trước khi có
 /// `link` được.
 pub fn to_undeclared(v: &Violation) -> bool {
-    v.reason == Reason::NotLinked && (v.rule.starts_with(UNDECLARED) || v.rule.starts_with(UNDECLARED_K8S))
+    v.reason == Reason::NotLinked
+        && (v.rule.starts_with(UNDECLARED) || v.rule.starts_with(UNDECLARED_K8S))
 }
 
 /// Tên máy viết thẳng trong mã của một component là cạnh mạng từ mọi service
@@ -1391,12 +1647,20 @@ fn judge_code_hosts(
     report: &mut Report,
 ) -> BTreeSet<(String, String)> {
     let mut used = BTreeSet::new();
-    let declared = |key: &Key| doc.services.iter().find(|s| own_sources(s).any(|src| matches_source(src, key)));
+    let declared = |key: &Key| {
+        doc.services
+            .iter()
+            .find(|s| own_sources(s).any(|src| matches_source(src, key)))
+    };
     let mut running: HashMap<&str, Vec<&Service>> = HashMap::new();
     // Cấu hình của từng service, để biết tên máy trong mã của nó trỏ tới đâu.
     let mut placed: HashMap<&str, Vec<&Key>> = HashMap::new();
     for v in &dep.services {
-        if let Some(s) = doc.services.iter().find(|s| own_sources(s).any(|src| matches_source(src, &v.key))) {
+        if let Some(s) = doc
+            .services
+            .iter()
+            .find(|s| own_sources(s).any(|src| matches_source(src, &v.key)))
+        {
             placed.entry(s.name.as_str()).or_default().push(&v.key);
         }
     }
@@ -1404,9 +1668,14 @@ fn judge_code_hosts(
     // `"db:5432"` không thành 1 000 vi phạm trong context của agent (TM-34).
     let mut reported: HashMap<(String, String, String), usize> = HashMap::new();
     for (from, file, h) in sites {
-        let Some(keys) = dep.hosts.get(&h.host.name) else { continue };
+        let Some(keys) = dep.hosts.get(&h.host.name) else {
+            continue;
+        };
         let runners = running.entry(from.as_str()).or_insert_with(|| {
-            doc.services.iter().filter(|s| s.meta.status.is_enforced() && s.runs.iter().any(|r| r == from)).collect()
+            doc.services
+                .iter()
+                .filter(|s| s.meta.status.is_enforced() && s.runs.iter().any(|r| r == from))
+                .collect()
         });
         for s in runners.iter() {
             let here = placed.get(s.name.as_str()).map_or(&[][..], Vec::as_slice);
@@ -1417,7 +1686,11 @@ fn judge_code_hosts(
                     Some(t) => t.name.clone(),
                     None => key.text(),
                 };
-                if t.is_some() && doc.links.iter().any(|l| l.meta.status.is_enforced() && l.from == s.name && l.to.contains(&to)) {
+                if t.is_some()
+                    && doc.links.iter().any(|l| {
+                        l.meta.status.is_enforced() && l.from == s.name && l.to.contains(&to)
+                    })
+                {
                     used.insert((s.name.clone(), to));
                     continue;
                 }
@@ -1425,19 +1698,40 @@ fn judge_code_hosts(
                     report.violations[at].count += 1;
                     continue;
                 }
-                reported.insert((s.name.clone(), to.clone(), file.clone()), report.violations.len());
+                reported.insert(
+                    (s.name.clone(), to.clone(), file.clone()),
+                    report.violations.len(),
+                );
                 let (rule, hint) = match (t, key) {
                     (Some(_), _) => (
-                        format!("không có link nào cho {} -> {to} (tên máy viết trong mã)", s.name),
-                        format!("thêm `link {} -> {to}`, hoặc bỏ địa chỉ này khỏi mã", s.name),
+                        format!(
+                            "không có link nào cho {} -> {to} (tên máy viết trong mã)",
+                            s.name
+                        ),
+                        format!(
+                            "thêm `link {} -> {to}`, hoặc bỏ địa chỉ này khỏi mã",
+                            s.name
+                        ),
                     ),
                     (None, Key::K8s { name, .. }) => (
-                        format!("{UNDECLARED_K8S}`{name}` chưa khai, nên không có link nào cho {} tới nó", s.name),
-                        format!("khai `service ... from k8s:{name}` rồi thêm `link {} -> ...`", s.name),
+                        format!(
+                            "{UNDECLARED_K8S}`{name}` chưa khai, nên không có link nào cho {} tới nó",
+                            s.name
+                        ),
+                        format!(
+                            "khai `service ... from k8s:{name}` rồi thêm `link {} -> ...`",
+                            s.name
+                        ),
                     ),
                     (None, Key::Compose { name, .. } | Key::Dockerfile(name)) => (
-                        format!("{UNDECLARED}`{name}` chưa khai, nên không có link nào cho {} tới nó", s.name),
-                        format!("khai `service ... from compose:{name}` rồi thêm `link {} -> ...`", s.name),
+                        format!(
+                            "{UNDECLARED}`{name}` chưa khai, nên không có link nào cho {} tới nó",
+                            s.name
+                        ),
+                        format!(
+                            "khai `service ... from compose:{name}` rồi thêm `link {} -> ...`",
+                            s.name
+                        ),
                     ),
                 };
                 report.violations.push(Violation {
@@ -1488,7 +1782,10 @@ fn judge_deploy(
     for s in doc.services.iter().filter(|s| !s.sources.is_empty()) {
         let mut all: Vec<&Svc> = Vec::new();
         for source in own_sources(s) {
-            let found: Vec<&Svc> = svcs.iter().filter(|v| matches_source(source, &v.key)).collect();
+            let found: Vec<&Svc> = svcs
+                .iter()
+                .filter(|v| matches_source(source, &v.key))
+                .collect();
             let dirs: std::collections::BTreeSet<&str> = found
                 .iter()
                 .filter_map(|v| match &v.key {
@@ -1503,9 +1800,14 @@ fn judge_deploy(
                         source: format!("service {}", s.name),
                         line: s.meta.line,
                         hint: match source {
-                            Source::Compose { name, .. } => format!("không có service `{name}` trong file compose nào"),
-                            Source::K8s { name, .. } => format!("không có workload `{name}` trong manifest Kubernetes nào đọc được"),
+                            Source::Compose { name, .. } => {
+                                format!("không có service `{name}` trong file compose nào")
+                            }
+                            Source::K8s { name, .. } => format!(
+                                "không có workload `{name}` trong manifest Kubernetes nào đọc được"
+                            ),
                             Source::Dockerfile(p) => format!("không có Dockerfile `{p}`"),
+                            Source::Values(p) => format!("không có file values `{p}`"),
                         },
                     });
                 } else if dirs.len() > 1 && matches!(source, Source::Compose { .. }) {
@@ -1519,7 +1821,10 @@ fn judge_deploy(
                         line: s.meta.line,
                         hint: format!(
                             "khớp {what} ở nhiều thư mục ({}) — viết `{form}:<thư mục>/<tên>`",
-                            dirs.iter().map(|d| if d.is_empty() { "." } else { d }).collect::<Vec<_>>().join(", ")
+                            dirs.iter()
+                                .map(|d| if d.is_empty() { "." } else { d })
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         ),
                     });
                 }
@@ -1530,7 +1835,11 @@ fn judge_deploy(
     }
 
     // Cấu hình → `service` của file luật, để gọi tên đích của cạnh mạng.
-    let declared = |key: &Key| doc.services.iter().find(|s| own_sources(s).any(|src| matches_source(src, key)));
+    let declared = |key: &Key| {
+        doc.services
+            .iter()
+            .find(|s| own_sources(s).any(|src| matches_source(src, key)))
+    };
 
     // Cặp service có lời gọi gRPC cũng là `link` được thấy.
     let mut seen: std::collections::BTreeSet<(String, String)> = rpc_links.clone();
@@ -1560,7 +1869,9 @@ fn judge_deploy(
             if let Some(e) = v.exposed.first() {
                 let internet = crate::model::INTERNET;
                 seen.insert((internet.to_string(), s.name.clone()));
-                if !linked_pairs.contains(&(internet, s.name.as_str())) && exposed_reported.insert(s.name.clone()) {
+                if !linked_pairs.contains(&(internet, s.name.as_str()))
+                    && exposed_reported.insert(s.name.clone())
+                {
                     report.violations.push(Violation {
                         from: internet.to_string(),
                         to: s.name.clone(),
@@ -1570,7 +1881,10 @@ fn judge_deploy(
                         via: Via::Network,
                         count: v.exposed.len(),
                         reason: Reason::NotLinked,
-                        rule: format!("service {} lộ ra Internet mà không có `link {internet} -> {}`", s.name, s.name),
+                        rule: format!(
+                            "service {} lộ ra Internet mà không có `link {internet} -> {}`",
+                            s.name, s.name
+                        ),
                         status: Status::Accepted,
                         hint: format!("thêm `link {internet} -> {}`, hoặc bỏ lối vào này", s.name),
                     });
@@ -1582,38 +1896,58 @@ fn judge_deploy(
             // policy 5 000 peer chọn hàng chục service là bậc hai (TM-23).
             for (guard, inbound) in [(&v.ingress, true), (&v.egress, false)] {
                 for rules in &guard.grants {
-                    if !walked.insert((s.name.clone(), inbound, std::rc::Rc::as_ptr(rules) as usize)) {
+                    if !walked.insert((
+                        s.name.clone(),
+                        inbound,
+                        std::rc::Rc::as_ptr(rules) as usize,
+                    )) {
                         continue;
                     }
                     for g in rules.iter() {
-                    let deploy::Grant::Pods { keys, policy, file, line } = g else { continue };
-                    for k in keys.iter() {
-                        grant_steps += 1;
-                        if grant_steps > MAX_GRANT_STEPS {
-                            break;
-                        }
-                        let Some(o) = declared(k) else { continue };
-                        if o.name == s.name {
+                        let deploy::Grant::Pods {
+                            keys,
+                            policy,
+                            file,
+                            line,
+                        } = g
+                        else {
                             continue;
+                        };
+                        for k in keys.iter() {
+                            grant_steps += 1;
+                            if grant_steps > MAX_GRANT_STEPS {
+                                break;
+                            }
+                            let Some(o) = declared(k) else { continue };
+                            if o.name == s.name {
+                                continue;
+                            }
+                            let (from, to) = if inbound {
+                                (&o.name, &s.name)
+                            } else {
+                                (&s.name, &o.name)
+                            };
+                            seen.insert((from.clone(), to.clone()));
+                            if !linked_pairs.contains(&(from.as_str(), to.as_str()))
+                                && granted.insert((from.clone(), to.clone()))
+                            {
+                                report.violations.push(Violation {
+                                    from: from.clone(),
+                                    to: to.clone(),
+                                    file: file.clone(),
+                                    line: *line,
+                                    spec: format!("NetworkPolicy `{policy}` cho phép"),
+                                    via: Via::Network,
+                                    count: 1,
+                                    reason: Reason::NotLinked,
+                                    rule: format!(
+                                        "NetworkPolicy cho phép {from} -> {to} mà không có link nào"
+                                    ),
+                                    status: Status::Accepted,
+                                    hint: hint_for(doc, from, to, Reason::NotLinked, Via::Network),
+                                });
+                            }
                         }
-                        let (from, to) = if inbound { (&o.name, &s.name) } else { (&s.name, &o.name) };
-                        seen.insert((from.clone(), to.clone()));
-                        if !linked_pairs.contains(&(from.as_str(), to.as_str())) && granted.insert((from.clone(), to.clone())) {
-                            report.violations.push(Violation {
-                                from: from.clone(),
-                                to: to.clone(),
-                                file: file.clone(),
-                                line: *line,
-                                spec: format!("NetworkPolicy `{policy}` cho phép"),
-                                via: Via::Network,
-                                count: 1,
-                                reason: Reason::NotLinked,
-                                rule: format!("NetworkPolicy cho phép {from} -> {to} mà không có link nào"),
-                                status: Status::Accepted,
-                                hint: hint_for(doc, from, to, Reason::NotLinked, Via::Network),
-                            });
-                        }
-                    }
                     }
                 }
             }
@@ -1636,9 +1970,15 @@ fn judge_deploy(
                         via: Via::Network,
                         count: 1,
                         reason: Reason::NotLinked,
-                        rule: format!("{what}`{}` chưa khai, nên không có link nào cho {} tới nó", e.to, s.name),
+                        rule: format!(
+                            "{what}`{}` chưa khai, nên không có link nào cho {} tới nó",
+                            e.to, s.name
+                        ),
                         status: Status::Accepted,
-                        hint: format!("khai `service ... from {form}:{}` rồi thêm `link {} -> ...`", e.to, s.name),
+                        hint: format!(
+                            "khai `service ... from {form}:{}` rồi thêm `link {} -> ...`",
+                            e.to, s.name
+                        ),
                     });
                     continue;
                 };
@@ -1678,7 +2018,8 @@ fn judge_deploy(
                             && st.cut.is_empty()
                             && st.entries.iter().all(|e| {
                                 let files = entry_files(root, resolver, std::slice::from_ref(e));
-                                !files.is_empty() && files.iter().all(|f| Lang::for_path(f).is_some())
+                                !files.is_empty()
+                                    && files.iter().all(|f| Lang::for_path(f).is_some())
                             })
                     });
                 if clear {
@@ -1686,7 +2027,17 @@ fn judge_deploy(
                     let mut found: HashSet<(String, String, usize)> = HashSet::new();
                     for st in &v.starts {
                         for file in entry_files(root, resolver, &st.entries) {
-                            entry_runs(root, doc, resolver, s, st, &file, &mut targets, &mut found, &mut quiet);
+                            entry_runs(
+                                root,
+                                doc,
+                                resolver,
+                                s,
+                                st,
+                                &file,
+                                &mut targets,
+                                &mut found,
+                                &mut quiet,
+                            );
                         }
                     }
                     report.violations.extend(quiet.violations);
@@ -1694,7 +2045,10 @@ fn judge_deploy(
                 continue;
             }
             if v.starts.is_empty() {
-                let why = v.unknown.clone().unwrap_or_else(|| "không xác định được lệnh khởi chạy".into());
+                let why = v
+                    .unknown
+                    .clone()
+                    .unwrap_or_else(|| "không xác định được lệnh khởi chạy".into());
                 report.entry_unknown.push((s.name.clone(), why));
                 continue;
             }
@@ -1724,14 +2078,29 @@ fn judge_deploy(
                         if Lang::for_path(&file).is_none() {
                             unread.push(file.clone());
                         }
-                        entry_runs(root, doc, resolver, s, st, &file, &mut targets, &mut found, report);
+                        entry_runs(
+                            root,
+                            doc,
+                            resolver,
+                            s,
+                            st,
+                            &file,
+                            &mut targets,
+                            &mut found,
+                            report,
+                        );
                     }
                 }
                 if !lost.is_empty() {
                     lost.dedup();
                     report.entry_unknown.push((
                         s.name.clone(),
-                        format!("{}:{} không tìm thấy trong repo mã mà `{}` nạp", st.file, st.line, lost.join("`, `")),
+                        format!(
+                            "{}:{} không tìm thấy trong repo mã mà `{}` nạp",
+                            st.file,
+                            st.line,
+                            lost.join("`, `")
+                        ),
                     ));
                 }
                 if !unread.is_empty() {
@@ -1748,7 +2117,12 @@ fn judge_deploy(
                 if !st.cut.is_empty() {
                     report.entry_unknown.push((
                         s.name.clone(),
-                        format!("{}:{} không đọc hết lệnh khởi chạy: {}", st.file, st.line, st.cut.join("; ")),
+                        format!(
+                            "{}:{} không đọc hết lệnh khởi chạy: {}",
+                            st.file,
+                            st.line,
+                            st.cut.join("; ")
+                        ),
                     ));
                 }
             }
@@ -1758,14 +2132,20 @@ fn judge_deploy(
     for l in doc.links.iter().filter(|l| l.meta.status.is_enforced()) {
         // `Internet` không có cấu hình riêng: lối vào nằm ở cấu hình của đích.
         let has_config = |name: &str| {
-            name == crate::model::INTERNET || matched.iter().any(|(s, f)| s.name == name && !f.is_empty())
+            name == crate::model::INTERNET
+                || matched.iter().any(|(s, f)| s.name == name && !f.is_empty())
         };
         if !has_config(&l.from) {
             continue;
         }
         for t in &l.to {
-            if has_config(t) && !seen.contains(&(l.from.clone(), t.clone())) && !(report.partial && may_call(doc, &l.from, t)) {
-                report.links_unseen.push((l.from.clone(), t.clone(), l.meta.line));
+            if has_config(t)
+                && !seen.contains(&(l.from.clone(), t.clone()))
+                && !(report.partial && may_call(doc, &l.from, t))
+            {
+                report
+                    .links_unseen
+                    .push((l.from.clone(), t.clone(), l.meta.line));
             }
         }
     }
@@ -1773,7 +2153,9 @@ fn judge_deploy(
     if grant_steps > MAX_GRANT_STEPS {
         report.deploy_unread.push(deploy::Unread {
             file: "NetworkPolicy".into(),
-            why: format!("quá {MAX_GRANT_STEPS} bước xét đường policy cho phép; phần còn lại không xét"),
+            why: format!(
+                "quá {MAX_GRANT_STEPS} bước xét đường policy cho phép; phần còn lại không xét"
+            ),
         });
     }
 
@@ -1797,9 +2179,14 @@ fn judge_deploy(
             if to.is_empty() {
                 continue;
             }
-            let open = from.iter().any(|a| to.iter().any(|b| b.ingress.allows(&a.key) && a.egress.allows(&b.key)));
+            let open = from.iter().any(|a| {
+                to.iter()
+                    .any(|b| b.ingress.allows(&a.key) && a.egress.allows(&b.key))
+            });
             if !open {
-                report.links_blocked.push((l.from.clone(), t.clone(), l.meta.line));
+                report
+                    .links_blocked
+                    .push((l.from.clone(), t.clone(), l.meta.line));
             }
         }
     }
@@ -1812,10 +2199,14 @@ fn judge_deploy(
     for v in &svcs {
         match &v.key {
             Key::Compose { name, .. } if compose && declared(&v.key).is_none() => {
-                report.services_undeclared.push((v.file.clone(), v.line, name.clone()));
+                report
+                    .services_undeclared
+                    .push((v.file.clone(), v.line, name.clone()));
             }
             Key::K8s { name, .. } if k8s && declared(&v.key).is_none() => {
-                report.services_undeclared.push((v.file.clone(), v.line, name.clone()));
+                report
+                    .services_undeclared
+                    .push((v.file.clone(), v.line, name.clone()));
             }
             _ => {}
         }
@@ -1826,7 +2217,9 @@ fn judge_deploy(
     report.entry_unknown.dedup();
     // Cùng một patch đè lên workload mà hai `service` cùng trỏ tới: báo một lần.
     let mut seen_unread: HashSet<(String, String)> = HashSet::new();
-    report.deploy_unread.retain(|u| seen_unread.insert((u.file.clone(), u.why.clone())));
+    report
+        .deploy_unread
+        .retain(|u| seen_unread.insert((u.file.clone(), u.why.clone())));
 }
 
 /// File mà các điểm vào nạp. Module không có ở thư mục làm việc trong
@@ -1837,7 +2230,12 @@ pub fn entry_files(root: &Path, resolver: &Resolver, entries: &[deploy::Entry]) 
         match deploy::entry_files(root, e) {
             Ok(files) => out.extend(files),
             Err(module) => {
-                let import = scan::Import { spec: module, line: 0, system: false, names: Vec::new() };
+                let import = scan::Import {
+                    spec: module,
+                    line: 0,
+                    system: false,
+                    names: Vec::new(),
+                };
                 if let Resolved::Path(p) = resolver.resolve(Lang::Python, "", &import) {
                     let main = matches!(e, deploy::Entry::Module { main: true, .. });
                     if main && let Some(dir) = p.strip_suffix("/__init__.py") {
@@ -1873,7 +2271,8 @@ fn entry_runs(
     found: &mut HashSet<(String, String, usize)>,
     report: &mut Report,
 ) {
-    let outside = |c: &str| doc.component(c).is_some_and(|c| !c.external) && !s.runs.iter().any(|r| r == c);
+    let outside =
+        |c: &str| doc.component(c).is_some_and(|c| !c.external) && !s.runs.iter().any(|r| r == c);
     let violation = |to: &str, file: &str, line: usize, spec: String, via: Via| Violation {
         from: s.name.clone(),
         to: to.to_string(),
@@ -1891,16 +2290,27 @@ fn entry_runs(
     // cả `pkg/__init__.py` lẫn `pkg/x.py`, cùng một component.
     if let Some(owner) = owners_of(doc, file).first() {
         if outside(owner) && found.insert((owner.clone(), st.file.clone(), st.line)) {
-            report.violations.push(violation(owner, &st.file, st.line, format!("khởi chạy {}", st.shown), Via::Entry));
+            report.violations.push(violation(
+                owner,
+                &st.file,
+                st.line,
+                format!("khởi chạy {}", st.shown),
+                Via::Entry,
+            ));
         }
         return;
     }
-    let direct = targets.entry(file.to_string()).or_insert_with(|| direct_targets(root, resolver, file));
+    let direct = targets
+        .entry(file.to_string())
+        .or_insert_with(|| direct_targets(root, resolver, file));
     let direct = match direct {
         Ok(d) => d,
         // Đọc không được thì không biết nó nạp gì (TM-12).
         Err(why) => {
-            report.entry_unknown.push((s.name.clone(), format!("{}:{} điểm vào `{file}`: {why}", st.file, st.line)));
+            report.entry_unknown.push((
+                s.name.clone(),
+                format!("{}:{} điểm vào `{file}`: {why}", st.file, st.line),
+            ));
             return;
         }
     };
@@ -1909,7 +2319,9 @@ fn entry_runs(
             && outside(owner)
             && found.insert((owner.clone(), file.to_string(), *line))
         {
-            report.violations.push(violation(owner, file, *line, spec.clone(), Via::Import));
+            report
+                .violations
+                .push(violation(owner, file, *line, spec.clone(), Via::Import));
         }
     }
 }
@@ -1924,7 +2336,9 @@ pub(crate) type Targets = Result<Vec<(String, usize, String)>, String>;
 /// không qua symlink, chỉ file thường, có trần ([`MAX_FILE_BYTES`]). Không
 /// biết ngôn ngữ thì không có import nào; đọc không được thì trả lý do.
 pub(crate) fn direct_targets(root: &Path, resolver: &Resolver, file: &str) -> Targets {
-    let Some(lang) = Lang::for_path(file) else { return Ok(Vec::new()) };
+    let Some(lang) = Lang::for_path(file) else {
+        return Ok(Vec::new());
+    };
     let src = deploy::read_in(root, file, MAX_FILE_BYTES)?;
     let src = scan::source_view(file, &src);
     let scanned = lang.scan_all(&src, &Default::default(), &[]);
@@ -1935,7 +2349,10 @@ pub(crate) fn direct_targets(root: &Path, resolver: &Resolver, file: &str) -> Ta
         if let Resolved::Path(p) = base {
             out.push((p, import.line, import.spec.clone()));
         }
-        out.extend(subs.into_iter().map(|p| (p, import.line, import.spec.clone())));
+        out.extend(
+            subs.into_iter()
+                .map(|p| (p, import.line, import.spec.clone())),
+        );
     }
     Ok(out)
 }
@@ -1951,7 +2368,11 @@ fn walk(root: &Path, prefix: &str, extra_ignores: &[String], out: &mut Vec<Strin
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        let rel = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+        let rel = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
 
         // Không đi theo symlink: tránh vòng lặp và tránh ra ngoài gốc dự án.
         let Ok(meta) = entry.path().symlink_metadata() else {
@@ -1986,7 +2407,11 @@ fn walk(root: &Path, prefix: &str, extra_ignores: &[String], out: &mut Vec<Strin
 fn gitignored_dir(root: &Path, rel: &str) -> Option<bool> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let (top, prefix) = git_top(&root);
-    let parts: Vec<&str> = prefix.iter().map(String::as_str).chain(rel.split('/')).collect();
+    let parts: Vec<&str> = prefix
+        .iter()
+        .map(String::as_str)
+        .chain(rel.split('/'))
+        .collect();
     let (sources, known) = ignore_sources(&top, &parts);
     if ignored_within(&sources, &parts, prefix.len() + 1) {
         return Some(true);
@@ -2070,7 +2495,9 @@ fn ignored_within(sources: &[(usize, String)], parts: &[&str], first: usize) -> 
                 if pattern.is_empty() {
                     continue;
                 }
-                let whole = pattern.strip_suffix("/**").or_else(|| pattern.strip_suffix("/*"));
+                let whole = pattern
+                    .strip_suffix("/**")
+                    .or_else(|| pattern.strip_suffix("/*"));
                 let hit = |pattern: &str| {
                     if pattern.contains('/') || whole.is_some() {
                         glob::matches(pattern.trim_start_matches('/'), &sub)

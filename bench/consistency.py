@@ -104,6 +104,10 @@ DEPLOY = {
         # mở đường cho `shoppingassistantservice`, trong khi env của frontend
         # trỏ tới nó: chỗ lệch có thật trong repo.
         "blocked": [("Frontend", "Shoppingassistantservice")],
+        # Chart Helm `helm-chart/` dựng từ `values.yaml`: workload `frontend` của
+        # chart cũng gọi `cartservice` qua env; gỡ link thì phải báo ở chính
+        # template đó.
+        "helm": [("Frontend", "Cartservice", "helm-chart/templates/frontend.yaml")],
     },
 }
 
@@ -285,14 +289,16 @@ def deploy(archctl: str, name: str, law: Path, root: list, rep: dict, out: dict)
         else:
             checks.append(("policy", a, b))
     code_files = {(a, b): f for a, b, f in want.get("code", [])}
-    for a, b in code_files:
-        if (a, b) not in links:
-            out["problems"].append(f"thiếu cạnh mạng: luật sinh ra không có link {a} -> {b}")
-        else:
-            checks.append(("code", a, b))
+    helm_files = {(a, b): f for a, b, f in want.get("helm", [])}
+    for kind, at in (("code", code_files), ("helm", helm_files)):
+        for a, b in at:
+            if (a, b) not in links:
+                out["problems"].append(f"thiếu cạnh mạng: luật sinh ra không có link {a} -> {b}")
+            else:
+                checks.append((kind, a, b))
     # Gỡ từng cái đi thì `check` phải báo đúng loại vi phạm đó.
     for kind, a, b in checks:
-        if kind in ("network", "policy", "code"):
+        if kind in ("network", "policy", "code", "helm"):
             pattern = rf"^(link\s+{a}\s*->\s*)([^@\n]+)"
             broken = re.sub(pattern, lambda m: m.group(1) + ", ".join(
                 x.strip() for x in m.group(2).split(",") if x.strip() != b) + " ", text, flags=re.M)
@@ -316,15 +322,19 @@ def deploy(archctl: str, name: str, law: Path, root: list, rep: dict, out: dict)
             # Vi phạm do tên máy viết trong mã: nằm ở chính file mã.
             seen |= {(v["from"], v["to"], "code") for v in vs
                      if v.get("reason") == "not_linked" and v["file"] == code_files.get((v["from"], v["to"]))}
+            seen |= {(v["from"], v["to"], "helm") for v in vs
+                     if v.get("reason") == "not_linked" and v["file"] == helm_files.get((v["from"], v["to"]))}
         except (json.JSONDecodeError, KeyError):
             seen = set()
         finally:
             law.write_text(text)
-        reason = {"network": "not_linked", "runs": "not_run", "policy": "policy", "code": "code"}[kind]
+        reason = {"network": "not_linked", "runs": "not_run", "policy": "policy", "code": "code", "helm": "helm"}[kind]
         if (a, b, reason) not in seen:
             what = f"{b} khỏi runs của {a}" if kind == "runs" else f"link {a} -> {b}"
             if kind == "code":
                 out["problems"].append(f"gỡ {what} mà check không báo tên máy ở {code_files[(a, b)]}")
+            elif kind == "helm":
+                out["problems"].append(f"gỡ {what} mà check không báo ở chart {helm_files[(a, b)]}")
             else:
                 out["problems"].append(f"gỡ {what} mà check không báo {reason}")
 

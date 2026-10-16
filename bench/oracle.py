@@ -680,6 +680,118 @@ def build_venv(cache, name, requirements, label):
     return str(python)
 
 
+# `helm` bản ghim, tải từ get.helm.sh, kiểm sha256 của chính tarball (lấy từ
+# file `.sha256sum` chính thức lúc ghim). Chỉ khi `--require helm`.
+HELM_VERSION = "v3.15.4"
+HELM_SHA256 = {
+    "darwin-arm64": "88115846a1fb58f8eb8f64fec5c343d95ca394f1be811602fa54a887c98730ac",
+    "linux-amd64": "11400fecfc07fd6f034863e4e0c4c4445594673fd2a129e701fe41f31170cfa9",
+}
+
+
+def build_helm(cache):
+    import hashlib
+    import platform
+    import tarfile
+    import urllib.request
+    osname = {"Darwin": "darwin", "Linux": "linux"}.get(platform.system())
+    arch = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "amd64", "AMD64": "amd64"}.get(platform.machine())
+    plat = f"{osname}-{arch}"
+    if plat not in HELM_SHA256:
+        bench.die(f"không có bản helm ghim cho {plat}")
+    home = Path(cache) / "helm-oracle"
+    exe = home / f"helm-{HELM_VERSION}-{plat}"
+    if exe.exists():
+        return str(exe)
+    home.mkdir(parents=True, exist_ok=True)
+    url = f"https://get.helm.sh/helm-{HELM_VERSION}-{plat}.tar.gz"
+    try:
+        data = urllib.request.urlopen(url, timeout=120).read()
+    except OSError as e:
+        bench.die(f"tải helm hỏng: {e}")
+    if hashlib.sha256(data).hexdigest() != HELM_SHA256[plat]:
+        bench.die(f"helm tải về sai sha256: {url}")
+    tgz = home / "helm.tar.gz"
+    tgz.write_bytes(data)
+    with tarfile.open(tgz) as t:
+        member = t.getmember(f"{plat}/helm")
+        src = t.extractfile(member)
+        exe.write_bytes(src.read())
+    exe.chmod(0o755)
+    tgz.unlink()
+    return str(exe)
+
+
+def helm_render(helm, root, charts, workdir):
+    """`{template: [thư mục chart, văn bản]}` theo `helm template`, và chart
+    helm không dựng được."""
+    out, failed = {}, []
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": workdir,
+           "HELM_CACHE_HOME": workdir, "HELM_CONFIG_HOME": workdir, "HELM_DATA_HOME": workdir}
+    for d in charts:
+        p = subprocess.run([helm, "template", "release-name", d or ".", "--namespace", "default"],
+                           cwd=root, capture_output=True, text=True, timeout=300, env=env)
+        if p.returncode != 0:
+            failed.append(d)
+            continue
+        # `alias` của chart con: helm ghi `charts/<alias>/…`, thư mục thật là
+        # `charts/<name>/`.
+        aliases = {}
+        meta = Path(root, d, "Chart.yaml").read_text() if Path(root, d, "Chart.yaml").is_file() else ""
+        for block in re.split(r"^\s*-\s+(?=name:)", meta, flags=re.M)[1:]:
+            name = re.search(r"^name:\s*(\S+)", block, re.M)
+            alias = re.search(r"^\s*alias:\s*(\S+)", block, re.M)
+            if name and alias:
+                aliases[alias.group(1)] = name.group(1)
+        current = None
+        for part in re.split(r"^---\s*$", p.stdout, flags=re.M):
+            m = re.search(r"^# Source: ([^/\n]+)/(.+)$", part, re.M)
+            if not m:
+                continue
+            rel = re.sub(r"^charts/([^/]+)/", lambda x: f"charts/{aliases.get(x.group(1), x.group(1))}/", m.group(2))
+            path = f"{d + '/' if d else ''}{rel}"
+            current = out.setdefault(path, [d, ""])
+            current[1] += "---\n" + part.lstrip("\n")
+    return out, failed
+
+
+def compare_helm(ht, have_all, have_rendered, want_all, helm_files, failed):
+    """So dữ kiện từng template archctl dựng với bản của helm."""
+    for c in failed:
+        ht.note(f"{c or '.'}: helm template không dựng được")
+    for file, want in want_all.items():
+        ht.files += 1
+        if isinstance(want, str):
+            ht.unparsed += 1
+            continue
+        ht.imports += sum(want.values())
+        have = have_all.get(file)
+        if file not in have_rendered or not isinstance(have, collections.Counter):
+            if want:
+                ht.note(f"{file}: archctl không dựng được mà helm dựng được")
+            continue
+        have = collections.Counter(s for (_, s) in have.elements())
+        for f in sorted((want - have).elements()):
+            ht.note(f"{file} thiếu: {f}")
+        for f in sorted((have - want).elements()):
+            ht.note(f"{file} thừa: {f}")
+    for file in sorted(have_rendered - helm_files):
+        if have_all.get(file):
+            ht.note(f"{file}: archctl dựng ra mà helm không")
+
+
+def helm_truth(python, helm_json):
+    p = subprocess.run([python, "-I", str(HERE / "k8s_truth.py"), "helmfacts", helm_json],
+                       capture_output=True, text=True, timeout=900)
+    if p.returncode != 0:
+        bench.die(f"thước đo Helm hỏng: {p.stderr.strip()[-400:]}")
+    out = {}
+    for line in p.stdout.splitlines():
+        file, res = line.split("\t", 1)
+        out[file] = res if res.startswith("ERR") else collections.Counter(s for _, s in json.loads(res)["facts"])
+    return out
+
+
 def build_ipython_helper(cache):
     return build_venv(cache, "ipython-oracle", IPYTHON_REQUIREMENTS, "IPython")
 
@@ -805,9 +917,12 @@ def archctl_k8s(archctl, root, files):
         bench.die(f"archctl scan hỏng ở {root.name}: {p.stderr.strip()[-300:]}")
     rep = json.loads(p.stdout)["deploy"]
     out = {}
+    rendered = set()
     for f in rep["files"]:
         if f.get("kind") not in ("k8s", "skaffold"):
             continue
+        if f.get("rendered"):
+            rendered.add(f["file"])
         if "error" in f:
             out[f["file"]] = f"ERR {f['error']}"
             continue
@@ -871,10 +986,10 @@ def archctl_k8s(archctl, root, files):
             host = e["shown"].split(" → ", 1)[1].rsplit(":", 1)[0] if ":" in e["shown"].split(" → ", 1)[1] \
                 else e["shown"].split(" → ", 1)[1]
             edges[f"{s['key']}\t{e['file']}:{e['line']}\t{host}"].add(e["target"])
-    return out, edges, guards, exposed
+    return out, edges, guards, exposed, rendered, rep.get("charts", [])
 
 
-def k8s_truth(python, root, files):
+def k8s_truth(python, root, files, helm_json=None):
     """Dữ kiện từng manifest và cạnh theo PyYAML và tài liệu Kubernetes."""
     p = subprocess.run([python, "-I", str(HERE / "k8s_truth.py"), "facts"],
                        input="".join(f"{root}\t{f}\n" for f in files),
@@ -888,7 +1003,7 @@ def k8s_truth(python, root, files):
             out[file] = res
         else:
             out[file] = collections.Counter((l, s) for l, s in json.loads(res)["facts"])
-    p = subprocess.run([python, "-I", str(HERE / "k8s_truth.py"), "edges", str(root)],
+    p = subprocess.run([python, "-I", str(HERE / "k8s_truth.py"), "edges", str(root), *([helm_json] if helm_json else [])],
                        input="".join(f"{f}\n" for f in files), capture_output=True, text=True, timeout=900)
     if p.returncode != 0:
         bench.die(f"thước đo Kubernetes hỏng: {p.stderr.strip()[-400:]}")
@@ -1005,7 +1120,7 @@ class Tally:
             self.examples.append(msg)
 
     def line(self, repo):
-        unit = {"Binding": "đầu cạnh", "Hạ tầng": "dữ kiện", "Proto": "dữ kiện", "K8s": "dữ kiện",
+        unit = {"Binding": "đầu cạnh", "Hạ tầng": "dữ kiện", "Proto": "dữ kiện", "K8s": "dữ kiện", "Helm": "dữ kiện",
                 "Tên máy": "tên máy"}.get(self.label, "import")
         head = f"  {repo:22} {self.label:8} {self.files:5} file, {self.imports:6} {unit}"
         tail = f", {self.unparsed} không parse được" if self.unparsed else ""
@@ -1042,7 +1157,7 @@ def main():
     ap.add_argument("--archctl", default=str(ROOT / "target/release/archctl"))
     ap.add_argument("--only", help="tên repo, cách nhau bằng dấu phẩy")
     ap.add_argument("--require", default="",
-                    help="công cụ bắt buộc phải có: clang, node, go, syn (tải crate), ipython, deploy, proto (tải gói)")
+                    help="công cụ bắt buộc phải có: clang, node, go, syn (tải crate), ipython, deploy, proto (tải gói), helm (tải binary)")
     ap.add_argument("--cache", default=str(ROOT / "target/bench"))
     args = ap.parse_args()
 
@@ -1060,7 +1175,7 @@ def main():
     have_go = shutil.which("go") is not None
     strip_ts = have_node and node_can_strip_types()
     required = args.require.split(",")
-    unknown = set(filter(None, required)) - {"clang", "node", "go", "syn", "ipython", "deploy", "proto"}
+    unknown = set(filter(None, required)) - {"clang", "node", "go", "syn", "ipython", "deploy", "proto", "helm"}
     if unknown:
         bench.die(f"`--require` không biết: {', '.join(sorted(unknown))}")
     for tool, ok in [("clang", have_clang), ("node", have_node), ("go", have_go)]:
@@ -1076,12 +1191,14 @@ def main():
     syn_v = "2.0.87" if use_syn else "BỎ QUA: cần tải crate, bật bằng --require syn"
     use_ipython = "ipython" in required
     ipy_v = ipython_version() if use_ipython else "BỎ QUA: cần tải gói, bật bằng --require ipython"
-    use_deploy = "deploy" in required
+    use_helm = "helm" in required
+    use_deploy = "deploy" in required or use_helm
     dep_v = deploy_version() if use_deploy else "BỎ QUA: cần tải gói, bật bằng --require deploy"
     use_proto = "proto" in required
     proto_v = proto_version() if use_proto else "BỎ QUA: cần tải gói, bật bằng --require proto"
+    helm_v = HELM_VERSION if use_helm else "BỎ QUA: cần tải helm, bật bằng --require helm"
     print(f"python {sys.version.split()[0]} · clang: {clang_v} · node: {node_v} · go: {go_v} · syn: {syn_v}"
-          f" · ipython: {ipy_v} · hạ tầng: {dep_v} · proto: {proto_v}"
+          f" · ipython: {ipy_v} · hạ tầng: {dep_v} · proto: {proto_v} · helm: {helm_v}"
           + ("" if strip_ts or not have_node else " (không gỡ được kiểu TS: BỎ QUA .ts)"))
 
     missing_repos = [r for r in repos if not (Path(args.cache) / "repos" / r).is_dir()]
@@ -1095,6 +1212,7 @@ def main():
     nb_python = build_ipython_helper(args.cache) if use_ipython else None
     dep_python = build_venv(args.cache, "deploy-oracle", DEPLOY_REQUIREMENTS, "hạ tầng") if use_deploy else None
     proto_python = build_venv(args.cache, "proto-oracle", PROTO_REQUIREMENTS, ".proto") if use_proto else None
+    helm = build_helm(args.cache) if use_helm else None
 
     bad = 0
     for repo in repos:
@@ -1256,8 +1374,28 @@ def main():
         yamls = yaml_files(root) if dep_python else []
         if yamls:
             kt = Tally("K8s")
-            have_all, have_edges, have_guards, have_exposed = archctl_k8s(archctl, root, yamls)
-            want_all, want_edges, want_guards, want_exposed = k8s_truth(dep_python, root, yamls)
+            have_all, have_edges, have_guards, have_exposed, have_rendered, charts = archctl_k8s(archctl, root, yamls)
+            # Chart Helm: `helm template` thật dựng ra, đọc như manifest ở thư
+            # mục chart. Không có helm thì bỏ mọi thứ archctl dựng từ chart.
+            roots = [c for c in charts if not any(c != o and c.startswith(f"{o}/charts/" if o else "charts/") for o in charts)]
+            helm_json, helm_files, failed = None, set(), []
+            if helm and roots:
+                rendered, failed = helm_render(helm, root, roots, workdir.name)
+                helm_json = str(Path(workdir.name) / f"helm-{repo}.json")
+                Path(helm_json).write_text(json.dumps(rendered))
+                helm_files = set(rendered)
+            want_all, want_edges, want_guards, want_exposed = k8s_truth(dep_python, root, yamls, helm_json)
+            chart_key = lambda k: any(k.startswith(f"k8s:{c}/") for c in roots)
+            if not helm:
+                have_edges = {k: v for k, v in have_edges.items() if not chart_key(k)}
+                have_edges = {k: {t for t in v if not chart_key(t)} for k, v in have_edges.items()}
+                have_guards = {k: v for k, v in have_guards.items() if not chart_key(k)}
+                have_exposed = {k for k in have_exposed if not chart_key(k)}
+            # Dòng của cạnh từ chart: archctl báo dòng template, helm chỉ có
+            # dòng của văn bản dựng ra; so không kèm dòng.
+            no_line = lambda edges: {re.sub(r"\t(" + "|".join(map(re.escape, helm_files or ["\0"])) + r"):\d+\t", r"\t\1:?\t", k): v
+                                     for k, v in edges.items()}
+            have_edges, want_edges = no_line(have_edges), no_line(want_edges)
             # Lối vào từ ngoài cụm: tập workload lộ ra.
             kt.imports += len(want_exposed)
             for key in sorted(want_exposed - have_exposed):
@@ -1292,6 +1430,10 @@ def main():
                     kt.note(f"{key} lệch NetworkPolicy: thước đo {want}, archctl {have}")
             if kt.files:
                 tallies.append(kt)
+            if helm and roots:
+                ht = Tally("Helm")
+                compare_helm(ht, have_all, have_rendered, helm_truth(dep_python, helm_json), helm_files, failed)
+                tallies.append(ht)
 
         protos = proto_files(root) if proto_python else []
         if protos:
@@ -1319,6 +1461,24 @@ def main():
                 for e in t.examples:
                     print(f"      {e}")
             bad += t.bad
+
+    # Chart mẫu trong `bench/fixtures/helm-*`: các ca chart thật của bộ đo
+    # không có (chart con không override, `alias`, `condition` dạng danh sách,
+    # `tags`, `define` trùng tên, template `.tpl`/`.json`/`tests/`, chart ở gốc).
+    if helm and not args.only:
+        for fx in sorted(HERE.glob("fixtures/helm-*")):
+            # Cả thư mục: chart mẫu có thể chưa commit.
+            have_all, _, _, _, have_rendered, charts = archctl_k8s(archctl, fx, [])
+            roots = [c for c in charts if not any(c != o and c.startswith(f"{o}/charts/" if o else "charts/") for o in charts)]
+            rendered, failed = helm_render(helm, fx, roots, workdir.name)
+            helm_json = str(Path(workdir.name) / f"helm-{fx.name}.json")
+            Path(helm_json).write_text(json.dumps(rendered))
+            ht = Tally("Helm")
+            compare_helm(ht, have_all, have_rendered, helm_truth(dep_python, helm_json), set(rendered), failed)
+            print(ht.line(fx.name))
+            for e in ht.examples:
+                print(f"      {e}")
+            bad += ht.bad
 
     print(f"\n{'khớp hết' if not bad else f'{bad} chỗ lệch so với parser chuẩn'}")
     sys.exit(1 if bad else 0)
