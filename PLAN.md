@@ -419,7 +419,7 @@ git, `cargo clean` dọn.
    helm thật trên các chart thử của reviewer đều khớp. TM-36..39 đã có.
    Kiểm chứng cuối có biên nhận (2026-10-16, máy rảnh) ALL-OK: test, clippy, MSRV,
    release, bộ đo, oracle `--require ...,helm`, sabotage, verify, `check --strict`.
-   Việc còn lại: chờ bạn cho commit. Test thời gian `alias_nhan_env_bi_chan` trượt
+   Đã commit `becab75` (chưa push). Test thời gian `alias_nhan_env_bi_chan` trượt
    khi máy bận (CPU ngang HEAD): cân nhắc đo bằng thời gian CPU.
 
 **Đã quyết (2026-10-11): cạnh binding Python ↔ native tự viết.** Đã tìm theo
@@ -661,4 +661,4 @@ không có `link` là vi phạm, có `link` mà cụm chặn là cảnh báo (`-
 ### Tầng hạ tầng, đợt 5: Helm
 
 - [x] Chốt 4 câu về đọc chart Helm @ban: bạn chốt "làm theo đề xuất"; trang https://claude.ai/artifact/EhNC8dx9sjp8jmMgYqoL16 (khuyên tự render tập con template với values.yaml)
-- [ ] Đọc chart Helm: render tập con template, manifest dựng ra đi qua bộ đọc Kubernetes; bộ đo so với `helm template`; tài liệu.
+- [x] Đọc chart Helm: render tập con template, manifest dựng ra đi qua bộ đọc Kubernetes; bộ đo so với `helm template`; tài liệu.
