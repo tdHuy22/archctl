@@ -419,8 +419,11 @@ git, `cargo clean` dọn.
    helm thật trên các chart thử của reviewer đều khớp. TM-36..39 đã có.
    Kiểm chứng cuối có biên nhận (2026-10-16, máy rảnh) ALL-OK: test, clippy, MSRV,
    release, bộ đo, oracle `--require ...,helm`, sabotage, verify, `check --strict`.
-   Đã commit `becab75` (chưa push). Test thời gian `alias_nhan_env_bi_chan` trượt
-   khi máy bận (CPU ngang HEAD): cân nhắc đo bằng thời gian CPU.
+   Đã commit `becab75`, lên main sau CI xanh 5/5 (run 39041527752).
+3. Test thời gian trong lib đo bằng thời gian CPU của luồng (`src/testclock.rs`,
+   `clock_gettime(CLOCK_THREAD_CPUTIME_ID)` trên Linux, macOS; nền tảng khác
+   lùi về thời gian thực), chưa commit. 141 test lib, clippy, MSRV đạt.
+   Linux, macOS 32 bit cũng lùi về thời gian thực. Review sonnet: 1 mục thấp, đã sửa.
 
 **Đã quyết (2026-10-11): cạnh binding Python ↔ native tự viết.** Đã tìm theo
 skill reuse-best. Không công cụ tĩnh nào phủ cả PyO3, pybind11, nanobind

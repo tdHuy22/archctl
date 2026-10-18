@@ -23,6 +23,8 @@ pub mod resolve;
 pub mod scan;
 pub mod validate;
 pub mod verify;
+#[cfg(test)]
+pub(crate) mod testclock;
 
 pub use diag::{Diag, Severity};
 pub use model::{Document, Owner, Status};

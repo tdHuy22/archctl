@@ -915,7 +915,7 @@ mod tests {
     #[test]
     fn f_string_long_sau_khong_tran_stack() {
         let deep = format!("x = f\"{}\"", "{f\"".repeat(150_000));
-        let t = std::time::Instant::now();
+        let t = crate::testclock::Clock::start();
         let _ = names(Lang::Python, &deep);
         let spec = format!("x = f\"{}\"", "{x:".repeat(150_000));
         let _ = names(Lang::Python, &spec);
@@ -925,7 +925,7 @@ mod tests {
     #[test]
     fn file_doi_khang_van_nhanh() {
         let many: String = (0..200_000).map(|i| format!("h{i} = 'h{i}:8080'\n")).collect();
-        let t = std::time::Instant::now();
+        let t = crate::testclock::Clock::start();
         let r = scan(&Lang::Python.tokens(&many), Lang::Python);
         assert!(r.cut);
         assert!(t.elapsed().as_secs_f64() < 5.0, "{:?}", t.elapsed());

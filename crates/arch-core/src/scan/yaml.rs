@@ -1309,7 +1309,7 @@ fn flow_plain(text: &str, start: usize) -> (String, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     fn doc(text: &str) -> Yaml {
         parse(text).unwrap_or_else(|e| panic!("{e}\n{text}"))
@@ -1484,7 +1484,7 @@ mod tests {
             let refs = vec![format!("*l{}", d - 1); 10].join(", ");
             text.push_str(&format!("l{d}: &l{d} [{refs}]\n"));
         }
-        let start = Instant::now();
+        let start = crate::testclock::Clock::start();
         let y = doc(&text);
         assert!(y.nodes.len() < 1_000, "{} node", y.nodes.len());
         let out = y.to_json();
@@ -1504,7 +1504,7 @@ mod tests {
         for m in 0..200 {
             text.push_str(&format!("m{m}:\n  <<: [*b, *b, *b]\n"));
         }
-        let start = Instant::now();
+        let start = crate::testclock::Clock::start();
         assert!(fails(&text).msg.contains("gộp `<<`"));
         assert!(
             start.elapsed() < Duration::from_secs(5),
@@ -1550,7 +1550,7 @@ mod tests {
             text.push_str(&format!("  s{n}:\n    image: \"img:{n}\"\n    environment:\n      - A=b\n    command: [python, -m, app]\n"));
             n += 1;
         }
-        let start = Instant::now();
+        let start = crate::testclock::Clock::start();
         let y = doc(&text);
         assert_eq!(
             y.documents()

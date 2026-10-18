@@ -1527,8 +1527,8 @@ data:
         for i in 0..3000 {
             text.push_str(&format!("- {{kind: Pod, metadata: {{name: p{i}}}, spec: {{containers: [{{name: c, image: x, env: *e}}]}}}}\n"));
         }
-        let t = std::time::Instant::now();
+        let t = crate::testclock::Clock::start();
         assert!(parse(&text).is_err());
-        assert!(t.elapsed().as_secs_f64() < 2.0);
+        assert!(t.elapsed().as_secs_f64() < 2.0, "{:?}", t.elapsed());
     }
 }

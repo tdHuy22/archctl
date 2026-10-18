@@ -658,7 +658,7 @@ mod tests {
             text.push_str(&format!("ARG V{i}=$V{p}$V{p}\n", p = i - 1));
         }
         text.push_str("WORKDIR /$V199\n");
-        let start = std::time::Instant::now();
+        let start = crate::testclock::Clock::start();
         let d = parse(&text);
         assert!(d.stages[0].workdir.as_ref().unwrap().len() <= MAX_EXPANDED + 1);
         let mut many = String::from("FROM x\n");

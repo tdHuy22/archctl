@@ -2162,7 +2162,7 @@ mod tests {
 
     #[test]
     fn template_doi_khang_co_tran() {
-        let t = std::time::Instant::now();
+        let t = crate::testclock::Clock::start();
         // `include` gọi chính nó.
         let c = chart(&[
             META,
@@ -2322,7 +2322,7 @@ mod tests {
         let tpl: String = (0..20_000)
             .map(|i| format!("{{{{ .Values.k{} }}}}\n", i % 50_000))
             .collect();
-        let t = std::time::Instant::now();
+        let t = crate::testclock::Clock::start();
         let c = chart(&[
             META,
             ("c/values.yaml", &values),

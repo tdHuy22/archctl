@@ -970,7 +970,7 @@ mod tests {
     #[test]
     fn proto_doi_khang_co_tran() {
         let deep = format!("service S {{ {} rpc A(B) returns (C); }}", "{".repeat(200_000));
-        let start = std::time::Instant::now();
+        let start = crate::testclock::Clock::start();
         let p = read_proto(&deep);
         assert_eq!(p.services.len(), 1);
         assert!(p.services[0].rpcs.is_empty(), "rpc lồng trong ngoặc khác không phải rpc của service");
