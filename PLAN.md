@@ -446,7 +446,7 @@ git, `cargo clean` dọn.
    Kiểm chứng cuối có biên nhận (2026-10-19): `cargo test`, clippy, MSRV 1.88,
    release, bộ đo 31 repo, oracle `--require …,helm`, sabotage 53 kiểu, `verify`
    3/3, `check --strict` 0 (thêm `bench/fixtures/**` vào `.arch/.archignore`).
-   Chờ bạn cho commit.
+   Commit `bb2ac35` (chưa push; 70af652, 24b091c cũng chưa push).
    Còn lại trong mốc: Overlay Kustomize (hướng B).
 
 **Đã quyết (2026-10-11): cạnh binding Python ↔ native tự viết.** Đã tìm theo
