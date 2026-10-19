@@ -36,3 +36,4 @@ scikit-learn	https://github.com/scikit-learn/scikit-learn.git	a97ae018a23ca43893
 tokio	https://github.com/tokio-rs/tokio.git	2746c3ae26f8ac0af6023843a7f23d419c334efe	-	-	Rust, macro và cfg dày đặc
 vllm	https://github.com/vllm-project/vllm.git	bc21cba9673cfc2256a2726b4bc32f062237cd35	-	-	Python LLM serving, kernel C++ trong csrc/
 zstd-rs	https://github.com/gyscos/zstd-rs.git	be539f10dfce7818092ca72010683aaaa5c84e3f	zstd-safe/zstd-sys/zstd	-	Rust bọc thư viện C vendor (submodule)
+rabbitmq-tutorials	https://github.com/rabbitmq/rabbitmq-tutorials.git	88b985dd367eba94b47986d0d23cc909dcb7f0a1	-	python,go,javascript-nodejs	hàng đợi: cùng bài RabbitMQ viết bằng Python, Go, Node; tên queue, exchange cố định ghép chéo ngôn ngữ

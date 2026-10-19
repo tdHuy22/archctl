@@ -483,6 +483,7 @@ fn model_json(root: &Path) -> String {
                     Via::Network => "network",
                     Via::Entry => "entry",
                     Via::Rpc => "rpc",
+                    Via::Queue => "queue",
                 }),
                 v.count,
                 json::string(&v.rule),

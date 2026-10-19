@@ -89,7 +89,7 @@ khi mã dùng let-chain của 1.88, suốt nhiều tháng, vì không có gì ki
 
 ## Repo thật, ở mỗi pull request
 
-Job `repo thật` chạy [bench/bench.py](../bench/bench.py): tải ba mươi repo ở
+Job `repo thật` chạy [bench/bench.py](../bench/bench.py): tải ba mươi mốt repo ở
 đúng commit ghim trong `bench/repos.tsv`, rồi đòi hai điều. Luật do `init
 --from-code` sinh ra, nâng lên `#accepted`, kiểm lại chính mã đó thì phải ra 0
 vi phạm. Và mọi lệnh phải chạy được trên mã người khác viết, chứ không chỉ trên
@@ -123,17 +123,19 @@ cứng bằng `=`. IPython, PyYAML và dockerfile-parse cài bằng pip vào ven
 mọi gói ghim `==` kèm sha256; grpcio-tools (`protoc`) cũng vậy. `helm` bản ghim
 tải từ get.helm.sh, kiểm sha256 của tarball. `--require
 clang,node,go,syn,ipython,deploy,proto,helm` để ngày thiếu một cái thì bước này
-đỏ chứ không lặng lẽ bỏ qua. Hai mươi tám trong bốn mươi chín kiểu phá của
+đỏ chứ không lặng lẽ bỏ qua. Ba mươi mốt trong năm mươi ba kiểu phá của
 `sabotage.py` nhắm vào bước này: ba ở import Python, hai ở tên máy trong chuỗi
 của mã Python, ba ở import Rust, hai ở
 notebook, bốn ở cạnh Python ↔ native, bốn ở compose và Dockerfile, bảy ở
 manifest Kubernetes, cạnh qua Service, NetworkPolicy và lối vào từ Internet,
-một ở manifest dựng từ chart Helm, hai ở `.proto`. Mười hai kiểu khác nhắm vào
+một ở manifest dựng từ chart Helm, hai ở `.proto`, ba ở chỗ gửi, nhận qua hàng
+đợi. Mười hai kiểu khác nhắm vào
 phần hạ tầng của chính bộ đo (năm trên compose gồm một ở tên máy viết trong mã,
 bảy trên manifest Kubernetes gồm hai ở NetworkPolicy, một ở lối vào, một ở
 chart Helm), một kiểu vào cạnh gRPC bắt buộc (chạy
 trên etcd, và trên microservices-demo cho cạnh khác ngôn ngữ: Python ↔ Go, Go →
-Node). Phần Rust cũng cần `syn`, nên bước
+Node), một kiểu vào cạnh qua hàng đợi bắt buộc (rabbitmq-tutorials: Python,
+Go, Node). Phần Rust cũng cần `syn`, nên bước
 sabotage mở mạng giống bước đối chiếu.
 
 ## Kiến trúc mô hình chạy thật

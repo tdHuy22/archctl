@@ -4,7 +4,7 @@
 python3 bench/bench.py
 ```
 
-Một lệnh: dựng archctl bản release, tải ba mươi repo ở đúng commit đã ghim
+Một lệnh: dựng archctl bản release, tải ba mươi mốt repo ở đúng commit đã ghim
 trong [repos.tsv](repos.tsv), rồi chạy hai phép thử trên từng repo. Chỉ cần
 Python 3 và git, không gói Python nào ngoài thư viện chuẩn.
 
@@ -23,6 +23,7 @@ chỗ mà luật `allow`/`deny` giữa component có nghĩa nhất.
 | Rust | tokio, ripgrep, rusqlite, pydantic-core (với Python), zstd-rs (với C qua submodule) |
 | Go | hugo (đồ thị dày), etcd (mười bốn `go.mod` trong một repo), kubernetes (phần scheduler, tải sparse; module staging có `go.mod` riêng) |
 | docker-compose | example-voting-app (năm service, stage Dockerfile thừa hưởng `WORKDIR`, bind mount, file compose ghi đè; cả manifest Kubernetes dùng image dựng sẵn), open-webui (ứng dụng LLM tự host: `build: .`, `COPY --from=build`, điểm vào qua `start.sh`, mã Python trong `backend/` khai bằng `sources` của hatch) |
+| Hàng đợi | rabbitmq-tutorials (cùng bài RabbitMQ viết bằng Python, Go, Node; tải sparse ba thư mục đó: queue, exchange ghép chéo ngôn ngữ, Go khai queue rồi dùng qua `q.Name`) |
 | Kubernetes | microservices-demo (Online Boutique: mười một microservice Go, Python, Node, C#, Java gọi nhau bằng gRPC; env `…_ADDR` trỏ tên Service, `skaffold.yaml` nối image với thư mục mã, bản phát hành trong `release/`, chart Helm, component Kustomize) |
 
 Lần thêm tám repo cuối (etcd, excalidraw, langchain, leveldb, netbox, nginx,
@@ -182,8 +183,15 @@ bộ trích, nên một lỗi trong bộ trích làm cả hai sai giống nhau m
   tách theo `tokenize`, vì `ast` gộp chúng còn mọi lexer thì không; luật đổi
   chuỗi thành tên máy viết lại theo đặc tả trong `scan/hosts.rs`. Go cần
   `--require go` như phần import. JS/TS chưa có thước đo.
+- Hàng đợi: `(dòng, hệ, vai, loại, tên)` của chỗ gửi, nhận mà `scan --json` in
+  (mục `queues`) được tính lại bằng [queue_truth.py](queue_truth.py) từ `ast`
+  và `go/ast`, theo đặc tả trong `scan/queue.rs` (lời gọi nào là gửi, nhận;
+  thư viện nào phải import; hằng số, env, queue khai rồi dùng qua biến). Tên
+  của chỗ không cố định không so. Ngoài các repo, bộ mẫu `fixtures/queues` phủ
+  những dạng repo thật không có; chỉ so khi không có `--only`. JS/TS chưa có
+  thước đo.
 
-Python, notebook, binding, hạ tầng, tên máy, C/C++, Go và Rust đòi khớp cả tên lẫn số dòng: thiếu, thừa hay lệch dòng đều
+Python, notebook, binding, hạ tầng, tên máy, hàng đợi, C/C++, Go và Rust đòi khớp cả tên lẫn số dòng: thiếu, thừa hay lệch dòng đều
 là lệch. Thiếu clang, Node hay Go thì phần đó in `BỎ QUA`; `--require
 clang,node,go` biến việc thiếu thành mã thoát 2, và với Node thì đòi cả khả năng
 gỡ kiểu TS. Thước đo tự hỏng cũng là mã 2 chứ không phải "đạt": clang, Node hay
@@ -268,9 +276,13 @@ Python → Go (`Recommendationservice -> Productcatalogservice`), Go → Python
 Currencyservice`, `Checkoutservice -> Paymentservice`).
 `--proto-repo vllm` thêm hai kiểu ở dữ kiện `.proto` của `scan --json` (mất một
 `rpc`, lệch dòng một `service`), đối chiếu bằng `protoc` của grpcio-tools nên
-cần mạng. CI chạy bước này sau bộ đo, với `--rust-repo ripgrep
+cần mạng. Kiểu `queue` xoá cạnh qua hàng đợi bắt buộc (`consistency.QUEUE`:
+rabbitmq-tutorials `Python -> Go`, `Go -> JavascriptNodejs`, `JavascriptNodejs
+-> Python`); ba kiểu `queue-*` phá mục `queues` của `scan --json` (mất, lệch
+dòng, thêm giả), đối chiếu bằng `queue_truth.py` (`ast` cho Python, `go/ast`
+cho Go). CI chạy bước này sau bộ đo, với `--rust-repo ripgrep
 --notebook-repo matplotlib --deploy-repo example-voting-app --k8s-repo
-microservices-demo --proto-repo vllm`: bốn mươi chín kiểu phá.
+microservices-demo --proto-repo vllm`: năm mươi ba kiểu phá.
 
 Nó có mặt vì bộ đo này từng nằm ngoài git, và lúc đưa vào, đọc lại thì bốn
 phép kiểm không kiểm gì: một cái chỉ xét file có tồn tại vì vế sau của `or`

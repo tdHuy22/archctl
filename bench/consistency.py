@@ -64,6 +64,16 @@ RPC = {
                            ("Checkoutservice", "Currencyservice"), ("Checkoutservice", "Paymentservice")],
 }
 
+# Hàng đợi: chỗ gửi ghép với chỗ nhận cùng hệ và tên. Hai phía không import
+# nhau, và ở đây còn khác ngôn ngữ.
+QUEUE = {
+    # `basic_publish(routing_key='hello')` của Python ↔ `ch.Consume(q.Name)` của
+    # Go với `q` khai bằng `QueueDeclare("hello")`; `ch.Publish("", q.Name)` của
+    # Go ↔ `ch.consume('hello')` của Node; `sendToQueue('task_queue')` của Node
+    # ↔ `basic_consume(queue='task_queue')` của Python.
+    "rabbitmq-tutorials": [("Python", "Go"), ("Go", "JavascriptNodejs"), ("JavascriptNodejs", "Python")],
+}
+
 
 # Tầng hạ tầng phải có ở cả hai phía như cạnh liên ngôn ngữ: `init` sinh ra
 # `link` và `runs` cho nó, và gỡ đi thì `check` phải báo. Tên là tên mà `init`
@@ -199,6 +209,7 @@ def analyse(archctl: str, name: str, src: Path, work: Path, expected: int,
 
     crossings(archctl, name, law, root, out)
     crossings(archctl, name, law, root, out, table=RPC, via="rpc", what="cạnh gRPC")
+    crossings(archctl, name, law, root, out, table=QUEUE, via="queue", what="cạnh qua hàng đợi")
     deploy(archctl, name, law, root, rep, out)
 
     out["check_ms"] = round(_median_ms(archctl, ["check", *root], rounds))
@@ -214,7 +225,8 @@ def crossings(archctl: str, name: str, law: Path, root: list, out: dict,
     nó, và đổi `allow` đó thành `deny` thì `check` phải báo vi phạm qua ranh
     giới ngôn ngữ. `deny` chứ không xoá: component chỉ có đúng một `allow` mà
     mất nó thì ra khỏi diện kiểm, và `check` im lặng vì lý do khác. Cạnh gRPC
-    (`RPC`, `via: rpc`) kiểm cùng một cách.
+    (`RPC`, `via: rpc`) và cạnh qua hàng đợi (`QUEUE`, `via: queue`) kiểm cùng
+    một cách.
     """
     want = table.get(name, [])
     if not want:

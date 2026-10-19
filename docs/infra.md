@@ -266,6 +266,78 @@ thì `QuantStub()` của PyTorch cũng thành gRPC.
   và `link` giữa service. **`scan`** in chỗ gọi, chỗ đăng ký, và package,
   service, rpc của từng file `.proto`.
 
+## Cạnh qua hàng đợi
+
+Bên gửi ghi vào topic `orders`, bên nhận đọc topic đó. Hai bên không import
+nhau và không gọi tên máy của nhau, nên cả đồ thị import lẫn cạnh mạng đều không
+thấy dữ liệu đi từ đâu tới đâu. archctl dò chỗ gửi và chỗ nhận, rồi ghép theo
+hệ và tên:
+
+```
+✗ VI PHẠM  Api -> Worker  (không được phép, #accepted)
+  api/orders.py:5  gửi qua hàng đợi `p.produce("orders", v) (kafka:orders)`
+  luật: không có allow nào cho Api -> Worker
+```
+
+| Hệ | Bên gửi | Bên nhận | Ghép theo |
+| --- | --- | --- | --- |
+| Kafka | Python: `produce(topic)` (confluent-kafka), `send`, `send_and_wait` (kafka-python, aiokafka); Go: `sarama.ProducerMessage{Topic:}`, `kafka.Message{Topic:}`, `kafka.Writer{Topic:}` (kafka-go, confluent); Node: `producer.send({topic})`, `sendBatch` (kafkajs) | Python: `subscribe([…])`, `KafkaConsumer("t", …)`; Go: `ConsumePartition`, `group.Consume(ctx, []string{…}, h)`, `kafka.ReaderConfig{Topic:, GroupTopics:}`, `SubscribeTopics`, `Subscribe`; Node: `consumer.subscribe({topic \| topics})` | topic |
+| RabbitMQ | Python: `basic_publish(exchange, routing_key)` (pika); Go: `Publish`, `PublishWithContext` (amqp091-go, streadway); Node: `sendToQueue(q)`, `publish(exchange, key)` (amqplib) | `basic_consume(queue)`, `Consume(queue, …)`, `consume(q)`; `queue_bind`, `QueueBind`, `bindQueue` nhận từ exchange | queue (qua exchange mặc định `""`), hay exchange |
+| Redis pub/sub | `publish(kênh, tin)` (redis-py, go-redis, node-redis, ioredis) | `subscribe(kênh, …)`; `psubscribe("news.*")` khớp theo mẫu | kênh |
+| Celery | `send_task("shop.tasks.charge")` | `@app.task`, `@shared_task` (tên mặc định `<module>.<hàm>` theo đường dẫn file; `name=` thì theo tên đó) | tên task |
+
+`app.task.delay()` và `apply_async()` gọi qua hàm đã import, nên cạnh đã có từ
+đồ thị import; chỉ `send_task` theo tên chuỗi là cạnh mới.
+
+- **Luật.** Như gRPC: cạnh bên gửi → bên nhận cần `allow`; đã khai `service`
+  và hai component chạy ở hai service khác nhau thì cần thêm `link`. Cạnh mạng
+  tới broker (Kafka, RabbitMQ, Redis) vẫn đi qua phép kiểm tên máy ở trên.
+- **Tên.** Chuỗi cố định, hay hằng số khai trong cùng file (`TOPIC = "orders"`,
+  `const Topic = "orders"`, `self.topic = "orders"`). Hằng số không theo phạm
+  vi, nên tên gán hai giá trị khác nhau, hay còn được ràng buộc ở chỗ khác
+  (tham số hàm, biến vòng lặp, `as`, gán nhiều vế, `+=`), là không cố định:
+  `def send(p, topic)` không lấy `topic = "audit"` của hàm khác. Phép gán nằm
+  trong ngoặc (keyword argument xuống dòng) không phải hằng số. Queue khai rồi
+  dùng qua biến cũng lần ra: `q, err := ch.QueueDeclare("hello", …)` rồi
+  `q.Name`, `const q = await ch.assertQueue("hello")` rồi `q.queue`,
+  `r = ch.queue_declare(queue="hello")` rồi `r.method.queue`. Thuộc tính viết
+  tắt của JS (`producer.send({ topic, messages })`) lấy theo hằng số cùng tên;
+  Go `msg.Topic = "orders"` lấy vai theo struct gán cho `msg`
+  (`ProducerMessage{}` là gửi, `ReaderConfig{}` là nhận; struct khác thì bỏ). Tên đọc từ biến môi trường (`os.getenv("TOPIC")`,
+  `os.environ["TOPIC"]`, `os.Getenv("TOPIC")`, `process.env.TOPIC`) được lần
+  qua `environment` của compose và `env` của manifest (kể cả ConfigMap) của
+  service chạy component đó; luật chưa khai service nào chạy nó thì chỉ nhận
+  khi cả cấu hình có đúng một giá trị. Chỉ giá trị dạng tên (chữ, số, `.`,
+  `_`, `-`, `:`), và không bao giờ ở khoá mang dấu hiệu bí mật (`…_KEY`,
+  `…_TOKEN`, `…_PASSWORD`). Còn lại (biến, f-string, nối chuỗi, tên từ module
+  khác) là "không ghép được" (`--strict` tính): không đoán. Lời gọi đã nhận ra
+  mà không thấy tên (`producer.send(rec)`, `subscribe({ fromBeginning: true })`),
+  `getattr(p, "produce")`, tham chiếu phương thức không gọi (`send =
+  p.produce`) cũng vậy.
+- **Chỉ khi chắc là hàng đợi.** `send`, `publish`, `subscribe`, `Consume` chỉ
+  tính khi file import thư viện của hệ đó; riêng `send`, `subscribe` của Kafka
+  (trùng tên với `res.send`, `ws.send`, `obs.subscribe`) chỉ báo tên không cố
+  định khi biến chắc là producer, consumer (tên có `produc`, `consum`, hay gán
+  từ `KafkaProducer(…)`, `kafka.producer()`); tên cố định thì vẫn ghép; lời gọi đặc trưng (`basic_publish`,
+  `send_task`, `sendToQueue`, `ConsumePartition`, `produce` với tên cố định)
+  thì luôn tính. Cùng tên ở hai hệ khác nhau (Kafka `orders`, Redis `orders`)
+  không ghép.
+- **Không tính.** Bên nhận trong file test hay mock (như gRPC); bên gửi tới
+  tên mà mọi bên nhận đều là giả thì báo "không ghép được". Chỗ tên không cố
+  định trong file test, mock thì không báo. Bên gửi không có
+  bên nhận nào trong repo (topic do hệ khác đọc) như gói ngoài.
+- **Hook.** Khi file đổi có chỗ gửi hay nhận, archctl lần tên từ env trước,
+  rồi tìm phía bên kia trong repo một lượt (lọc file theo tên topic, tên hàm
+  task, tiền tố chữ cố định của mẫu `psubscribe`, và file có `psubscribe` khi
+  file đổi gửi qua Redis; trần 64 MB như gRPC). Phía bên kia dùng tên lấy từ env thì hook không
+  tìm ra; lần kiểm cả repo thì thấy.
+- **Trần.** 10 000 chỗ gửi, nhận mỗi file, 200 000 cả lần kiểm, 1 000 mẫu
+  `psubscribe`; quá thì báo. Ngoặc khớp tính một lần cho mỗi file, nên file lồng
+  sâu không làm chậm theo bậc hai.
+- **`init --from-code`** sinh `allow` cho cạnh qua hàng đợi (một mục riêng
+  trong luật, chỉ tên cố định) và `link` giữa service. **`scan`** in từng chỗ
+  gửi, nhận với hệ và tên (JSON: `queues`).
+
 ## Manifest Kubernetes
 
 ```
@@ -562,6 +634,11 @@ trong các ngôn ngữ archctl chưa đọc (Java, C#, Ruby); đối số đầu
 - Overlay của Kustomize, Terraform: không render; template Helm ngoài tập con
   ở trên. Ai cần thì khai `verify` gọi `helm template`, `terraform graph`,
   kube-linter, checkov.
+- Hàng đợi: hàm bọc tự viết quanh producer (`publish_event("orders")`), tên
+  topic từ module khác, kombu,
+  aio-pika, Faust, NATS, SQS, Pub/Sub của Google; Kafka subscribe theo regex
+  (báo "không ghép được"); routing key của exchange `topic`, `direct` (mọi
+  queue gắn vào exchange đều coi là bên nhận).
 - gRPC của Java, C#, C++: đợt sau. Node qua
   `makeGenericClientConstructor`, nice-grpc, ts-proto; client Node gán vào biến
   rồi mới `new`.

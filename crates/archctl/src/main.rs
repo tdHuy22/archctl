@@ -406,6 +406,7 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
             ),
             Via::Network | Via::Entry => crate::say!("  {}:{}  {}", v.file, v.line, v.spec),
             Via::Rpc => crate::say!("  {}:{}  gọi gRPC `{}`", v.file, v.line, v.spec),
+            Via::Queue => crate::say!("  {}:{}  gửi qua hàng đợi `{}`", v.file, v.line, v.spec),
         }
         crate::say!("  luật: {}", v.rule);
         crate::say!("  → {}", v.hint);
@@ -645,6 +646,7 @@ fn print_json(hash: &str, report: &Report, law: &[Diag]) {
                     Via::Network => "network",
                     Via::Entry => "entry",
                     Via::Rpc => "rpc",
+                    Via::Queue => "queue",
                 }),
                 v.count,
                 json::string(match v.reason {
@@ -1099,6 +1101,16 @@ fn cmd_scan(args: &[String]) -> ExitCode {
             for c in &rpc_impls {
                 say!("  {:>5}  {}  → cài đặt server gRPC {}{}", c.line, c.shown, c.service, origin_text(&c.origin));
             }
+            for q in &scanned.queues.sites {
+                let role = match q.role {
+                    scan::queue::Role::Send => "gửi tới",
+                    scan::queue::Role::Receive => "nhận từ",
+                };
+                say!("  {:>5}  {}  → {role} {} {}", q.line, q.shown, q.system.as_str(), queue_name_text(&q.name));
+            }
+            if scanned.queues.cut {
+                say!("         quá {} chỗ gửi, nhận qua hàng đợi; phần sau không xét", scan::queue::MAX_PER_FILE);
+            }
             // Tên máy trong chuỗi: chỉ tên và cổng, không bao giờ chuỗi gốc (TM-33).
             let skipped = if scan::hosts::skipped_path(file) { " (file test, ví dụ: không xét)" } else { "" };
             for h in scanned.hosts.hosts.iter().filter(|h| shown_host(h)) {
@@ -1144,8 +1156,35 @@ fn cmd_scan(args: &[String]) -> ExitCode {
                     .collect::<Vec<_>>()
                     .join(",")
             };
+            let queues = scanned
+                .queues
+                .sites
+                .iter()
+                .map(|q| {
+                    let (kind, name) = match &q.name {
+                        scan::queue::Name::Fixed(n) => ("fixed", n),
+                        scan::queue::Name::Task(n) => ("task", n),
+                        scan::queue::Name::Pattern(n) => ("pattern", n),
+                        scan::queue::Name::Env(n) => ("env", n),
+                        scan::queue::Name::Dynamic(n) => ("dynamic", n),
+                    };
+                    format!(
+                        r#"{{"line":{},"system":{},"role":{},"kind":{},"name":{},"shown":{}}}"#,
+                        q.line,
+                        json::string(q.system.as_str()),
+                        json::string(match q.role {
+                            scan::queue::Role::Send => "send",
+                            scan::queue::Role::Receive => "receive",
+                        }),
+                        json::string(kind),
+                        json::string(name),
+                        json::string(&q.shown)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
             json_files.push(format!(
-                r#"{{"file":{},"lang":{},"imports":[{}],"crossings":{{"calls":[{}],"provides":[{}]}},"rpc":{{"calls":[{}],"serves":[{}],"implements":[{}]}},"hosts":{{"skipped":{},"cut":{},"found":[{}]}}}}"#,
+                r#"{{"file":{},"lang":{},"imports":[{}],"crossings":{{"calls":[{}],"provides":[{}]}},"rpc":{{"calls":[{}],"serves":[{}],"implements":[{}]}},"queues":{{"cut":{},"sites":[{}]}},"hosts":{{"skipped":{},"cut":{},"found":[{}]}}}}"#,
                 json::string(file),
                 json::string(lang.name()),
                 items.join(","),
@@ -1154,6 +1193,8 @@ fn cmd_scan(args: &[String]) -> ExitCode {
                 sites(&rpc_calls),
                 sites(&rpc_serves),
                 sites(&rpc_impls),
+                scanned.queues.cut,
+                queues,
                 scan::hosts::skipped_path(file),
                 scanned.hosts.cut,
                 scanned
@@ -1188,6 +1229,18 @@ fn cmd_scan(args: &[String]) -> ExitCode {
         );
     }
     ExitCode::from(exit::OK)
+}
+
+/// Tên của chỗ gửi, nhận qua hàng đợi, để in.
+fn queue_name_text(name: &arch_core::scan::queue::Name) -> String {
+    use arch_core::scan::queue::Name;
+    match name {
+        Name::Fixed(n) => format!("`{n}`"),
+        Name::Task(f) => format!("task `{f}` (tên mặc định theo module)"),
+        Name::Pattern(p) => format!("mẫu `{p}`"),
+        Name::Env(v) => format!("tên lấy từ biến môi trường `{v}`"),
+        Name::Dynamic(e) => format!("tên không cố định `{e}`"),
+    }
 }
 
 /// `(từ rpc.proto)`, `(từ go.etcd.io/…/etcdserverpb)`: thứ dùng để ghép với `.proto`.

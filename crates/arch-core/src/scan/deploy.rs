@@ -202,6 +202,9 @@ pub struct Options {
     pub helm_values: Vec<(String, String)>,
     /// Giữ manifest dựng từ chart trong [`Deploy::rendered`], cho `scan`.
     pub keep_rendered: bool,
+    /// Biến môi trường mà mã đọc làm tên topic, queue, kênh: giữ giá trị dạng
+    /// tên của chúng trong [`Svc::words`]. Giá trị khác không giữ (TM-19).
+    pub env_words: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,6 +244,9 @@ pub struct Svc {
     /// Chỗ cấu hình lộ service này ra ngoài: cổng compose, Service
     /// `LoadBalancer`, Ingress, route… Cần `link Internet -> …`.
     pub exposed: Vec<Exposure>,
+    /// Biến môi trường có giá trị dạng tên (xem [`compose::word_value`]):
+    /// để lần tên topic mà mã đọc từ env.
+    pub words: Vec<(String, String)>,
 }
 
 /// Một chỗ lộ ra ngoài, để báo.
@@ -550,6 +556,8 @@ struct Shared<'a> {
     k8s_read: Cell<usize>,
     /// File YAML còn được mở.
     k8s_files: Cell<usize>,
+    /// Xem [`Options::env_words`].
+    env_words: Vec<String>,
 }
 
 impl<'a> Shared<'a> {
@@ -567,6 +575,7 @@ impl<'a> Shared<'a> {
             read: Cell::new(MAX_LOAD_READ),
             k8s_read: Cell::new(MAX_K8S_READ),
             k8s_files: Cell::new(MAX_K8S_FILES),
+            env_words: Vec::new(),
         }
     }
 
@@ -766,7 +775,8 @@ struct Record {
 /// Nạp mọi project compose trong `files` (đường dẫn tương đối của repo), và
 /// manifest Kubernetes khi `opts.k8s`.
 pub fn load(root: &Path, files: &[String], opts: &Options) -> Deploy {
-    let shared = Shared::new(root);
+    let mut shared = Shared::new(root);
+    shared.env_words = opts.env_words.clone();
     let mut builds: Vec<BuildRef> = Vec::new();
     let mut out = Deploy::default();
     let mut projects: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -845,7 +855,7 @@ fn read_compose(
             return;
         }
     };
-    let file = match compose::parse(&text) {
+    let file = match compose::parse_with(&text, &shared.env_words) {
         Ok(f) => f,
         Err(e) => {
             unread.push(Unread {
@@ -927,7 +937,7 @@ fn resolve_extends(shared: &Shared<'_>, records: &mut [Record], unread: &mut Vec
                     let parsed = files.entry(p.clone()).or_insert_with(|| {
                         shared
                             .read(&p)
-                            .and_then(|t| compose::parse(&t).map_err(|e| format!("YAML {e}")))
+                            .and_then(|t| compose::parse_with(&t, &shared.env_words).map_err(|e| format!("YAML {e}")))
                             .map(|f| f.services)
                     });
                     match parsed {
@@ -1019,6 +1029,7 @@ fn project(shared: &Shared<'_>, dir: &str, records: &[Record], out: &mut Deploy)
             ingress: Guard::default(),
             egress: Guard::default(),
             exposed: Vec::new(),
+            words: Vec::new(),
         };
         let mut seen: HashSet<(String, String, usize)> = HashSet::new();
         let mut push_edge = |to: &str, file: &str, line: usize, shown: String| {
@@ -1046,6 +1057,9 @@ fn project(shared: &Shared<'_>, dir: &str, records: &[Record], out: &mut Deploy)
                 push_edge(to, &r.file, *line, format!("links: {to}"));
             }
             for e in &r.s.env {
+                if let Some(w) = &e.word {
+                    svc.words.push((e.key.clone(), w.clone()));
+                }
                 for h in &e.hosts {
                     push_edge(
                         &h.name,
@@ -1153,6 +1167,7 @@ pub fn load_dockerfile(root: &Path, path: &str) -> Result<Svc, Unread> {
         ingress: Guard::default(),
         egress: Guard::default(),
         exposed: Vec::new(),
+        words: Vec::new(),
     };
     let Some(target) = built.df.target(None) else {
         svc.unknown = Some("Dockerfile không có `FROM`".into());
@@ -1726,6 +1741,7 @@ fn load_k8s(
             ingress: guards.get(&wi).map(|g| g.0.clone()).unwrap_or_default(),
             egress: guards.get(&wi).map(|g| g.1.clone()).unwrap_or_default(),
             exposed: exposures.remove(&wi).unwrap_or_default(),
+            words: Vec::new(),
         };
         // Tên máy → Service → workload.
         let resolve =
@@ -1761,7 +1777,7 @@ fn load_k8s(
             };
             for r in &c.refs {
                 if let Some(cm) = config(&r.config_map)
-                    && let Some(e) = cm.item.entry(&r.item, &r.key)
+                    && let Some(e) = cm.item.entry(&r.item, &r.key, &opts.env_words)
                 {
                     envs.push((cm.file.clone(), e));
                 }
@@ -1770,7 +1786,7 @@ fn load_k8s(
                 if let Some(cm) = config(&f.config_map) {
                     envs.extend(
                         cm.item
-                            .entries(&f.prefix)
+                            .entries(&f.prefix, &opts.env_words)
                             .into_iter()
                             .map(|e| (cm.file.clone(), e)),
                     );
@@ -1783,6 +1799,9 @@ fn load_k8s(
             for (file, e) in &envs {
                 if let Some(v) = &e.value {
                     kept.push((e.key.clone(), v.clone()));
+                }
+                if let Some(w) = &e.word {
+                    svc.words.push((e.key.clone(), w.clone()));
                 }
                 if e.cut {
                     out.unread.push(cut_value(file, e.line, &e.key));
@@ -2236,7 +2255,7 @@ fn read_manifests(
             });
             continue;
         }
-        let file = match k8s::parse(&text) {
+        let file = match k8s::parse_with(&text, &shared.env_words) {
             Ok(file) => file,
             // Chắc là manifest mà không đọc được thì báo; file chỉ tình cờ có
             // chữ `kind` (cấu hình CI, OpenAPI) thì thôi.
@@ -2267,7 +2286,7 @@ fn read_manifests(
         if !k8s::may_be(&r.text) {
             continue;
         }
-        let mut file = match k8s::parse(&r.text) {
+        let mut file = match k8s::parse_with(&r.text, &shared.env_words) {
             Ok(file) => file,
             Err(e) => {
                 let line = r

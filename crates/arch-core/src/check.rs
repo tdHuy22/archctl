@@ -79,6 +79,9 @@ pub enum Via {
     /// Lời gọi gRPC: chỗ gọi stub ghép với chỗ đăng ký server cùng
     /// `package.Service`. Hai phía không import nhau.
     Rpc,
+    /// Hàng đợi, pub/sub: chỗ gửi ghép với chỗ nhận cùng hệ và tên (topic
+    /// Kafka, queue hay exchange RabbitMQ, kênh Redis, task Celery).
+    Queue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +110,9 @@ pub enum UnresolvedReason {
     /// Lời gọi hay chỗ đăng ký gRPC không ghép được: tên service có ở nhiều
     /// package `.proto`, hay bước tìm phía bên kia chạm trần.
     Rpc,
+    /// Chỗ gửi, nhận qua hàng đợi không ghép được: tên không cố định, tên
+    /// lấy từ biến môi trường chưa lần ra, bên nhận chỉ có trong test.
+    Queue,
 }
 
 impl UnresolvedReason {
@@ -118,6 +124,7 @@ impl UnresolvedReason {
             }
             (UnresolvedReason::Missing, _) => "không tìm thấy file nào ở đường dẫn này",
             (UnresolvedReason::Rpc, _) => "không ghép được lời gọi gRPC với server",
+            (UnresolvedReason::Queue, _) => "không ghép được chỗ gửi, nhận qua hàng đợi",
         }
     }
 }
@@ -351,6 +358,7 @@ fn check_with(
     let mut rpc_calls: Vec<RpcSite> = Vec::new();
     let mut rpc_serves: Vec<RpcSite> = Vec::new();
     let mut rpc_impls: Vec<RpcSite> = Vec::new();
+    let mut queue_sites: Vec<QueueSite> = Vec::new();
     // Tên máy viết thẳng trong mã: chỉ cần khi luật có `service` (TM-32).
     let mut code_hosts: Vec<(String, String, scan::hosts::CodeHost)> = Vec::new();
     let mut ffi_provides: std::collections::BTreeMap<String, String> =
@@ -449,6 +457,24 @@ fn check_with(
             rpc_serves.extend(scan.rpc.serves.iter().map(site));
             rpc_impls.extend(scan.rpc.implements.iter().map(site));
         }
+        queue_sites.extend(scan.queues.sites.iter().map(|s| QueueSite {
+            from: from.clone(),
+            file: path.clone(),
+            lang,
+            site: s.clone(),
+        }));
+        if scan.queues.cut {
+            report.unresolved.push(Unresolved {
+                file: path.clone(),
+                line: 0,
+                spec: format!(
+                    "quá {} chỗ gửi, nhận qua hàng đợi trong file; phần sau không xét",
+                    scan::queue::MAX_PER_FILE
+                ),
+                lang,
+                reason: UnresolvedReason::Queue,
+            });
+        }
 
         if !doc.services.is_empty() && !scan::hosts::skipped_path(path) {
             code_hosts.extend(
@@ -508,21 +534,47 @@ fn check_with(
         rpc_impls,
         &mut report,
     );
+    // Tên topic đọc từ biến môi trường: cần cấu hình triển khai để lần ra.
+    let env_topics = queue_sites
+        .iter()
+        .any(|s| matches!(s.site.name, scan::queue::Name::Env(_)));
     // Hook sửa một file mã có chuỗi dạng tên máy: cần cấu hình để biết tên đó
     // trỏ tới service nào, nhưng không xét lại cả cấu hình (TM-34).
     let full = deploy.is_some();
     let deploy = deploy.or_else(|| {
-        (!code_hosts.is_empty()).then(|| deploy_files(root, &crate::read_ignores(root)))
+        (!code_hosts.is_empty() || env_topics)
+            .then(|| deploy_files(root, &crate::read_ignores(root)))
     });
-    if let Some(deploy_files) = deploy {
+    // Chỉ giữ giá trị của đúng các biến mà mã đọc làm tên topic (TM-19, TM-43).
+    let env_words: Vec<String> = queue_sites
+        .iter()
+        .filter_map(|s| match &s.site.name {
+            scan::queue::Name::Env(v) => Some(env_var(v).1),
+            _ => None,
+        })
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect();
+    let loaded = deploy.map(|deploy_files| {
         let mut opts = deploy_options(doc);
+        opts.env_words = env_words;
         let names: BTreeSet<&str> = code_hosts
             .iter()
             .map(|(_, _, h)| h.host.name.as_str())
             .collect();
         opts.hosts = names.into_iter().map(str::to_string).collect();
-        let loaded = deploy::load(root, &deploy_files, &opts);
+        deploy::load(root, &deploy_files, &opts)
+    });
+    let mut queue_sites = resolve_env(doc, queue_sites, loaded.as_ref());
+    // Trong hook, phía bên kia ở file khác. Tên phía bên kia lấy từ env thì
+    // không tìm được ở đây; lần kiểm cả repo thấy nó.
+    if partial && !queue_sites.is_empty() {
+        queue_other_side(root, doc, files, &crate::read_ignores(root), &mut queue_sites, &mut report);
+    }
+    let queue_links = judge_queues(doc, queue_sites, &mut report);
+    if let Some(loaded) = loaded {
         let mut seen = rpc_links;
+        seen.extend(queue_links);
         seen.extend(judge_code_hosts(doc, &loaded, &code_hosts, &mut report));
         if full {
             report.deploy_checked = true;
@@ -794,7 +846,367 @@ fn judge_grpc(
             hint: hint_for(doc, &c.from, to, reason, Via::Rpc),
         });
     }
-    judge_rpc_links(doc, &edges, report)
+    let hops: Vec<Hop> = edges
+        .iter()
+        .map(|(c, to, key)| Hop {
+            from: c.from.clone(),
+            file: c.file.clone(),
+            line: c.site.line,
+            shown: c.site.shown.clone(),
+            to: to.clone(),
+            key: key.clone(),
+        })
+        .collect();
+    judge_cross_links(doc, &hops, Via::Rpc, report)
+}
+
+/// Một cạnh giữa hai component qua gRPC hay hàng đợi, để xét `link`.
+struct Hop {
+    from: String,
+    file: String,
+    line: usize,
+    shown: String,
+    to: String,
+    /// `package.Service` hay `kafka:orders`.
+    key: String,
+}
+
+/// Một chỗ gửi hay nhận qua hàng đợi, kèm component và file của nó.
+#[derive(Debug, Clone)]
+struct QueueSite {
+    from: String,
+    file: String,
+    lang: Lang,
+    site: scan::queue::Site,
+}
+
+/// Trần số chỗ gửi, nhận xét trong một lần kiểm (TM-42).
+const MAX_QUEUE_SITES: usize = 200_000;
+
+/// Cạnh qua hàng đợi: ghép chỗ gửi với chỗ nhận cùng hệ và tên, rồi xét
+/// `allow` giữa component và, khi file luật đã khai `service`, `link` giữa
+/// service. Tên không cố định thì báo "chưa ghép", không đoán (TM-40). Bên
+/// gửi không có bên nhận nào trong repo như gói ngoài.
+fn judge_queues(
+    doc: &Document,
+    sites: Vec<QueueSite>,
+    report: &mut Report,
+) -> std::collections::BTreeSet<(String, String)> {
+    use scan::queue::{Name, Role};
+    if sites.is_empty() {
+        return std::collections::BTreeSet::new();
+    }
+    let mut sites = sites;
+    if sites.len() > MAX_QUEUE_SITES {
+        report.unresolved.push(Unresolved {
+            file: sites[MAX_QUEUE_SITES].file.clone(),
+            line: 0,
+            spec: format!("quá {MAX_QUEUE_SITES} chỗ gửi, nhận qua hàng đợi; phần sau không ghép"),
+            lang: sites[MAX_QUEUE_SITES].lang,
+            reason: UnresolvedReason::Queue,
+        });
+        sites.truncate(MAX_QUEUE_SITES);
+    }
+    // Chỗ không ghép được trong file test hay mock: mock producer, consumer
+    // giả, không phải đường dữ liệu thật; không báo.
+    let unresolved = |s: &QueueSite, why: String, report: &mut Report| {
+        if grpc::fake_server_path(&s.file) {
+            return;
+        }
+        report.unresolved.push(Unresolved {
+            file: s.file.clone(),
+            line: s.site.line,
+            spec: format!("{} ({}: {why})", s.site.shown, s.site.system.as_str()),
+            lang: s.lang,
+            reason: UnresolvedReason::Queue,
+        });
+    };
+    let mut receivers = scan::queue::Index::default();
+    // Bên nhận chỉ có trong file test hay mock (TM-41).
+    let mut fake = scan::queue::Index::default();
+    for s in sites.iter().filter(|s| s.site.role == Role::Receive) {
+        let into = if grpc::fake_server_path(&s.file) { &mut fake } else { &mut receivers };
+        if into.add(&s.site, &s.file, &s.from) {
+            continue;
+        }
+        match &s.site.name {
+            Name::Fixed(_) | Name::Pattern(_) | Name::Task(_) => {}
+            Name::Env(var) => unresolved(s, format!("tên lấy từ biến môi trường `{var}` không khai trong cấu hình triển khai"), report),
+            Name::Dynamic(e) => unresolved(s, format!("tên không cố định `{e}`"), report),
+        }
+    }
+    if receivers.patterns_cut {
+        report.unresolved.push(Unresolved {
+            file: ".".into(),
+            line: 0,
+            spec: format!(
+                "quá {} mẫu psubscribe; mẫu sau không ghép",
+                scan::queue::MAX_PATTERNS
+            ),
+            lang: Lang::Python,
+            reason: UnresolvedReason::Queue,
+        });
+    }
+    // Mỗi (hệ, tên) tra một lần (TM-42).
+    let mut cache: HashMap<(scan::queue::System, String), std::collections::BTreeSet<String>> = HashMap::new();
+    let mut hops: Vec<Hop> = Vec::new();
+    let mut said: HashSet<(String, usize)> = HashSet::new();
+    for s in sites.iter().filter(|s| s.site.role == Role::Send) {
+        let name = match &s.site.name {
+            Name::Fixed(n) => n,
+            Name::Env(var) => {
+                unresolved(s, format!("tên lấy từ biến môi trường `{var}` không khai trong cấu hình triển khai"), report);
+                continue;
+            }
+            Name::Dynamic(e) => {
+                unresolved(s, format!("tên không cố định `{e}`"), report);
+                continue;
+            }
+            Name::Pattern(_) | Name::Task(_) => continue,
+        };
+        let key = (s.site.system, name.clone());
+        let targets = cache.entry(key).or_insert_with(|| receivers.targets(s.site.system, name));
+        if targets.is_empty() {
+            if !grpc::fake_server_path(&s.file)
+                && !fake.targets(s.site.system, name).is_empty()
+                && said.insert((s.file.clone(), s.site.line))
+            {
+                unresolved(s, format!("`{name}`: chỉ thấy bên nhận trong file test hay mock"), report);
+            }
+            continue;
+        }
+        let shown_key = format!("{}:{}", s.site.system.as_str(), name);
+        for to in targets.iter().filter(|t| **t != s.from) {
+            hops.push(Hop {
+                from: s.from.clone(),
+                file: s.file.clone(),
+                line: s.site.line,
+                shown: s.site.shown.clone(),
+                to: to.clone(),
+                key: shown_key.clone(),
+            });
+        }
+    }
+    for h in &hops {
+        let Some((reason, rule, status)) = judge(doc, &h.from, &h.to) else {
+            continue;
+        };
+        report.violations.push(Violation {
+            from: h.from.clone(),
+            to: h.to.clone(),
+            file: h.file.clone(),
+            line: h.line,
+            spec: format!("{} ({})", h.shown, h.key),
+            via: Via::Queue,
+            count: 1,
+            reason,
+            rule,
+            status,
+            hint: hint_for(doc, &h.from, &h.to, reason, Via::Queue),
+        });
+    }
+    judge_cross_links(doc, &hops, Via::Queue, report)
+}
+
+/// `q:VAR` của RabbitMQ: tiền tố và tên biến.
+pub(crate) fn env_var(v: &str) -> (&'static str, String) {
+    match v.split_once(':') {
+        Some(("q", r)) => ("q:", r.to_string()),
+        Some(("x", r)) => ("x:", r.to_string()),
+        _ => ("", v.to_string()),
+    }
+}
+
+/// Tên lấy từ env (`os.getenv("TOPIC")`): lần qua cấu hình của service chạy
+/// component đó; mỗi giá trị là một chỗ gửi, nhận với tên cố định. Không lần
+/// ra thì giữ nguyên để báo "chưa ghép".
+fn resolve_env(doc: &Document, sites: Vec<QueueSite>, dep: Option<&Deploy>) -> Vec<QueueSite> {
+    use scan::queue::Name;
+    // Tên lấy từ env: lần qua cấu hình của service chạy component đó.
+    let mut env_cache: HashMap<(String, String), Vec<String>> = HashMap::new();
+    let mut expanded: Vec<QueueSite> = Vec::with_capacity(sites.len());
+    for s in sites {
+        let Name::Env(raw) = &s.site.name else {
+            expanded.push(s);
+            continue;
+        };
+        let (prefix, var) = env_var(raw);
+        let values = env_cache
+            .entry((s.from.clone(), var.clone()))
+            .or_insert_with(|| env_words(doc, dep, &s.from, &var))
+            .clone();
+        if values.is_empty() {
+            let mut t = s.clone();
+            t.site.name = Name::Env(var);
+            expanded.push(t);
+            continue;
+        }
+        for v in values {
+            let mut t = s.clone();
+            t.site.shown = format!("{} [{var}={v}]", s.site.shown);
+            t.site.name = Name::Fixed(format!("{prefix}{v}"));
+            expanded.push(t);
+        }
+    }
+    expanded
+}
+
+/// Giá trị của biến môi trường `var` ở các service chạy component `from`;
+/// file luật chưa khai service nào chạy nó thì xét mọi service trong cấu
+/// hình, và chỉ nhận khi chúng cùng một giá trị. Chỉ giá trị dạng tên, ở khoá
+/// không mang dấu hiệu bí mật (TM-43).
+fn env_words(doc: &Document, dep: Option<&Deploy>, from: &str, var: &str) -> Vec<String> {
+    let Some(dep) = dep else { return Vec::new() };
+    let runners: Vec<&Service> = doc
+        .services
+        .iter()
+        .filter(|s| s.meta.status.is_enforced() && s.runs.iter().any(|r| r == from))
+        .collect();
+    let pick = |v: &deploy::Svc| v.words.iter().filter(|(k, _)| k == var).map(|(_, w)| w.clone()).collect::<Vec<_>>();
+    let mut out: Vec<String> = if runners.is_empty() {
+        let all: BTreeSet<String> = dep.services.iter().flat_map(pick).collect();
+        if all.len() == 1 { all.into_iter().collect() } else { Vec::new() }
+    } else {
+        dep.services
+            .iter()
+            .filter(|v| runners.iter().any(|s| own_sources(s).any(|src| matches_source(src, &v.key))))
+            .flat_map(pick)
+            .collect()
+    };
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Trong hook chỉ có vài file: phía bên kia của chỗ gửi, nhận nằm ở file
+/// khác. Tìm nhắm một lượt: lọc file theo các từ trong nó (tên topic, tên
+/// hàm task), chỉ lex file khớp, trần byte chung (TM-42).
+fn queue_other_side(
+    root: &Path,
+    doc: &Document,
+    files: &[String],
+    ignores: &[String],
+    sites: &mut Vec<QueueSite>,
+    report: &mut Report,
+) {
+    use scan::queue::{Name, Role};
+    // Tên mà bên nhận ở file khác phải mang (của chỗ gửi ở đây), và tên mà
+    // bên gửi ở file khác phải mang (của chỗ nhận ở đây). Chỉ lấy đúng phía
+    // bên kia: chỗ gửi khác cùng topic không phải việc của lượt này.
+    let bare = |n: &str| n.strip_prefix("q:").or_else(|| n.strip_prefix("x:")).unwrap_or(n).to_string();
+    let last = |n: &str| n.rsplit_once('.').map_or(n, |(_, l)| l).to_string();
+    let mut want_recv: HashSet<String> = HashSet::new();
+    let mut want_send: HashSet<String> = HashSet::new();
+    let mut patterns: Vec<String> = Vec::new();
+    for s in sites.iter() {
+        match (&s.site.role, &s.site.name) {
+            (Role::Send, Name::Fixed(n)) => {
+                want_recv.insert(bare(n));
+                // `shop.tasks.charge` gửi tới `def charge`.
+                want_recv.insert(last(n));
+            }
+            (Role::Receive, Name::Fixed(n)) => {
+                want_send.insert(bare(n));
+            }
+            (Role::Receive, Name::Task(f)) => {
+                want_send.insert(f.clone());
+            }
+            (Role::Receive, Name::Pattern(p)) => patterns.push(p.clone()),
+            _ => {}
+        }
+    }
+    if want_recv.is_empty() && want_send.is_empty() && patterns.is_empty() {
+        return;
+    }
+    // Mẫu `psubscribe` của file đổi: lọc file theo tiền tố chữ cố định của mẫu,
+    // tra bảng băm theo từng độ dài tiền tố, không chạy glob trên từng từ của
+    // repo (TM-42). Mẫu không có tiền tố, hay quá nhiều mẫu, thì lọc theo chữ
+    // `publish`. Glob chỉ chạy trên tên của chỗ gửi trong file khớp, có trần.
+    const MAX_GLOB_PATTERNS: usize = 64;
+    let few = patterns.len() <= MAX_GLOB_PATTERNS;
+    let prefixes: HashSet<&str> = patterns.iter().map(|p| scan::queue::glob_prefix(p)).collect();
+    let loose = !patterns.is_empty() && (!few || prefixes.contains(""));
+    let lengths: BTreeSet<usize> = if few { prefixes.iter().map(|p| p.len()).collect() } else { BTreeSet::new() };
+    let by_prefix = |w: &str| {
+        lengths
+            .iter()
+            .any(|&l| w.len() >= l && w.is_char_boundary(l) && prefixes.contains(&w[..l]))
+    };
+    // Tên bên nhận cần tìm ít thì mới khớp từng mẫu của file khác với chúng.
+    let few_names = want_recv.len() <= 256;
+    // Chỗ gửi Redis ở đây có thể tới bên nhận theo mẫu (`psubscribe("orders.*")`)
+    // ở file khác: file đó không chứa đúng tên kênh, nên lọc theo chữ
+    // `psubscribe` thay vì bỏ qua nó.
+    let redis_send = sites.iter().any(|s| {
+        s.site.role == Role::Send && s.site.system == scan::queue::System::Redis && matches!(s.site.name, Name::Fixed(_))
+    });
+    let scanned: HashSet<&str> = files.iter().map(String::as_str).collect();
+    let mut budget = MAX_RPC_SEARCH_BYTES;
+    let mut found: Vec<QueueSite> = Vec::new();
+    for f in source_files(root, ignores) {
+        let Some(lang) = Lang::for_path(&f).filter(|l| matches!(l, Lang::Python | Lang::Go | Lang::TypeScript)) else {
+            continue;
+        };
+        if scanned.contains(f.as_str()) {
+            continue;
+        }
+        let Some(from) = owners_of(doc, &f).into_iter().next() else {
+            continue;
+        };
+        let Ok(text) = deploy::read_in(root, &f, MAX_FILE_BYTES) else {
+            continue;
+        };
+        if text.len() > budget {
+            report.unresolved.push(Unresolved {
+                file: f.clone(),
+                line: 0,
+                spec: format!(
+                    "tìm phía bên kia của chỗ gửi, nhận qua hàng đợi dừng ở trần {} MB",
+                    MAX_RPC_SEARCH_BYTES >> 20
+                ),
+                lang,
+                reason: UnresolvedReason::Queue,
+            });
+            break;
+        }
+        budget -= text.len();
+        let words = |t: &str| {
+            (loose && (t.contains("publish") || t.contains("Publish")))
+                || (redis_send && (t.contains("psubscribe") || t.contains("PSubscribe") || t.contains("pSubscribe")))
+                || t
+                    .split(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '.' | '-' | ':' | '/')))
+                    .filter(|w| !w.is_empty())
+                    .any(|w| {
+                        want_recv.contains(w)
+                            || want_send.contains(w)
+                            || want_send.contains(&last(w))
+                            || (few && by_prefix(w))
+                    })
+        };
+        if !words(&text) {
+            continue;
+        }
+        let view = scan::source_view(&f, &text);
+        let toks = lang.tokens(&view);
+        let imports = lang.imports(&view);
+        for site in scan::queue::scan(&toks, lang, &imports).sites {
+            let keep = match (&site.role, &site.name) {
+                (Role::Receive, Name::Fixed(n)) => want_recv.contains(&bare(n)),
+                (Role::Receive, Name::Task(func)) => want_recv.contains(func),
+                (Role::Receive, Name::Pattern(p)) => !few_names || want_recv.iter().any(|n| scan::queue::glob(p, n)),
+                (Role::Send, Name::Fixed(n)) => {
+                    want_send.contains(&bare(n))
+                        || want_send.contains(&last(n))
+                        || (!patterns.is_empty() && (!few || patterns.iter().any(|p| scan::queue::glob(p, n))))
+                }
+                _ => false,
+            };
+            if keep {
+                found.push(QueueSite { from: from.clone(), file: f.clone(), lang, site });
+            }
+        }
+    }
+    sites.extend(found);
 }
 
 /// Trong hook chỉ có vài file: phía bên kia của lời gọi gRPC nằm ở file khác.
@@ -944,13 +1356,15 @@ fn mentions(text: &str, servers: &HashSet<String>, callers: &HashSet<String>) ->
         })
 }
 
-/// Lời gọi gRPC giữa hai component chạy ở hai service khác nhau cần `link`.
+/// Cạnh qua gRPC hay hàng đợi giữa hai component chạy ở hai service khác
+/// nhau cần `link`.
 /// Với mỗi service chạy phía client, phải có một service chạy phía server là
 /// chính nó, hoặc có `link` tới. Không service nào chạy phía server thì không
 /// biết lời gọi đi đâu, và không đòi gì.
-fn judge_rpc_links(
+fn judge_cross_links(
     doc: &Document,
-    edges: &[(&RpcSite, String, String)],
+    edges: &[Hop],
+    via: Via,
     report: &mut Report,
 ) -> std::collections::BTreeSet<(String, String)> {
     let mut used = std::collections::BTreeSet::new();
@@ -968,8 +1382,9 @@ fn judge_rpc_links(
             .iter()
             .any(|l| l.meta.status.is_enforced() && l.from == a && l.to.iter().any(|t| t == b))
     };
-    let mut reported: HashSet<(String, String, usize)> = HashSet::new();
-    for (c, to, key) in edges {
+    let mut reported: HashSet<(String, String, String, usize)> = HashSet::new();
+    for c in edges {
+        let (to, key) = (&c.to, &c.key);
         let targets = running(to);
         if targets.is_empty() {
             continue;
@@ -987,21 +1402,21 @@ fn judge_rpc_links(
                 continue;
             }
             let t = targets[0];
-            if !reported.insert((s.name.clone(), c.file.clone(), c.site.line)) {
+            if !reported.insert((s.name.clone(), t.name.clone(), c.file.clone(), c.line)) {
                 continue;
             }
             report.violations.push(Violation {
                 from: s.name.clone(),
                 to: t.name.clone(),
                 file: c.file.clone(),
-                line: c.site.line,
-                spec: format!("{} ({key}, {} chạy trong {})", c.site.shown, to, t.name),
-                via: Via::Rpc,
+                line: c.line,
+                spec: format!("{} ({key}, {} chạy trong {})", c.shown, to, t.name),
+                via,
                 count: 1,
                 reason: Reason::NotLinked,
                 rule: format!("không có link nào cho {} -> {}", s.name, t.name),
                 status: Status::Accepted,
-                hint: hint_for(doc, &s.name, &t.name, Reason::NotLinked, Via::Rpc),
+                hint: hint_for(doc, &s.name, &t.name, Reason::NotLinked, via),
             });
         }
     }
@@ -1367,7 +1782,7 @@ fn hint_for(doc: &Document, from: &str, to: &str, reason: Reason, via: Via) -> S
     {
         return match via {
             Via::Import => format!("gọi {only} thay vì truy cập thẳng {to}"),
-            Via::Symbol | Via::Table | Via::Ffi | Via::Network | Via::Entry | Via::Rpc => {
+            Via::Symbol | Via::Table | Via::Ffi | Via::Network | Via::Entry | Via::Rpc | Via::Queue => {
                 format!("chỉ {only} được dùng {to}")
             }
         };

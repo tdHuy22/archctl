@@ -2,3 +2,7 @@
 examples/**
 # Khung mà `archctl init` sao chép sang dự án người dùng.
 templates/**
+
+# Mẫu cho thước đo (`bench/fixtures/`): dữ liệu thử, cố ý chứa tên topic không
+# cố định, không phải mã của archctl.
+bench/fixtures/**

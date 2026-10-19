@@ -19,6 +19,7 @@ pub mod hosts;
 pub mod k8s;
 mod notebook;
 mod python;
+pub mod queue;
 mod rustlang;
 mod ts;
 pub mod yaml;
@@ -162,7 +163,9 @@ impl Lang {
             Lang::Rust => rustlang::extract(&toks),
             Lang::Go => golang::extract(&toks),
         };
+        let queues = queue::scan(&toks, self, &imports);
         FileScan {
+            queues,
             imports,
             symbols: find_symbols(&toks, needles, self),
             tables: find_tables(&toks, tables),
@@ -198,6 +201,8 @@ pub struct FileScan {
     pub rpc: grpc::Rpc,
     /// Tên máy viết thẳng trong chuỗi.
     pub hosts: hosts::CodeHosts,
+    /// Chỗ gửi, nhận qua hàng đợi và pub/sub.
+    pub queues: queue::Queues,
 }
 
 /// Tìm tên bảng, **chỉ trong chuỗi**.

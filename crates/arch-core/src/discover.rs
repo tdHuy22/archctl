@@ -46,6 +46,9 @@ pub struct Discovery {
     /// Lời gọi gRPC giữa hai component. Tách khỏi `edges`: phía server chạy ở
     /// process khác, nên cạnh này không kéo component vào `runs`.
     pub rpc_edges: Vec<(String, String)>,
+    /// Cạnh qua hàng đợi (bên gửi → bên nhận cùng topic, queue, task). Như
+    /// gRPC, không kéo component vào `runs`.
+    pub queue_edges: Vec<(String, String)>,
     /// Thư mục không thành component vì đã quá số lượng, kèm số file.
     pub skipped: Vec<(String, usize)>,
     pub files: usize,
@@ -132,6 +135,7 @@ pub fn discover(root: &Path, ignores: &[String]) -> Discovery {
 
     out.edges = observe_edges(root, &scans, &owners);
     out.rpc_edges = observe_rpc(root, ignores, &scans, &owners);
+    out.queue_edges = observe_queues(&scans, &owners, &|_, _| Vec::new());
     out.unmapped = files.iter().filter(|f| owners.of_file(f).is_none()).count();
     let deploy_files = check::deploy_files(root, ignores);
     if !deploy_files.is_empty() {
@@ -156,7 +160,23 @@ pub fn discover(root: &Path, ignores: &[String]) -> Discovery {
 fn discover_services(root: &Path, deploy_files: &[String], owners: &Owners, scans: &[Scanned], out: &mut Discovery) {
     use crate::scan::deploy::{self, Key};
     let hosts: BTreeSet<&str> = scans.iter().flat_map(|s| s.hosts.iter().map(|h| h.host.name.as_str())).collect();
-    let opts = deploy::Options { k8s: true, hosts: hosts.into_iter().map(str::to_string).collect(), ..Default::default() };
+    // Biến môi trường mà mã đọc làm tên topic: giữ giá trị của chúng (TM-19).
+    let env_words: Vec<String> = scans
+        .iter()
+        .flat_map(|s| s.queues.sites.iter())
+        .filter_map(|q| match &q.name {
+            crate::scan::queue::Name::Env(v) => Some(check::env_var(v).1),
+            _ => None,
+        })
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect();
+    let opts = deploy::Options {
+        k8s: true,
+        hosts: hosts.into_iter().map(str::to_string).collect(),
+        env_words,
+        ..Default::default()
+    };
     let dep = deploy::load(root, deploy_files, &opts);
     let resolver = Resolver::new(root);
 
@@ -328,10 +348,32 @@ fn discover_services(root: &Path, deploy_files: &[String], owners: &Owners, scan
             }
         }
     }
+    // Cạnh qua hàng đợi, giờ lần được cả tên lấy từ env, như `check`: giá trị
+    // ở các service chạy component đó; không service nào chạy nó thì chỉ khi
+    // cả cấu hình có đúng một giá trị.
+    let svcs_of: HashMap<&str, &Vec<&deploy::Svc>> = units.iter().zip(&names).map(|(u, n)| (n.as_str(), &u.svcs)).collect();
+    let words = |svc: &deploy::Svc, var: &str| svc.words.iter().filter(|(k, _)| k == var).map(|(_, w)| w.clone()).collect::<Vec<_>>();
+    let resolve = |from: &str, var: &str| -> Vec<String> {
+        let runners: Vec<&FoundService> = out.services.iter().filter(|s| s.runs.iter().any(|r| r == from)).collect();
+        let mut vals: Vec<String> = if runners.is_empty() {
+            let all: BTreeSet<String> = dep.services.iter().flat_map(|v| words(v, var)).collect();
+            if all.len() == 1 { all.into_iter().collect() } else { Vec::new() }
+        } else {
+            runners
+                .iter()
+                .filter_map(|r| svcs_of.get(r.name.as_str()))
+                .flat_map(|list| list.iter().flat_map(|v| words(v, var)))
+                .collect()
+        };
+        vals.sort();
+        vals.dedup();
+        vals
+    };
+    out.queue_edges = observe_queues(scans, owners, &resolve);
     // Lời gọi gRPC giữa hai service, theo đúng điều `check` đòi: với mỗi
     // service chạy phía client, nếu không service nào chạy phía server là
     // chính nó thì cần `link` tới một service chạy phía server.
-    for (client, server) in &out.rpc_edges {
+    for (client, server) in out.rpc_edges.iter().chain(&out.queue_edges) {
         let running = |c: &str| out.services.iter().filter(|s| s.runs.iter().any(|r| r == c)).map(|s| s.name.clone()).collect::<Vec<_>>();
         let targets = running(server);
         let Some(first) = targets.first() else { continue };
@@ -497,6 +539,8 @@ struct Scanned {
     natives: Vec<NativeImport>,
     /// Chỗ gọi stub và chỗ đăng ký server gRPC.
     rpc: crate::scan::grpc::Rpc,
+    /// Chỗ gửi, nhận qua hàng đợi.
+    queues: crate::scan::queue::Queues,
     /// Tên máy viết thẳng trong chuỗi; rỗng với file test, ví dụ.
     hosts: Vec<crate::scan::hosts::CodeHost>,
 }
@@ -541,6 +585,7 @@ fn scan_files(root: &Path, files: &[String], wanted: impl Fn(&str) -> bool) -> V
                 .collect(),
             natives: Vec::new(),
             rpc: scan.rpc,
+            queues: scan.queues,
             hosts: if crate::scan::hosts::skipped_path(file) { Vec::new() } else { scan.hosts.hosts },
         };
         for import in scan.imports {
@@ -725,6 +770,47 @@ fn observe_rpc(root: &Path, ignores: &[String], scans: &[Scanned], owners: &Owne
             let Key::Found(key) = index.key(site) else { continue };
             for to in servers.get(&key).into_iter().flatten().filter(|t| *t != from) {
                 edges.push((from.clone(), to.clone()));
+            }
+        }
+    }
+    edges.sort();
+    edges.dedup();
+    edges
+}
+
+/// Cạnh qua hàng đợi: bên gửi và bên nhận cùng hệ và tên cố định, hay tên
+/// lấy từ env mà `env` (component, biến) lần ra như `check`. Tên không cố
+/// định thì `init` không đoán; `check` báo chúng.
+fn observe_queues(scans: &[Scanned], owners: &Owners, env: &dyn Fn(&str, &str) -> Vec<String>) -> Vec<(String, String)> {
+    use crate::scan::queue::{Index, Name, Role, Site};
+    if scans.iter().all(|s| s.queues.is_empty()) {
+        return Vec::new();
+    }
+    // Chỗ gửi, nhận với tên env đã thay bằng từng giá trị lần ra.
+    let expand = |site: &Site, from: &str| -> Vec<Site> {
+        let Name::Env(raw) = &site.name else { return vec![site.clone()] };
+        let (prefix, var) = check::env_var(raw);
+        env(from, &var)
+            .into_iter()
+            .map(|v| Site { name: Name::Fixed(format!("{prefix}{v}")), ..site.clone() })
+            .collect()
+    };
+    let mut index = Index::default();
+    for s in scans.iter().filter(|s| !crate::scan::grpc::fake_server_path(&s.file)) {
+        let Some(from) = owners.of_file(&s.file) else { continue };
+        for site in s.queues.sites.iter().filter(|x| x.role == Role::Receive) {
+            for site in expand(site, from) {
+                index.add(&site, &s.file, from);
+            }
+        }
+    }
+    let mut edges = Vec::new();
+    for s in scans {
+        let Some(from) = owners.of_file(&s.file) else { continue };
+        for site in s.queues.sites.iter().filter(|x| x.role == Role::Send).flat_map(|x| expand(x, from)) {
+            let Name::Fixed(name) = &site.name else { continue };
+            for to in index.targets(site.system, name).into_iter().filter(|t| *t != *from) {
+                edges.push((from.clone(), to));
             }
         }
     }
@@ -1063,6 +1149,15 @@ pub fn render(d: &Discovery, date: &str) -> String {
         out.push_str("\n# Lời gọi gRPC: client gọi stub, server đăng ký service cùng `.proto`.\n");
         let width = rpc.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
         for (from, to) in rpc {
+            let _ = writeln!(out, "allow {from:<width$} -> {to}   @ai #draft");
+        }
+    }
+    let queue: Vec<&(String, String)> =
+        d.queue_edges.iter().filter(|e| !d.edges.contains(e) && !d.rpc_edges.contains(e)).collect();
+    if !queue.is_empty() {
+        out.push_str("\n# Hàng đợi, pub/sub: bên gửi và bên nhận cùng topic, queue hay task.\n");
+        let width = queue.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
+        for (from, to) in queue {
             let _ = writeln!(out, "allow {from:<width$} -> {to}   @ai #draft");
         }
     }

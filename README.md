@@ -46,6 +46,7 @@ kiến trúc c8bd3bd9 · 15 file quét (5 Rust, 4 C/C++, 4 Python, 2 Go) · 7/8 
 | `verify ... runs "..."` | lệnh phải chạy xong và đạt, trên đúng bản mã này |
 | `service ... runs`, `link` — triển khai và mạng | đọc docker-compose, Dockerfile và manifest Kubernetes: lệnh khởi chạy dẫn tới mã nào, `depends_on`, tên service hay Service Kubernetes trong biến môi trường hay viết thẳng trong mã (`"http://payment:80"`, `host="redis"`) |
 | cạnh gRPC (`allow`, và `link` khi đã khai service) | chỗ gọi stub (`XStub`, `NewXClient`) ghép với chỗ đăng ký server theo `package.Service` của `.proto`; Python và Go |
+| cạnh qua hàng đợi (`allow`, và `link` khi đã khai service) | chỗ gửi ghép với chỗ nhận cùng topic Kafka, queue hay exchange RabbitMQ, kênh Redis, task Celery; tên từ env lần qua compose, manifest; Python, Go, Node |
 | trạng thái `#draft`…`#locked` | quyết định luật nào đang có hiệu lực |
 
 Bốn khai báo cuối bắt đúng chế độ hỏng hay gặp nhất khi làm việc với agent:
@@ -168,7 +169,8 @@ https://claude.ai/code/artifact/2b26df5d-d6b0-40d0-a398-7e574c7d1387
   thì không. Với C/C++ thì `#include` là điều kiện cần nhưng rất xa điều kiện
   đủ, và đó là lý do có `api`.
 - **Tầng hạ tầng mới đọc docker-compose, Dockerfile, manifest Kubernetes, và
-  gRPC của Python, Go, Node, Rust; NetworkPolicy được đối chiếu với `link`;
+  gRPC của Python, Go, Node, Rust, hàng đợi (Kafka, RabbitMQ, Redis pub/sub,
+  Celery); NetworkPolicy được đối chiếu với `link`;
   lối vào từ Internet (Ingress, Gateway API, Istio, `LoadBalancer`, cổng
   compose) cần `link Internet -> …`; tên máy viết thẳng trong mã cũng cần
   `link`.**

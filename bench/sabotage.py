@@ -50,7 +50,10 @@ lập thành không), đối chiếu bằng `k8s_truth.py` trên PyYAML; cần m
 `--proto-repo vllm` phá thêm hai kiểu ở dữ kiện `.proto` (mất một `rpc`, lệch
 dòng một `service`), đối chiếu bằng `protoc` của grpcio-tools cài vào venv nên
 cần mạng; CI bật nó. Kiểu `rpc` chạy trên `--rpc-repo` (mặc định etcd): xoá cạnh
-gRPC bắt buộc khỏi cả luật `init` sinh ra lẫn vi phạm `check` báo.
+gRPC bắt buộc khỏi cả luật `init` sinh ra lẫn vi phạm `check` báo. Kiểu `queue`
+làm vậy với cạnh qua hàng đợi trên `--queue-repo` (mặc định
+rabbitmq-tutorials); ba kiểu `queue-*` phá mục `queues` của `scan --json` ở
+file Python (mất, lệch dòng, thêm giả), đối chiếu bằng `queue_truth.py`.
 `--rust-repo ripgrep` phá thêm ba kiểu như vậy ở file Rust, đối chiếu bằng
 `oracle.py --require syn` — tức là tải crate, nên chỉ CI bật. Phần Rust miễn
 trừ import nằm trong thân macro; kiểu `rust-extra` đặt import giả ở ngoài macro
@@ -84,6 +87,14 @@ MODES = {
 CROSSING_MODES = {"crossing": "thiếu cạnh liên ngôn ngữ"}
 # kiểu phá chạy trên `--rpc-repo`: cạnh gRPC bắt buộc mất ở cả hai phía
 RPC_MODES = {"rpc": "thiếu cạnh gRPC"}
+# kiểu phá chạy trên `--queue-repo`: cạnh qua hàng đợi bắt buộc mất ở cả hai phía
+QUEUE_MODES = {"queue": "thiếu cạnh qua hàng đợi"}
+# phá mục `queues` của `scan --json` ở file Python đầu tiên có chỗ gửi, nhận
+QUEUE_ORACLE_MODES = {
+    "queue-drop": "thiếu:",
+    "queue-line": "lệch dòng:",
+    "queue-extra": "thừa:",
+}
 
 # kiểu phá đầu ra `scan --json` → dòng `oracle.py` phải in ra
 ORACLE_MODES = {
@@ -302,6 +313,20 @@ def sabotage_scan(rep: dict, mode: str):
             return
 
 
+def sabotage_queues(rep: dict, mode: str):
+    """Làm hỏng chỗ gửi, nhận đầu tiên của file Python đầu tiên có nó."""
+    for f in rep["files"]:
+        sites = f.get("queues", {}).get("sites", [])
+        if f["file"].endswith(".py") and sites:
+            if mode == "queue-drop":
+                sites.pop(0)
+            elif mode == "queue-line":
+                sites[0]["line"] += 1
+            else:
+                sites.append({**sites[0], "name": "khong-co-that", "kind": "fixed"})
+            return
+
+
 def crossing_edges(table: str = "CROSSINGS") -> set:
     sys.path.insert(0, str(HERE))
     import consistency
@@ -328,6 +353,8 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
         drop_crossings_from_law(args)
     if mode == "rpc" and args[:1] == ["init"] and p.returncode == 0:
         drop_crossings_from_law(args, "RPC")
+    if mode == "queue" and args[:1] == ["init"] and p.returncode == 0:
+        drop_crossings_from_law(args, "QUEUE")
     if mode == "deploy-gen" and args[:1] == ["init"] and p.returncode == 0:
         root = Path(args[args.index("--root") + 1]) if "--root" in args else Path.cwd()
         law = root / ".arch/system.arch"
@@ -336,8 +363,12 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
                                    if not l.startswith("link ")))
     if args[:1] == ["check"] and "--json" in args and p.stdout.startswith("{"):
         rep = json.loads(out)
-        if mode in ("crossing", "rpc"):
-            via, edges = ("ffi", crossing_edges()) if mode == "crossing" else ("rpc", crossing_edges("RPC"))
+        if mode in ("crossing", "rpc", "queue"):
+            via, edges = {
+                "crossing": ("ffi", crossing_edges()),
+                "rpc": ("rpc", crossing_edges("RPC")),
+                "queue": ("queue", crossing_edges("QUEUE")),
+            }[mode]
             rep["violations"] = [
                 v for v in rep["violations"]
                 if not (v.get("via") == via and (v["from"], v["to"]) in edges)
@@ -393,6 +424,10 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
         rep = json.loads(out)
         sabotage_k8s(rep, mode)
         out = json.dumps(rep)
+    elif mode in QUEUE_ORACLE_MODES and args[:1] == ["scan"] and "--json" in args:
+        rep = json.loads(out)
+        sabotage_queues(rep, mode)
+        out = json.dumps(rep)
     elif mode in PROTO_ORACLE_MODES and args[:1] == ["scan"] and "--json" in args:
         rep = json.loads(out)
         sabotage_protos(rep, mode)
@@ -417,6 +452,8 @@ def main():
                     help="repo có cạnh liên ngôn ngữ bắt buộc, cho kiểu phá `crossing`")
     ap.add_argument("--rpc-repo", default="etcd",
                     help="repo có cạnh gRPC bắt buộc, cho kiểu phá `rpc`")
+    ap.add_argument("--queue-repo", default="rabbitmq-tutorials",
+                    help="repo có cạnh qua hàng đợi bắt buộc, cho kiểu phá `queue` và `queue-*`")
     ap.add_argument("--deploy-bench-repo", default="example-voting-app",
                     help="repo có compose và `runs`, `link` bắt buộc, cho các kiểu phá `deploy-*`")
     ap.add_argument("--k8s-bench-repo", default="microservices-demo",
@@ -443,6 +480,10 @@ def main():
                  for m, e in [("", None), *CROSSING_MODES.items()]]
         runs += [("bench.py", args.rpc_repo, m, e)
                  for m, e in [("", None), *RPC_MODES.items()]]
+        runs += [("bench.py", args.queue_repo, m, e)
+                 for m, e in [("", None), *QUEUE_MODES.items()]]
+        runs += [("oracle.py", args.queue_repo, m, e)
+                 for m, e in [("", None), *QUEUE_ORACLE_MODES.items()]]
         runs += [("bench.py", args.deploy_bench_repo, m, e)
                  for m, e in [("", None), *DEPLOY_MODES.items()]]
         runs += [("bench.py", args.k8s_bench_repo, m, e)

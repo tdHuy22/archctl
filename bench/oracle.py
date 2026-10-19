@@ -80,6 +80,7 @@ sys.path.insert(0, str(HERE))
 
 import bench  # noqa: E402
 import code_hosts  # noqa: E402
+import queue_truth  # noqa: E402
 
 EXAMPLES = 5
 # Quá tỉ lệ này số file không parse được thì nghi chính thước đo.
@@ -1208,6 +1209,7 @@ def main():
     workdir = tempfile.TemporaryDirectory(prefix="archctl-oracle-")
     go_helper = build_go_helper(workdir.name) if have_go else None
     hosts_helper = code_hosts.build_go_helper(workdir.name, bench.die) if have_go else None
+    queue_helper = queue_truth.build_go_helper(workdir.name, bench.die) if have_go else None
     syn_helper = build_syn_helper(args.cache) if use_syn else None
     nb_python = build_ipython_helper(args.cache) if use_ipython else None
     dep_python = build_venv(args.cache, "deploy-oracle", DEPLOY_REQUIREMENTS, "hạ tầng") if use_deploy else None
@@ -1320,6 +1322,26 @@ def main():
                     check_lines(hosts, file, want, have_hosts(file))
         if hosts.files:
             tallies.append(hosts)
+
+        # Chỗ gửi, nhận qua hàng đợi: Python theo `ast`, Go theo `go/ast`.
+        queues = Tally("Hàng đợi")
+        for file in by_lang["Python"]:
+            if file.endswith(PY_EXTS):
+                want = queue_truth.python_truth(root / file)
+                have_q = queue_truth.have(by_file[file])
+                if want is None:
+                    queues.unparsed += 1
+                elif want or have_q:
+                    check_lines(queues, file, want, have_q)
+        if queue_helper and by_lang["Go"]:
+            for file, want in queue_truth.go_truth(queue_helper, root, by_lang["Go"], bench.die).items():
+                have_q = queue_truth.have(by_file[file])
+                if want is None:
+                    queues.unparsed += 1
+                elif want or have_q:
+                    check_lines(queues, file, want, have_q)
+        if queues.files:
+            tallies.append(queues)
 
         if syn_helper and by_lang["Rust"]:
             rs = Tally("Rust")
@@ -1479,6 +1501,26 @@ def main():
             for e in ht.examples:
                 print(f"      {e}")
             bad += ht.bad
+
+    # Mẫu hàng đợi trong `bench/fixtures/queues`: các dạng mà repo thật của bộ
+    # đo không có (env, hằng số, khai queue rồi dùng qua biến, Celery, Redis).
+    if not args.only:
+        fx = HERE / "fixtures" / "queues"
+        files = archctl_scan(archctl, fx)
+        by_file = {f["file"]: f for f in files}
+        qt = Tally("Hàng đợi")
+        for file in sorted(by_file):
+            if file.endswith(".py"):
+                want = queue_truth.python_truth(fx / file)
+            elif file.endswith(".go") and queue_helper:
+                want = queue_truth.go_truth(queue_helper, fx, [file], bench.die)[file]
+            else:
+                continue
+            check_lines(qt, file, want, queue_truth.have(by_file[file]))
+        print(qt.line(fx.name))
+        for e in qt.examples:
+            print(f"      {e}")
+        bad += qt.bad
 
     print(f"\n{'khớp hết' if not bad else f'{bad} chỗ lệch so với parser chuẩn'}")
     sys.exit(1 if bad else 0)

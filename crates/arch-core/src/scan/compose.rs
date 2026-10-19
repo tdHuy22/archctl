@@ -89,6 +89,10 @@ pub struct Env {
     /// Giá trị, chỉ giữ cho các khoá trong [`KEPT`]: chúng quyết mã nào chạy
     /// và không mang secret.
     pub value: Option<String>,
+    /// Giá trị khi mã đọc biến này làm tên topic, queue, kênh (chỉ khi được
+    /// hỏi, xem [`parse_with`]), nó trông như một cái tên và khoá không mang
+    /// dấu hiệu bí mật (TM-19, TM-43).
+    pub word: Option<String>,
 }
 
 /// Biến môi trường được giữ giá trị.
@@ -164,6 +168,12 @@ impl Budget {
 }
 
 pub fn parse(text: &str) -> Result<File, yaml::Error> {
+    parse_with(text, &[])
+}
+
+/// Như [`parse`], và giữ giá trị dạng tên của các biến môi trường trong
+/// `wanted` (tên topic mà mã đọc từ env, TM-43). Giá trị khác không giữ (TM-19).
+pub fn parse_with(text: &str, wanted: &[String]) -> Result<File, yaml::Error> {
     let doc = yaml::parse(text)?;
     let mut out = File::default();
     let mut budget = MAX_FACTS;
@@ -197,7 +207,7 @@ pub fn parse(text: &str) -> Result<File, yaml::Error> {
         if out.services.len() >= MAX_SERVICES {
             return Err(yaml::Error { line, msg: format!("quá {MAX_SERVICES} service trong một file") });
         }
-        let s = service(name, line, node, &mut b);
+        let s = service(name, line, node, &mut b, wanted);
         if b.over {
             return Err(yaml::Error {
                 line,
@@ -217,7 +227,7 @@ pub fn parse(text: &str) -> Result<File, yaml::Error> {
     Ok(out)
 }
 
-fn service(name: &str, line: usize, n: Node<'_>, b: &mut Budget) -> Service {
+fn service(name: &str, line: usize, n: Node<'_>, b: &mut Budget, wanted: &[String]) -> Service {
     let mut s = Service { name: b.own(name), line, ..Service::default() };
     let text = |node: Option<Node<'_>>, b: &mut Budget| node.and_then(|i| i.as_str()).map(|v| b.own(v));
     s.image = text(n.get("image"), b);
@@ -243,7 +253,7 @@ fn service(name: &str, line: usize, n: Node<'_>, b: &mut Budget) -> Service {
         for (key, kline, value) in env.entries() {
             let value = value.as_str().unwrap_or("");
             if b.take(key.len() + value.len()) {
-                s.env.push(env_entry(key, kline, value));
+                s.env.push(env_entry_with(key, kline, value, wanted));
             }
         }
         for item in env.items() {
@@ -251,7 +261,7 @@ fn service(name: &str, line: usize, n: Node<'_>, b: &mut Budget) -> Service {
                 && b.take(text.len())
             {
                 let (key, value) = text.split_once('=').unwrap_or((text, ""));
-                s.env.push(env_entry(key, item.line(), value));
+                s.env.push(env_entry_with(key, item.line(), value, wanted));
             }
         }
     }
@@ -368,9 +378,41 @@ fn command(n: Node<'_>, b: &mut Budget) -> Option<(Command, usize)> {
 }
 
 pub fn env_entry(key: &str, line: usize, value: &str) -> Env {
+    env_entry_with(key, line, value, &[])
+}
+
+/// Như [`env_entry`], và giữ giá trị dạng tên khi khoá nằm trong `wanted`.
+pub fn env_entry_with(key: &str, line: usize, value: &str, wanted: &[String]) -> Env {
     let key = key.trim();
     let (hosts, cut) = hosts_scan(key, value);
-    Env { key: key.to_string(), line, hosts, cut, value: KEPT.contains(&key).then(|| value.to_string()) }
+    Env {
+        key: key.to_string(),
+        line,
+        hosts,
+        cut,
+        value: KEPT.contains(&key).then(|| value.to_string()),
+        word: if wanted.iter().any(|w| w == key) { word_value(key, value) } else { None },
+    }
+}
+
+/// Khoá có một đoạn nói về bí mật: `DB_PASSWORD`, `KAFKA_TOKEN`.
+pub(crate) fn secret_key(key: &str) -> bool {
+    key.to_ascii_uppercase().split(['_', '-', '.']).any(|p| SECRET_PARTS.contains(&p))
+}
+
+/// Giá trị dạng tên: chữ, số, `.`, `_`, `-`, `:`, tối đa 249 ký tự (trần tên
+/// topic của Kafka). `${X:-orders}` lấy giá trị mặc định. Khoá có đoạn nói về
+/// bí mật (`…_KEY`, `…_TOKEN`) thì không giữ gì.
+pub fn word_value(key: &str, value: &str) -> Option<String> {
+    if secret_key(key) {
+        return None;
+    }
+    let value: std::borrow::Cow<'_, str> = if value.contains("${") { defaults(value).into() } else { value.into() };
+    let v = value.trim();
+    let ok = !v.is_empty()
+        && v.len() <= 249
+        && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':'));
+    ok.then(|| v.to_string())
 }
 
 /// Đoạn cuối của tên khoá nói giá trị là địa chỉ máy: `DB_HOST`, `REDIS_URL`.
@@ -666,5 +708,16 @@ services:
         let f = parse("services:\n  a:\n    environment:\n      DATABASE_URL: postgres://u:hunter2@db/x\n      OPENAI_API_KEY: sk-live-abc\n").unwrap();
         let dump = format!("{:?}", f);
         assert!(!dump.contains("hunter2") && !dump.contains("sk-live-abc"), "{dump}");
+    }
+
+    #[test]
+    fn chi_giu_gia_tri_cua_bien_duoc_hoi() {
+        let text = "services:\n  a:\n    environment:\n      TOPIC: orders\n      OTHER: secret-ish-but-name-like\n      KAFKA_TOKEN: orders\n";
+        let wanted = vec!["TOPIC".to_string(), "KAFKA_TOKEN".to_string()];
+        let f = parse_with(text, &wanted).unwrap();
+        let words: Vec<_> = f.services[0].env.iter().map(|e| (e.key.as_str(), e.word.as_deref())).collect();
+        assert_eq!(words, [("TOPIC", Some("orders")), ("OTHER", None), ("KAFKA_TOKEN", None)]);
+        // Không hỏi gì thì không giữ gì (TM-19).
+        assert!(!format!("{:?}", parse(text).unwrap()).contains("orders"));
     }
 }

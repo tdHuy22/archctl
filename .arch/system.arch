@@ -10,7 +10,7 @@ component Resolve at crates/arch-core/src/resolve.rs, crates/arch-core/src/cbuil
 component Check   at crates/arch-core/src/check.rs, crates/arch-core/src/baseline.rs, crates/arch-core/src/verify.rs                                 @human #accepted
 component View    at crates/arch-core/src/layout.rs, crates/arch-core/src/export.rs, crates/arch-core/src/diff.rs                                    @human #accepted
 component Setup   at crates/arch-core/src/discover.rs, crates/arch-core/src/protocol.rs                                                              @human #accepted
-component Util    at crates/arch-core/src/glob.rs, crates/arch-core/src/json.rs, crates/arch-core/src/jsonc.rs                                       @human #accepted
+component Util    at crates/arch-core/src/glob.rs, crates/arch-core/src/json.rs, crates/arch-core/src/jsonc.rs, crates/arch-core/src/testclock.rs                                       @human #accepted
 component Lib     at crates/arch-core/src/lib.rs                                                                                                     @human #accepted
 component Cli     at crates/archctl/src/**                                                                                                           @human #accepted
 component Tests   at crates/*/tests/**, bench/**                                                                                                     @human #accepted

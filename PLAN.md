@@ -420,10 +420,34 @@ git, `cargo clean` dọn.
    Kiểm chứng cuối có biên nhận (2026-10-16, máy rảnh) ALL-OK: test, clippy, MSRV,
    release, bộ đo, oracle `--require ...,helm`, sabotage, verify, `check --strict`.
    Đã commit `becab75`, lên main sau CI xanh 5/5 (run 39041527752).
-3. Test thời gian trong lib đo bằng thời gian CPU của luồng (`src/testclock.rs`,
-   `clock_gettime(CLOCK_THREAD_CPUTIME_ID)` trên Linux, macOS; nền tảng khác
-   lùi về thời gian thực), commit `70af652` (chưa push). 141 test lib, clippy, MSRV đạt.
-   Linux, macOS 32 bit cũng lùi về thời gian thực. Review sonnet: 1 mục thấp, đã sửa.
+3. Test thời gian đo bằng thời gian CPU: commit `70af652`, `24b091c` (chưa push).
+   `.arch/system.arch` chưa có `testclock.rs` nên test dogfood đỏ từ `70af652`;
+   đã sửa trong cây làm việc (thêm vào component Util), commit cùng đợt 6.
+4. Đợt 6, hàng đợi (2026-10-19), CHƯA COMMIT: bạn chốt "làm theo đề xuất"
+   (trang https://claude.ai/artifact/9QrPEQYLevs4b2LWki6J2K). Đã có:
+   `scan/queue.rs` (Kafka, RabbitMQ, Redis pub/sub, Celery; Python, Go, Node;
+   hằng số cùng file, env, queue khai rồi dùng qua biến), `check` ghép theo hệ
+   và tên, `allow`, `link`, "chưa ghép" cho tên động, hook tìm phía bên kia;
+   tên từ env lần qua compose và manifest (chỉ giữ giá trị của biến mà mã đọc
+   làm tên topic, giữ TM-19); `init`, `scan`, `serve`; tài liệu; bộ đo:
+   repo `rabbitmq-tutorials`, thước đo `bench/queue_truth.py` (`ast`, `go/ast`)
+   khớp 37 + 13 + 54 (bộ mẫu `fixtures/queues`), bảng `consistency.QUEUE`, 4
+   kiểu phá mới (53). Threat model TM-40..43 còn "cần làm" tới khi reviewer
+   xác nhận. Reviewer opus vòng 1 (8 mục: hook chậm vì `psubscribe`, hằng số
+   không theo phạm vi, lời gọi nhận ra mà không báo tên, `init` chưa lần env,
+   bậc hai trên file lồng sâu, thiếu `link` chỉ báo đích đầu, `$(SECRET)` của
+   k8s, test dùng thời gian thực) đã sửa hết. Vòng 2 (7 mục: hook bên gửi Redis
+   không thấy `psubscribe`, hằng số trong callback, tham số TS có kiểu trả về,
+   nhiễu `res.send`/`ws.send`, bậc hai ở tham số lồng, vai của `cfg.Topic` Go,
+   oracle `QueueDeclare`) đã sửa. Vòng 3 (literal nhiều dòng bị coi là gán
+   nhiều vế, tên env bị bỏ khi biến không rõ là producer, client có chú thích
+   kiểu, kiểu trả về generic có phẩy, dòng dài bậc hai) đã sửa; thước đo khớp
+   bộ mẫu 72 và 4 repo; test lib 14 + tích hợp 19 đạt. TM-40..43 "đã có".
+   Kiểm chứng cuối có biên nhận (2026-10-19): `cargo test`, clippy, MSRV 1.88,
+   release, bộ đo 31 repo, oracle `--require …,helm`, sabotage 53 kiểu, `verify`
+   3/3, `check --strict` 0 (thêm `bench/fixtures/**` vào `.arch/.archignore`).
+   Chờ bạn cho commit.
+   Còn lại trong mốc: Overlay Kustomize (hướng B).
 
 **Đã quyết (2026-10-11): cạnh binding Python ↔ native tự viết.** Đã tìm theo
 skill reuse-best. Không công cụ tĩnh nào phủ cả PyO3, pybind11, nanobind
@@ -665,3 +689,12 @@ không có `link` là vi phạm, có `link` mà cụm chặn là cảnh báo (`-
 
 - [x] Chốt 4 câu về đọc chart Helm @ban: bạn chốt "làm theo đề xuất"; trang https://claude.ai/artifact/EhNC8dx9sjp8jmMgYqoL16 (khuyên tự render tập con template với values.yaml)
 - [x] Đọc chart Helm: render tập con template, manifest dựng ra đi qua bộ đọc Kubernetes; bộ đo so với `helm template`; tài liệu.
+
+### Tầng hạ tầng, đợt 6: hàng đợi và pub/sub
+
+- [x] Chốt 4 câu @ban: bạn chốt "làm theo đề xuất" (2026-10-19, trang https://claude.ai/artifact/9QrPEQYLevs4b2LWki6J2K): làm hàng đợi trước, Kustomize sau, Terraform để sau nữa; cạnh qua topic như gRPC (`allow` giữa component, `link` khi đã khai `service`); tên topic không cố định thì "chưa ghép", `--strict` tính, trừ hằng số cùng file và env khai trong compose, manifest; đợt đầu Celery, Kafka, RabbitMQ, Redis pub/sub cho Python, Go, Node. reuse-best: glia (giấy phép không thương mại, tree-sitter), GitNexus (TypeScript), grafel (daemon) đều không nhúng được vào CLI không dependency chạy trong hook; tự làm trên lexer sẵn có, oracle bằng `ast` của Python và go/ast.
+- [x] Bộ dò bên gửi, bên nhận (Python, Go, Node) theo tên topic, queue, task; hằng số cùng file; ghép, `allow`, `link`; hook tìm phía bên kia.
+- [x] Tên topic lấy từ env khai trong compose, manifest.
+- [x] `init --from-code`, `scan`, `export`/`serve` có cạnh qua hàng đợi; tài liệu.
+- [x] Bộ đo: repo thật có hàng đợi, oracle, sabotage; CI.
+- [ ] Overlay Kustomize (hướng B).

@@ -166,18 +166,18 @@ impl ConfigMap {
 
     /// Một khoá như biến môi trường tên `env`: dòng của khoá, và dữ kiện lấy
     /// từ giá trị (tên máy, hay giá trị nếu là `PYTHONPATH`, `FLASK_APP`).
-    pub fn entry(&self, item: &str, env: &str) -> Option<Env> {
+    pub fn entry(&self, item: &str, env: &str, wanted: &[String]) -> Option<Env> {
         self.data
             .iter()
             .find(|(k, _, _)| k == item)
-            .map(|(_, line, v)| compose::env_entry(env, *line, v))
+            .map(|(_, line, v)| compose::env_entry_with(env, *line, v, wanted))
     }
 
     /// Mọi khoá, như `envFrom` với tiền tố `prefix`.
-    pub fn entries(&self, prefix: &str) -> Vec<Env> {
+    pub fn entries(&self, prefix: &str, wanted: &[String]) -> Vec<Env> {
         self.data
             .iter()
-            .map(|(k, line, v)| compose::env_entry(&format!("{prefix}{k}"), *line, v))
+            .map(|(k, line, v)| compose::env_entry_with(&format!("{prefix}{k}"), *line, v, wanted))
             .collect()
     }
 }
@@ -330,13 +330,15 @@ pub fn looks_like(text: &str) -> bool {
 }
 
 /// Đếm và chép trong một file, có trần.
-struct Reader {
+struct Reader<'w> {
     b: Budget,
     facts: usize,
     objects: usize,
+    /// Biến môi trường mà mã đọc làm tên topic: giữ giá trị dạng tên của chúng.
+    wanted: &'w [String],
 }
 
-impl Reader {
+impl Reader<'_> {
     fn fact(&mut self, n: usize) -> bool {
         match self.facts.checked_sub(n) {
             Some(rest) => {
@@ -376,6 +378,12 @@ impl Reader {
 const MAX_LABELS: usize = 256;
 
 pub fn parse(text: &str) -> Result<File, yaml::Error> {
+    parse_with(text, &[])
+}
+
+/// Như [`parse`], và giữ giá trị dạng tên của các biến môi trường trong
+/// `wanted` (xem [`compose::parse_with`]).
+pub fn parse_with(text: &str, wanted: &[String]) -> Result<File, yaml::Error> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let doc = yaml::parse(text)?;
     let mut out = File::default();
@@ -386,6 +394,7 @@ pub fn parse(text: &str) -> Result<File, yaml::Error> {
         },
         facts: MAX_FACTS,
         objects: 0,
+        wanted,
     };
     for root in doc.documents() {
         // `kind: List`, `DeploymentList`… của `kubectl get -o yaml`: một tầng
@@ -857,8 +866,14 @@ fn container(n: Node<'_>, init: bool, r: &mut Reader) -> Container {
             } else {
                 raw.to_string()
             };
+            // `$(DB_PASSWORD)` thay vào giá trị: không giữ làm tên (TM-43).
+            let from_secret = raw
+                .split("$(")
+                .skip(1)
+                .any(|rest| rest.split_once(')').is_some_and(|(name, _)| compose::secret_key(name)));
+            let wanted: &[String] = if from_secret { &[] } else { r.wanted };
             if r.b.take(value.len()) {
-                c.env.push(compose::env_entry(key, e.line(), &value));
+                c.env.push(compose::env_entry_with(key, e.line(), &value, wanted));
                 earlier.push((key, value));
             }
         } else if let Some(cm) = e.get("valueFrom").and_then(|v| v.get("configMapKeyRef")) {
@@ -956,6 +971,7 @@ pub fn skaffold(text: &str) -> Result<Skaffold, yaml::Error> {
         },
         facts: MAX_FACTS,
         objects: 0,
+        wanted: &[],
     };
     for root in doc.documents() {
         let profiles: Vec<Node<'_>> = root
@@ -1093,6 +1109,7 @@ pub fn kustomization(text: &str) -> Result<Kustomization, yaml::Error> {
         },
         facts: MAX_FACTS,
         objects: 0,
+        wanted: &[],
     };
     let Some(root) = doc.documents().next() else {
         return Ok(out);
@@ -1376,10 +1393,10 @@ data:
         );
         let cm = &f.config_maps[0];
         assert_eq!(
-            cm.entry("cache", "CACHE_ADDR").unwrap().hosts[0].name,
+            cm.entry("cache", "CACHE_ADDR", &[]).unwrap().hosts[0].name,
             "redis-cart"
         );
-        assert_eq!(cm.entries("APP_")[0].key, "APP_cache");
+        assert_eq!(cm.entries("APP_", &[])[0].key, "APP_cache");
         // Secret không vào đâu cả, và giá trị env không được giữ.
         let debug = format!("{f:?}");
         assert!(!debug.contains("hunter2"));

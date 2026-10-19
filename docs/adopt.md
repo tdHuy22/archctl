@@ -133,7 +133,7 @@ lại phải ra **0 vi phạm**. Mỗi vi phạm còn lại là một chỗ bộ
 kiểm chứng nhìn khác nhau về cùng một import — tức là một lỗi, không phải một
 phát hiện.
 
-Bất biến này được kiểm trên ba mươi repo thật, ghim theo commit, bằng
+Bất biến này được kiểm trên ba mươi mốt repo thật, ghim theo commit, bằng
 một lệnh chạy lại được — `python3 bench/bench.py`, xem
 [bench/README.md](../bench/README.md) — và CI chạy nó ở mỗi pull request. Phần
 lõi của nó còn có test giữ lại trong `tests/discover.rs`.
