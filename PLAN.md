@@ -5,7 +5,7 @@ Mô tả sản phẩm ở [README.md](README.md); file này chỉ ghi trạng th
 
 ## §0 Đang ở đâu, việc tiếp theo
 
-Cập nhật 2026-10-19.
+Cập nhật 2026-10-20.
 
 ### Đã xong, có bằng chứng
 
@@ -448,7 +448,7 @@ git, `cargo clean` dọn.
    3/3, `check --strict` 0 (thêm `bench/fixtures/**` vào `.arch/.archignore`).
    Commit `bb2ac35`, lên main sau CI xanh 5/5 (run 39258658632) cùng 70af652,
    24b091c, 29a10a0; nhánh `thu/dot6` đã xoá.
-5. Việc 10.1 overlay Kustomize (2026-10-19), XONG, CHƯA COMMIT: bạn chốt
+5. Việc 10.1 overlay Kustomize (2026-10-19), XONG, commit `217b5cb` (chưa push): bạn chốt
    "làm theo đề xuất" (trang https://claude.ai/artifact/EYxE6c32ef5iUyyNXHet2b).
    `scan/kustomize.rs` dựng tập con (cây giá trị nhớ nguồn từng dòng);
    `deploy.rs` dựng mọi kustomization gốc trừ component, mỗi bản dựng là một
@@ -464,8 +464,8 @@ git, `cargo clean` dọn.
    Biên nhận ALL-OK trên mã cuối (logs-k10): `cargo test` (709), clippy,
    MSRV 1.88, release, bộ đo 31 repo 0 bất nhất 1085/1085, oracle khớp hết
    (microservices-demo 142, bộ mẫu 43), sabotage 56 kiểu 0 trượt, `verify`
-   3/3, `check --strict` 0. Tiếp: commit khi bạn yêu cầu.
-6. Test thời gian sang thời gian CPU (2026-10-20), CHƯA COMMIT: 12 chỗ đo
+   3/3, `check --strict` 0.
+6. Test thời gian sang thời gian CPU (2026-10-20), commit `f0101b6` (chưa push): 12 chỗ đo
    ngưỡng thời gian ở `tests/ffi.rs`, `grpc.rs`, `glob.rs`, `infra.rs` dùng
    `testclock::Clock` (thư viện chạy một luồng nên đo đủ). Giữ đồng hồ thật,
    có ghi lý do: test FIFO `infra.rs` (luồng treo ở `open` không tốn CPU);
@@ -721,5 +721,5 @@ không có `link` là vi phạm, có `link` mà cụm chặn là cảnh báo (`-
 - [x] `init --from-code`, `scan`, `export`/`serve` có cạnh qua hàng đợi; tài liệu.
 - [x] Bộ đo: repo thật có hàng đợi, oracle, sabotage; CI.
 - [x] Chốt 4 câu về overlay Kustomize @ban: bạn chốt "làm theo đề xuất" (2026-10-19, trang https://claude.ai/artifact/EYxE6c32ef5iUyyNXHet2b): mọi kustomization gốc (không bị kustomization khác trỏ tới) là một bản dựng, kiểm như bản sao của workload; áp tập con (`resources`, `components`, `patches` strategic merge và JSON 6902, `namePrefix`/`nameSuffix` kèm tham chiếu, `images`, `namespace`, `labels`/`commonLabels` kèm selector, `configMapGenerator`, `replicas`), ngoài tập con thì cả bản dựng "chưa đọc được"; `k8s:<tên gốc>` khớp tên đã thêm tiền tố, `k8s:<thư mục kustomization>/<tên>` chọn một bản dựng; thước đo `kustomize build` bản ghim sha256 (`--require kustomize`). reuse-best: Kustomize chỉ có bản Go (sigs.k8s.io/kustomize), không nhúng được vào CLI Rust không dependency; tự dựng tập con, đo bằng binary chính thức.
-- [x] Dựng overlay Kustomize: bản dựng từ kustomization gốc đi qua bộ đọc manifest; `k8s:` khớp tên gốc; dòng vi phạm trỏ về file gây ra giá trị. (2026-10-19, chưa commit; biên nhận ALL-OK logs-k10)
-- [x] Thước đo `kustomize build` ghim sha256, bộ mẫu, kiểu phá; tài liệu. (2026-10-19, chưa commit; biên nhận ALL-OK logs-k10)
+- [x] Dựng overlay Kustomize: bản dựng từ kustomization gốc đi qua bộ đọc manifest; `k8s:` khớp tên gốc; dòng vi phạm trỏ về file gây ra giá trị. (2026-10-19, commit `217b5cb`; biên nhận ALL-OK logs-k10)
+- [x] Thước đo `kustomize build` ghim sha256, bộ mẫu, kiểu phá; tài liệu. (2026-10-19, commit `217b5cb`; biên nhận ALL-OK logs-k10)
