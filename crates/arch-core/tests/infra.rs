@@ -4,6 +4,12 @@
 use arch_core::check::{Reason, Report, Via, check, check_files};
 use std::path::PathBuf;
 
+// Đồng hồ thời gian CPU của luồng, dùng chung với test trong lib: máy tải nặng
+// (CI, test chạy song song) không làm test thời gian trượt.
+#[path = "../src/testclock.rs"]
+#[allow(dead_code)]
+mod testclock;
+
 struct Repo(PathBuf);
 
 impl Repo {
@@ -286,6 +292,8 @@ fn file_cau_hinh_qua_lon_fifo_symlink_giua_bi_chan() {
         assert!(made.is_ok_and(|s| s.success()), "cần mkfifo");
     }
     r.write(".arch/system.arch", "service A from compose:a\nservice Leaked from compose:leaked\n");
+    // Đồng hồ thật: luồng treo ở `open` của FIFO gần như không tốn CPU, nên
+    // đồng hồ CPU không thấy được lần treo cần bắt.
     let start = std::time::Instant::now();
     let report = r.report();
     assert!(start.elapsed() < std::time::Duration::from_secs(5), "FIFO không được làm treo: {:?}", start.elapsed());
@@ -307,7 +315,7 @@ fn file_cau_hinh_qua_lon_fifo_symlink_giua_bi_chan() {
 #[test]
 fn thu_dung_chung_doc_mot_lan_va_alias_co_tran() {
     let timed = |r: &Repo| {
-        let start = std::time::Instant::now();
+        let start = testclock::Clock::start();
         let report = r.report();
         assert!(start.elapsed() < std::time::Duration::from_secs(5), "{:?}", start.elapsed());
         report
@@ -399,7 +407,7 @@ fn compose_doi_khang_khong_lam_treo() {
     r.write("docker-compose.yml", &text);
     r.write("deep/docker-compose.yml", &format!("services: {}", "[".repeat(200_000)));
     r.write(".arch/system.arch", "service A from compose:a\n");
-    let start = std::time::Instant::now();
+    let start = testclock::Clock::start();
     let report = r.report();
     assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?}", start.elapsed());
     assert!(report.deploy_unread.iter().any(|u| u.file == "deep/docker-compose.yml" && u.why.contains("lồng sâu")), "{:?}", report.deploy_unread);
@@ -460,7 +468,7 @@ fn compose_nhieu_muc_doc_tuyen_tinh() {
     }
     r.write("deploy/docker-compose.yml", &many);
     r.write(".arch/system.arch", "service A from compose:a\nservice B from compose:b\nlink A -> B\n");
-    let start = std::time::Instant::now();
+    let start = testclock::Clock::start();
     let report = r.report();
     assert!(start.elapsed() < std::time::Duration::from_secs(5), "{:?}", start.elapsed());
     assert!(report.violations.is_empty(), "{:?}", report.violations);
@@ -481,7 +489,7 @@ fn alias_nhan_so_muc_dung_o_tran() {
     }
     r.write("docker-compose.yml", &text);
     r.write(".arch/system.arch", "service A from compose:s0\n");
-    let start = std::time::Instant::now();
+    let start = testclock::Clock::start();
     let report = r.report();
     assert!(start.elapsed() < std::time::Duration::from_secs(5), "{:?}", start.elapsed());
     assert!(report.deploy_unread.iter().any(|u| u.why.contains("quá")), "{:?}", report.deploy_unread);
@@ -541,7 +549,7 @@ fn dockerfile_va_script_toa_nhanh_khong_lam_treo() {
     r.write("run/start.sh", &(0..10).map(|k| format!("/run/s0_{k}.sh\n")).collect::<String>());
     r.write("compose.yaml", "services:\n  a:\n    build: .\n");
     r.write(".arch/system.arch", "component Src at src/**\nservice A from compose:a runs Src\n");
-    let start = std::time::Instant::now();
+    let start = testclock::Clock::start();
     let report = r.report();
     assert!(start.elapsed() < std::time::Duration::from_secs(5), "{:?}", start.elapsed());
     assert!(

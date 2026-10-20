@@ -10,6 +10,12 @@
 use arch_core::check::{Via, check};
 use std::path::PathBuf;
 
+// Đồng hồ thời gian CPU của luồng, dùng chung với test trong lib: máy tải nặng
+// (CI, test chạy song song) không làm test thời gian trượt.
+#[path = "../src/testclock.rs"]
+#[allow(dead_code)]
+mod testclock;
+
 const ARCH: &str = "\
 component App    at app/**    @human #accepted
 component Native at native/** @human #accepted
@@ -573,7 +579,7 @@ fn setup_py_long_nhau_sau_khong_lam_treo() {
         .write("native/a.cpp", "PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {}\n")
         .write("app/__init__.py", "")
         .write("app/x.py", "from app import _C\n");
-    let started = std::time::Instant::now();
+    let started = testclock::Clock::start();
     let _ = repo.edges();
     assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
 }
@@ -592,7 +598,7 @@ fn setup_py_nhieu_ten_extension_khong_lam_cham_hook() {
     repo.write("setup.py", &src)
         .write("native/a.cpp", "PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {}\n")
         .write("app/x.py", "import n49999\nimport numpy\n");
-    let started = std::time::Instant::now();
+    let started = testclock::Clock::start();
     let _ = repo.edges();
     assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
 }
@@ -605,7 +611,7 @@ fn setup_py_tro_toi_thiet_bi_khong_bi_doc_mai() {
     let repo = Repo::new("ext-devzero");
     repo.write("app/x.py", "import os\n");
     std::os::unix::fs::symlink("/dev/zero", repo.0.join("setup.py")).unwrap();
-    let started = std::time::Instant::now();
+    let started = testclock::Clock::start();
     let _ = repo.edges();
     assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
 }

@@ -3,6 +3,12 @@
 use arch_core::check::{Reason, Report, UnresolvedReason, Via, check, check_files};
 use std::path::PathBuf;
 
+// Đồng hồ thời gian CPU của luồng, dùng chung với test trong lib: máy tải nặng
+// (CI, test chạy song song) không làm test thời gian trượt.
+#[path = "../src/testclock.rs"]
+#[allow(dead_code)]
+mod testclock;
+
 struct Repo(PathBuf);
 
 impl Repo {
@@ -284,7 +290,7 @@ fn proto_doi_khang_khong_lam_treo() {
     r.write("proto/deep.proto", &format!("service S {{ {} }}", "{".repeat(500_000)));
     let many: String = (0..5000).map(|i| format!("service S{i} {{ rpc A(B) returns (C); }}\n")).collect();
     r.write("proto/many.proto", &many);
-    let start = std::time::Instant::now();
+    let start = testclock::Clock::start();
     let report = r.partial(&["app/client/c.py"]);
     assert!(start.elapsed() < std::time::Duration::from_secs(5), "{:?}", start.elapsed());
     assert_eq!(rpc(&report), ["NoAllow Client -> Server app/client/c.py:4"]);
@@ -306,7 +312,7 @@ fn nhieu_loi_goi_va_nhieu_proto_khong_lam_treo() {
         r.write(&format!("app/server/m{f}.py"), &"x = 1\n".repeat(1500));
     }
     for (label, report) in [("cả repo", None), ("hook", Some(["app/client/c.py"]))] {
-        let start = std::time::Instant::now();
+        let start = testclock::Clock::start();
         let report = match report {
             None => r.report(),
             Some(files) => r.partial(&files),

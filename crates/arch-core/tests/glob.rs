@@ -10,6 +10,12 @@
 
 use arch_core::glob::matches;
 
+// Đồng hồ thời gian CPU của luồng, dùng chung với test trong lib: máy tải nặng
+// (CI, test chạy song song) không làm test thời gian trượt.
+#[path = "../src/testclock.rs"]
+#[allow(dead_code)]
+mod testclock;
+
 fn old(pattern: &str, path: &str) -> bool {
     fn segments(pat: &[&str], path: &[&str]) -> bool {
         match pat.split_first() {
@@ -80,7 +86,7 @@ fn mau_nhieu_sao_khong_treo() {
     // Bản cũ chạy quá mười lăm giây trên đúng trường hợp này.
     let path = format!("src/{}.ts", "a".repeat(40));
     let pattern = format!("src/{}*b.ts", "*a".repeat(12));
-    let start = std::time::Instant::now();
+    let start = testclock::Clock::start();
     assert!(!matches(&pattern, &path));
     assert!(start.elapsed().as_millis() < 100, "mất {:?}", start.elapsed());
 }
@@ -89,7 +95,7 @@ fn mau_nhieu_sao_khong_treo() {
 fn nhieu_hai_sao_khong_treo() {
     let path = "a/".repeat(60) + "x.ts";
     let pattern = "**/".repeat(12) + "*.rs";
-    let start = std::time::Instant::now();
+    let start = testclock::Clock::start();
     assert!(!matches(&pattern, &path));
     assert!(start.elapsed().as_millis() < 100, "mất {:?}", start.elapsed());
 }
