@@ -174,9 +174,9 @@ https://claude.ai/code/artifact/2b26df5d-d6b0-40d0-a398-7e574c7d1387
   lối vào từ Internet (Ingress, Gateway API, Istio, `LoadBalancer`, cổng
   compose) cần `link Internet -> …`; tên máy viết thẳng trong mã cũng cần
   `link`.**
-  Chart Helm được tự dựng từ `values.yaml` (tập con template; ngoài tập con thì
-  báo chưa đọc). Patch Kustomize, Terraform và gRPC của Java, C# thì chưa (patch đổi lệnh
-  được báo là chưa đọc); cạnh mạng chỉ có lúc chạy (tên máy ghép trong mã,
+  Chart Helm được tự dựng từ `values.yaml`, overlay Kustomize được tự dựng
+  như `kustomize build` (tập con; ngoài tập con thì báo chưa đọc). Terraform
+  và gRPC của Java, C# thì chưa; cạnh mạng chỉ có lúc chạy (tên máy ghép trong mã,
   service discovery) thì không thấy — xem [docs/infra.md](docs/infra.md).
 - **File trên 4 MB không được dò**, và được báo ra. Bộ dò giữ cả dãy token
   trong bộ nhớ, nên một bundle đã minify 32 MB ngốn hơn một gigabyte.

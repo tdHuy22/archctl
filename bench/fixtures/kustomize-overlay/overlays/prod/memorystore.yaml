@@ -1,0 +1,14 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cart
+spec:
+  template:
+    spec:
+      containers:
+      - name: server
+        env:
+        - name: REDIS_ADDR
+          value: memorystore.example:6379
+        - name: TRACE
+          value: "on"

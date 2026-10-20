@@ -1,0 +1,15 @@
+# Overlay chồng overlay: JSON 6902 ngoài cùng chọn theo tên, namespace đã đổi
+# ở tầng trong, rồi tầng này đổi namespace lần nữa.
+resources:
+- inner
+namespace: stage
+nameSuffix: -s
+patches:
+- target:
+    kind: Deployment
+    name: in-cart
+    namespace: inner-ns
+  patch: |-
+    - op: replace
+      path: /spec/template/spec/containers/0/env/0/value
+      value: in-redis-cart:6379

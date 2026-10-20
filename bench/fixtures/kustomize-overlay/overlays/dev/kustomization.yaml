@@ -1,0 +1,7 @@
+resources:
+- ../../base
+labels:
+- pairs:
+    env: dev
+  includeSelectors: false
+  includeTemplates: true

@@ -91,6 +91,9 @@ pub struct Container {
     pub env: Vec<Env>,
     pub env_from: Vec<EnvFrom>,
     pub refs: Vec<ConfigRef>,
+    /// File khai `command`, `args` khi khác file của workload (patch Kustomize).
+    pub command_origin: Option<String>,
+    pub args_origin: Option<String>,
 }
 
 /// `envFrom: - configMapRef: {name}`: mọi khoá của ConfigMap thành biến môi
@@ -157,6 +160,9 @@ pub struct ConfigMap {
     /// Khoá, dòng, giá trị. Giá trị chỉ dùng để tìm tên máy, không bao giờ
     /// được in (TM-19).
     data: Vec<(String, usize, String)>,
+    /// File khai từng khoá khi khác file của ConfigMap: ConfigMap sinh từ file
+    /// env của Kustomize, patch sửa `data`. Rỗng: mọi khoá ở file của nó.
+    origins: Vec<Option<String>>,
 }
 
 impl ConfigMap {
@@ -167,17 +173,23 @@ impl ConfigMap {
     /// Một khoá như biến môi trường tên `env`: dòng của khoá, và dữ kiện lấy
     /// từ giá trị (tên máy, hay giá trị nếu là `PYTHONPATH`, `FLASK_APP`).
     pub fn entry(&self, item: &str, env: &str, wanted: &[String]) -> Option<Env> {
-        self.data
-            .iter()
-            .find(|(k, _, _)| k == item)
-            .map(|(_, line, v)| compose::env_entry_with(env, *line, v, wanted))
+        let i = self.data.iter().position(|(k, _, _)| k == item)?;
+        let (_, line, v) = &self.data[i];
+        let mut e = compose::env_entry_with(env, *line, v, wanted);
+        e.origin = self.origins.get(i).cloned().flatten();
+        Some(e)
     }
 
     /// Mọi khoá, như `envFrom` với tiền tố `prefix`.
     pub fn entries(&self, prefix: &str, wanted: &[String]) -> Vec<Env> {
         self.data
             .iter()
-            .map(|(k, line, v)| compose::env_entry_with(&format!("{prefix}{k}"), *line, v, wanted))
+            .enumerate()
+            .map(|(i, (k, line, v))| {
+                let mut e = compose::env_entry_with(&format!("{prefix}{k}"), *line, v, wanted);
+                e.origin = self.origins.get(i).cloned().flatten();
+                e
+            })
             .collect()
     }
 }
@@ -251,6 +263,23 @@ pub struct NetPolicy {
 impl File {
     /// Đổi mọi số dòng qua `map`: manifest dựng từ template Helm báo dòng của
     /// template, không phải dòng trong văn bản dựng ra.
+    /// Gắn file nguồn cho env và lệnh container theo dòng hiện tại (dòng của
+    /// văn bản dựng ra), trước khi [`File::remap_lines`] đổi dòng.
+    pub fn remap_origins(&mut self, origin: &dyn Fn(usize) -> Option<String>) {
+        for w in &mut self.workloads {
+            for c in &mut w.containers {
+                c.command_origin = c.command.as_ref().and_then(|(_, l)| origin(*l));
+                c.args_origin = c.args.as_ref().and_then(|(_, l)| origin(*l));
+                for e in &mut c.env {
+                    e.origin = origin(e.line);
+                }
+            }
+        }
+        for m in &mut self.config_maps {
+            m.origins = m.data.iter().map(|(_, l, _)| origin(*l)).collect();
+        }
+    }
+
     pub fn remap_lines(&mut self, map: &dyn Fn(usize) -> usize) {
         for w in &mut self.workloads {
             w.line = map(w.line);
@@ -715,6 +744,7 @@ fn object(n: Node<'_>, r: &mut Reader, out: &mut File) -> Result<(), yaml::Error
                 namespace: ns_of(r),
                 line,
                 data,
+                origins: Vec::new(),
             };
             out.config_maps.push(c);
         }

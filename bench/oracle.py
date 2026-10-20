@@ -723,6 +723,70 @@ def build_helm(cache):
     return str(exe)
 
 
+# `kustomize` bản ghim, sha256 lấy từ `checksums.txt` chính thức của bản phát
+# hành. Chỉ khi `--require kustomize`.
+KUSTOMIZE_VERSION = "v5.8.1"
+KUSTOMIZE_SHA256 = {
+    "darwin_arm64": "8886f8a78474e608cc81234f729fda188a9767da23e28925802f00ece2bab288",
+    "linux_amd64": "029a7f0f4e1932c52a0476cf02a0fd855c0bb85694b82c338fc648dcb53a819d",
+}
+
+
+def build_kustomize(cache):
+    import hashlib
+    import platform
+    import tarfile
+    import urllib.request
+    osname = {"Darwin": "darwin", "Linux": "linux"}.get(platform.system())
+    arch = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "amd64", "AMD64": "amd64"}.get(platform.machine())
+    plat = f"{osname}_{arch}"
+    if plat not in KUSTOMIZE_SHA256:
+        bench.die(f"không có bản kustomize ghim cho {plat}")
+    home = Path(cache) / "kustomize-oracle"
+    exe = home / f"kustomize-{KUSTOMIZE_VERSION}-{plat}"
+    if exe.exists():
+        return str(exe)
+    home.mkdir(parents=True, exist_ok=True)
+    url = (f"https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F{KUSTOMIZE_VERSION}/"
+           f"kustomize_{KUSTOMIZE_VERSION}_{plat}.tar.gz")
+    try:
+        data = urllib.request.urlopen(url, timeout=120).read()
+    except OSError as e:
+        bench.die(f"tải kustomize hỏng: {e}")
+    if hashlib.sha256(data).hexdigest() != KUSTOMIZE_SHA256[plat]:
+        bench.die(f"kustomize tải về sai sha256: {url}")
+    tgz = home / "kustomize.tar.gz"
+    tgz.write_bytes(data)
+    with tarfile.open(tgz) as t:
+        exe.write_bytes(t.extractfile(t.getmember("kustomize")).read())
+    exe.chmod(0o755)
+    tgz.unlink()
+    return str(exe)
+
+
+# Đuôi băm Kustomize thêm vào tên ConfigMap, Secret sinh ra (archctl không thêm).
+KUSTOMIZE_HASH = re.compile(r"^(.+)-[bcdfghjklmnpqrstvwxz2456789]{10}$")
+
+
+def kustomize_build(kustomize, root, built_roots):
+    """`{gốc: [văn bản từng tài nguyên]}` theo `kustomize build`, và gốc mà
+    kustomize không dựng được. Đuôi băm của ConfigMap sinh ra được bỏ."""
+    out, failed = {}, []
+    for d in built_roots:
+        p = subprocess.run([kustomize, "build", d or "."], cwd=root, capture_output=True, text=True, timeout=300,
+                           env={"PATH": os.environ.get("PATH", ""), "HOME": str(root)})
+        if p.returncode != 0:
+            failed.append(d)
+            continue
+        text = p.stdout
+        for name in re.findall(r"^  name: (\S+)$", text, re.M):
+            m = KUSTOMIZE_HASH.match(name)
+            if m and re.search(rf"^kind: (ConfigMap|Secret)\n(?:.*\n)*?  name: {re.escape(name)}$", text, re.M):
+                text = re.sub(rf"\b{re.escape(name)}\b", m.group(1), text)
+        out[d] = [part for part in re.split(r"^---\s*$", text, flags=re.M) if part.strip()]
+    return out, failed
+
+
 def helm_render(helm, root, charts, workdir):
     """`{template: [thư mục chart, văn bản]}` theo `helm template`, và chart
     helm không dựng được."""
@@ -779,6 +843,107 @@ def compare_helm(ht, have_all, have_rendered, want_all, helm_files, failed):
     for file in sorted(have_rendered - helm_files):
         if have_all.get(file):
             ht.note(f"{file}: archctl dựng ra mà helm không")
+
+
+def built_key_of(built):
+    """Khoá `k8s:` thuộc một bản dựng Kustomize: `k8s:<gốc>/<tên>`; gốc ở thư
+    mục gốc repo thì `k8s:<tên>` (không có `/`)."""
+    roots = [b["root"] for b in built]
+    return lambda k: any(k.startswith(f"k8s:{r}/") if r else (k.startswith("k8s:") and "/" not in k[4:]) for r in roots)
+
+
+def kustomize_keys(built, kustomize_on, have, want):
+    """Đưa cạnh, NetworkPolicy, lối vào của bản dựng về cùng khoá ở hai phía:
+    tên workload của thước đo (đã thêm tiền tố) đổi về tên archctl giữ (trước
+    `namePrefix`); cạnh bản dựng so không kèm file, dòng (kustomize không giữ
+    nguồn); không có kustomize thì bỏ mọi khoá bản dựng ở cả hai phía."""
+    renamed = {}
+    for b in built:
+        prefix = f"k8s:{b['root'] + '/' if b['root'] else ''}"
+        for d in b["docs"]:
+            for w in d["facts"].get("workloads", []):
+                renamed[prefix + w["name"]] = prefix + d["original"]
+    ren = lambda k: renamed.get(k, k)
+    w_edges, w_guards, w_exposed = want
+    w_edges = {"\t".join([ren(k.split("\t")[0])] + k.split("\t")[1:]): {ren(t) for t in v} for k, v in w_edges.items()}
+    w_guards = {ren(k): v for k, v in w_guards.items()}
+    w_exposed = {ren(k) for k in w_exposed}
+    built_key = built_key_of(built)
+    out = []
+    for edges, guards, exposed in (have, (w_edges, w_guards, w_exposed)):
+        if not kustomize_on:
+            edges = {k: collections.Counter({t: n for t, n in collections.Counter(v).items() if not built_key(t)})
+                     for k, v in edges.items() if not built_key(k)}
+            guards = {k: v for k, v in guards.items() if not built_key(k)}
+            exposed = {k for k in exposed if not built_key(k)}
+        # Bỏ dòng thì nhiều dòng gộp một khoá: đếm số lần mỗi đích (Counter),
+        # để mất một cạnh trong số nhiều dòng cùng tên máy vẫn lộ ra.
+        dropped = collections.defaultdict(collections.Counter)
+        for k, v in edges.items():
+            src, at, host = k.split("\t")
+            dropped[f"{src}\t{'?' if built_key(src) else at}\t{host}"].update(v)
+        out.append((dict(dropped), guards, exposed))
+    return out[0], out[1]
+
+
+def kustomize_roots(python, root, files):
+    p = subprocess.run([python, "-I", str(HERE / "k8s_truth.py"), "kroots", str(root)],
+                       input="".join(f"{f}\n" for f in files), capture_output=True, text=True, timeout=300)
+    if p.returncode != 0:
+        bench.die(f"thước đo Kustomize hỏng: {p.stderr.strip()[-400:]}")
+    return json.loads(p.stdout)
+
+
+# Gốc Kustomize mà archctl được phép báo "chưa đọc được" dù `kustomize build`
+# dựng được (dùng phép ngoài tập con), theo repo. Gốc khác mà archctl không
+# dựng là lệch: "chưa đọc được" không được che một bản dựng hỏng.
+KUSTOMIZE_UNREAD_OK = {}
+
+
+def check_roots(t, want_roots, built, unread, kustomize=None, root=None, unread_ok=()):
+    """Gốc thước đo tự tính (PyYAML) so với gốc archctl dựng hay báo không dựng
+    được: gốc bị bỏ sót mà không báo gì là cạnh mất im lặng. Có `kustomize` thì
+    gốc archctl báo không dựng được mà kustomize dựng được cũng là lệch (trừ
+    `unread_ok`)."""
+    why = {}
+    for u in unread:
+        for r in re.findall(r"bản dựng `([^`]*)`", u["why"]):
+            why.setdefault("" if r == "." else r, u["why"])
+    have = {b["root"] for b in built} | set(why)
+    for r in sorted(set(want_roots) - have):
+        t.note(f"{r or '.'}: kustomization gốc mà archctl không dựng, không báo")
+    for r in sorted(have - set(want_roots)):
+        t.note(f"{r or '.'}: archctl dựng mà thước đo không coi là gốc")
+    if why and kustomize is None:
+        print(f"      ({len(why)} bản dựng Kustomize archctl báo chưa đọc được; không có kustomize để so)")
+    if kustomize is not None:
+        # Gốc có resource từ xa: kustomize sẽ `git clone` URL do repo viết,
+        # tốn mạng và không ổn định; archctl cố ý không tải, không so.
+        ok, _ = kustomize_build(kustomize, root, sorted(r for r in why if r not in unread_ok and "từ xa" not in why[r]))
+        for r in sorted(ok):
+            t.note(f"{r or '.'}: archctl không dựng mà kustomize dựng được: {why[r][:160]}")
+
+
+def compare_kustomize(t, built, kbuilt, kfailed, truth):
+    """So dữ kiện từng bản dựng archctl với `kustomize build`, theo gốc (không
+    kèm dòng: kustomize không giữ nguồn)."""
+    for d in kfailed:
+        t.note(f"{d or '.'}: kustomize build không dựng được mà archctl dựng được")
+    for b in built:
+        r = b["root"]
+        if r in kfailed:
+            continue
+        have = collections.Counter(s for d in b["docs"] for (_, s) in file_facts(d["facts"]))
+        want = collections.Counter()
+        for f, v in truth.items():
+            if f.startswith(f"{r + '/' if r else ''}<kustomize>#") and isinstance(v, collections.Counter):
+                want.update(v)
+        t.files += 1
+        t.imports += sum(want.values())
+        for x in sorted((want - have).elements()):
+            t.note(f"{r or '.'} thiếu: {x}")
+        for x in sorted((have - want).elements()):
+            t.note(f"{r or '.'} thừa: {x}")
 
 
 def helm_truth(python, helm_json):
@@ -909,6 +1074,58 @@ def yaml_files(root):
                   if f and (root / f).is_file() and not (root / f).is_symlink())
 
 
+def file_facts(f):
+    """Dữ kiện `(dòng, chuỗi)` của một file manifest trong `scan --json`."""
+    facts = []
+    for a in f.get("artifacts", []):
+        facts.append((a["line"], f"artifact {a['image']} context={a['context']} dockerfile={a['dockerfile']} "
+                                 f"target={a['target']}"))
+    for s in f.get("services", []):
+        facts.append((s["line"], f"Service {s['name']} ns={s['namespace']} selector={json.dumps(s['selector'])}"))
+        if s.get("exposed"):
+            facts.append((s["line"], f"Service {s['name']} exposed={s['exposed']}"))
+    for r in f.get("routes", []):
+        if not r["public"]:
+            continue
+        facts.append((r["line"], f"{r['kind']} {r['name']} ns={r['namespace']}"))
+        facts += [(l, f"{r['name']}.backend {n} ns={ns}") for n, ns, l in r["services"]]
+        facts += [(l, f"{r['name']}.host {h}") for h, l in r["hosts"]]
+        facts += [(l, f"{r['name']}.delegate {d} ns={ns}") for d, ns, l in r["delegates"]]
+    compact = lambda x: json.dumps(x, separators=(",", ":"), ensure_ascii=False)
+    for pol in f.get("policies", []):
+        name = pol["name"]
+        facts.append((pol["line"], f"NetworkPolicy {name} ns={pol['namespace']} pods={compact(pol['pods'])} "
+                                   f"ingress={pol['ingress'] is not None} egress={pol['egress'] is not None}"))
+        for side in ("ingress", "egress"):
+            for rule in pol[side] or []:
+                facts.append((rule["line"], f"{name}.{side}.rule"))
+                for p in rule["peers"]:
+                    facts.append((p["line"], f"{name}.{side}.peer pods={compact(p['pods'])} "
+                                             f"namespaces={compact(p['namespaces'])} ip={p['ip']}"))
+    for m in f.get("configMaps", []):
+        facts.append((m["line"], f"ConfigMap {m['name']} ns={m['namespace']}"))
+        facts += [(l, f"{m['name']}.data {k}") for k, l in m["keys"]]
+    for kind, name, l in f.get("unknown", []):
+        facts.append((l, f"unknown {kind} {name}"))
+    for w in f.get("workloads", []):
+        name = w["name"]
+        facts.append((w["line"], f"{w['kind']} {name} ns={w['namespace']} labels={json.dumps(w['labels'])}"))
+        if w.get("host"):
+            facts.append((w["line"], f"{name}.host {w['host']}"))
+        for c in w["containers"]:
+            cn = c["name"]
+            facts.append((c["line"], f"{name}.container {cn} init={c['init']} image={c['image']}"))
+            for k in ("command", "args"):
+                if c[k] is not None:
+                    facts.append((c[k]["line"], f"{name}.{cn}.{k}={json.dumps(c[k]['argv'], ensure_ascii=False)}"))
+            if c["workingDir"] is not None:
+                facts.append((c["line"], f"{name}.{cn}.workingDir={c['workingDir']}"))
+            facts += [(e["line"], f"{name}.{cn}.env {e['key']}") for e in c["env"]]
+            facts += [(r["line"], f"{name}.{cn}.ref {r['key']}={r['configMap']}/{r['item']}") for r in c["configRefs"]]
+            facts += [(e["line"], f"{name}.{cn}.envFrom {e['configMap']} prefix={e['prefix']}") for e in c["envFrom"]]
+    return facts
+
+
 def archctl_k8s(archctl, root, files):
     """Dữ kiện từng manifest (`{file: Counter}` hay chuỗi lỗi) và cạnh
     (`{"<khoá>\\t<file>:<dòng>\\t<máy>": {đích}}`) theo `archctl scan`."""
@@ -927,55 +1144,10 @@ def archctl_k8s(archctl, root, files):
         if "error" in f:
             out[f["file"]] = f"ERR {f['error']}"
             continue
-        facts = []
-        for a in f.get("artifacts", []):
-            facts.append((a["line"], f"artifact {a['image']} context={a['context']} dockerfile={a['dockerfile']} "
-                                     f"target={a['target']}"))
-        for s in f.get("services", []):
-            facts.append((s["line"], f"Service {s['name']} ns={s['namespace']} selector={json.dumps(s['selector'])}"))
-            if s.get("exposed"):
-                facts.append((s["line"], f"Service {s['name']} exposed={s['exposed']}"))
-        for r in f.get("routes", []):
-            if not r["public"]:
-                continue
-            facts.append((r["line"], f"{r['kind']} {r['name']} ns={r['namespace']}"))
-            facts += [(l, f"{r['name']}.backend {n} ns={ns}") for n, ns, l in r["services"]]
-            facts += [(l, f"{r['name']}.host {h}") for h, l in r["hosts"]]
-            facts += [(l, f"{r['name']}.delegate {d} ns={ns}") for d, ns, l in r["delegates"]]
-        compact = lambda x: json.dumps(x, separators=(",", ":"), ensure_ascii=False)
-        for pol in f.get("policies", []):
-            name = pol["name"]
-            facts.append((pol["line"], f"NetworkPolicy {name} ns={pol['namespace']} pods={compact(pol['pods'])} "
-                                       f"ingress={pol['ingress'] is not None} egress={pol['egress'] is not None}"))
-            for side in ("ingress", "egress"):
-                for rule in pol[side] or []:
-                    facts.append((rule["line"], f"{name}.{side}.rule"))
-                    for p in rule["peers"]:
-                        facts.append((p["line"], f"{name}.{side}.peer pods={compact(p['pods'])} "
-                                                 f"namespaces={compact(p['namespaces'])} ip={p['ip']}"))
-        for m in f.get("configMaps", []):
-            facts.append((m["line"], f"ConfigMap {m['name']} ns={m['namespace']}"))
-            facts += [(l, f"{m['name']}.data {k}") for k, l in m["keys"]]
-        for kind, name, l in f.get("unknown", []):
-            facts.append((l, f"unknown {kind} {name}"))
-        for w in f.get("workloads", []):
-            name = w["name"]
-            facts.append((w["line"], f"{w['kind']} {name} ns={w['namespace']} labels={json.dumps(w['labels'])}"))
-            if w.get("host"):
-                facts.append((w["line"], f"{name}.host {w['host']}"))
-            for c in w["containers"]:
-                cn = c["name"]
-                facts.append((c["line"], f"{name}.container {cn} init={c['init']} image={c['image']}"))
-                for k in ("command", "args"):
-                    if c[k] is not None:
-                        facts.append((c[k]["line"], f"{name}.{cn}.{k}={json.dumps(c[k]['argv'], ensure_ascii=False)}"))
-                if c["workingDir"] is not None:
-                    facts.append((c["line"], f"{name}.{cn}.workingDir={c['workingDir']}"))
-                facts += [(e["line"], f"{name}.{cn}.env {e['key']}") for e in c["env"]]
-                facts += [(r["line"], f"{name}.{cn}.ref {r['key']}={r['configMap']}/{r['item']}") for r in c["configRefs"]]
-                facts += [(e["line"], f"{name}.{cn}.envFrom {e['configMap']} prefix={e['prefix']}") for e in c["envFrom"]]
-        out[f["file"]] = collections.Counter(facts)
-    edges = collections.defaultdict(set)
+        out[f["file"]] = collections.Counter(file_facts(f))
+    # Đếm từng lần xuất hiện: hai bản sao cùng khoá (gốc kéo hai overlay của
+    # một base) có cạnh ở cùng file, dòng; thước đo đếm từng tài liệu dựng ra.
+    edges = collections.defaultdict(collections.Counter)
     guards = {}
     exposed = {s["key"] for s in rep["services"] if s["key"].startswith("k8s:") and s.get("exposed")}
     for s in rep["services"]:
@@ -986,11 +1158,11 @@ def archctl_k8s(archctl, root, files):
         for e in s["edges"]:
             host = e["shown"].split(" → ", 1)[1].rsplit(":", 1)[0] if ":" in e["shown"].split(" → ", 1)[1] \
                 else e["shown"].split(" → ", 1)[1]
-            edges[f"{s['key']}\t{e['file']}:{e['line']}\t{host}"].add(e["target"])
-    return out, edges, guards, exposed, rendered, rep.get("charts", [])
+            edges[f"{s['key']}\t{e['file']}:{e['line']}\t{host}"][e["target"]] += 1
+    return out, edges, guards, exposed, rendered, rep.get("charts", []), rep.get("kustomize", []), rep.get("unread", [])
 
 
-def k8s_truth(python, root, files, helm_json=None):
+def k8s_truth(python, root, files, helm_json=None, skip_edges=()):
     """Dữ kiện từng manifest và cạnh theo PyYAML và tài liệu Kubernetes."""
     p = subprocess.run([python, "-I", str(HERE / "k8s_truth.py"), "facts"],
                        input="".join(f"{root}\t{f}\n" for f in files),
@@ -1004,7 +1176,9 @@ def k8s_truth(python, root, files, helm_json=None):
             out[file] = res
         else:
             out[file] = collections.Counter((l, s) for l, s in json.loads(res)["facts"])
-    p = subprocess.run([python, "-I", str(HERE / "k8s_truth.py"), "edges", str(root), *([helm_json] if helm_json else [])],
+    skip = Path(tempfile.mkdtemp()) / "skip.json"
+    skip.write_text(json.dumps(sorted(skip_edges)))
+    p = subprocess.run([python, "-I", str(HERE / "k8s_truth.py"), "edges", str(root), helm_json or "-", str(skip)],
                        input="".join(f"{f}\n" for f in files), capture_output=True, text=True, timeout=900)
     if p.returncode != 0:
         bench.die(f"thước đo Kubernetes hỏng: {p.stderr.strip()[-400:]}")
@@ -1176,7 +1350,7 @@ def main():
     have_go = shutil.which("go") is not None
     strip_ts = have_node and node_can_strip_types()
     required = args.require.split(",")
-    unknown = set(filter(None, required)) - {"clang", "node", "go", "syn", "ipython", "deploy", "proto", "helm"}
+    unknown = set(filter(None, required)) - {"clang", "node", "go", "syn", "ipython", "deploy", "proto", "helm", "kustomize"}
     if unknown:
         bench.die(f"`--require` không biết: {', '.join(sorted(unknown))}")
     for tool, ok in [("clang", have_clang), ("node", have_node), ("go", have_go)]:
@@ -1193,13 +1367,15 @@ def main():
     use_ipython = "ipython" in required
     ipy_v = ipython_version() if use_ipython else "BỎ QUA: cần tải gói, bật bằng --require ipython"
     use_helm = "helm" in required
-    use_deploy = "deploy" in required or use_helm
+    use_kustomize = "kustomize" in required
+    use_deploy = "deploy" in required or use_helm or use_kustomize
     dep_v = deploy_version() if use_deploy else "BỎ QUA: cần tải gói, bật bằng --require deploy"
     use_proto = "proto" in required
     proto_v = proto_version() if use_proto else "BỎ QUA: cần tải gói, bật bằng --require proto"
     helm_v = HELM_VERSION if use_helm else "BỎ QUA: cần tải helm, bật bằng --require helm"
+    kust_v = KUSTOMIZE_VERSION if use_kustomize else "BỎ QUA: cần tải kustomize, bật bằng --require kustomize"
     print(f"python {sys.version.split()[0]} · clang: {clang_v} · node: {node_v} · go: {go_v} · syn: {syn_v}"
-          f" · ipython: {ipy_v} · hạ tầng: {dep_v} · proto: {proto_v} · helm: {helm_v}"
+          f" · ipython: {ipy_v} · hạ tầng: {dep_v} · proto: {proto_v} · helm: {helm_v} · kustomize: {kust_v}"
           + ("" if strip_ts or not have_node else " (không gỡ được kiểu TS: BỎ QUA .ts)"))
 
     missing_repos = [r for r in repos if not (Path(args.cache) / "repos" / r).is_dir()]
@@ -1215,6 +1391,7 @@ def main():
     dep_python = build_venv(args.cache, "deploy-oracle", DEPLOY_REQUIREMENTS, "hạ tầng") if use_deploy else None
     proto_python = build_venv(args.cache, "proto-oracle", PROTO_REQUIREMENTS, ".proto") if use_proto else None
     helm = build_helm(args.cache) if use_helm else None
+    kustomize = build_kustomize(args.cache) if use_kustomize else None
 
     bad = 0
     for repo in repos:
@@ -1396,27 +1573,53 @@ def main():
         yamls = yaml_files(root) if dep_python else []
         if yamls:
             kt = Tally("K8s")
-            have_all, have_edges, have_guards, have_exposed, have_rendered, charts = archctl_k8s(archctl, root, yamls)
+            have_all, have_edges, have_guards, have_exposed, have_rendered, charts, built, dunread = archctl_k8s(archctl, root, yamls)
             # Chart Helm: `helm template` thật dựng ra, đọc như manifest ở thư
             # mục chart. Không có helm thì bỏ mọi thứ archctl dựng từ chart.
             roots = [c for c in charts if not any(c != o and c.startswith(f"{o}/charts/" if o else "charts/") for o in charts)]
             helm_json, helm_files, failed = None, set(), []
+            rendered = {}
             if helm and roots:
                 rendered, failed = helm_render(helm, root, roots, workdir.name)
+                helm_files = set(rendered)
+            # Bản dựng Kustomize: `kustomize build` thật, đọc như manifest ở thư
+            # mục kustomization gốc. File mà bản dựng ở chính thư mục của nó đã
+            # gồm thì archctl không đọc thô nữa; thước đo cũng vậy.
+            built_roots = [b["root"] for b in built]
+            same_dir = {d["facts"]["file"] for b in built for d in b["docs"]
+                        if (d["facts"]["file"].rsplit("/", 1)[0] if "/" in d["facts"]["file"] else "") == b["root"]}
+            kbuilt, kfailed = ({}, [])
+            if kustomize and built_roots:
+                kbuilt, kfailed = kustomize_build(kustomize, root, built_roots)
+                for d, docs in kbuilt.items():
+                    for i, t in enumerate(docs):
+                        rendered[f"{d + '/' if d else ''}<kustomize>#{i}"] = [d, t]
+            if rendered:
                 helm_json = str(Path(workdir.name) / f"helm-{repo}.json")
                 Path(helm_json).write_text(json.dumps(rendered))
-                helm_files = set(rendered)
-            want_all, want_edges, want_guards, want_exposed = k8s_truth(dep_python, root, yamls, helm_json)
+            want_all, want_edges, want_guards, want_exposed = k8s_truth(dep_python, root, yamls, helm_json, same_dir)
+            (have_edges, have_guards, have_exposed), (want_edges, want_guards, want_exposed) = kustomize_keys(
+                built, bool(kustomize), (have_edges, have_guards, have_exposed), (want_edges, want_guards, want_exposed))
             chart_key = lambda k: any(k.startswith(f"k8s:{c}/") for c in roots)
             if not helm:
                 have_edges = {k: v for k, v in have_edges.items() if not chart_key(k)}
-                have_edges = {k: {t for t in v if not chart_key(t)} for k, v in have_edges.items()}
+                have_edges = {k: collections.Counter({t: n for t, n in v.items() if not chart_key(t)})
+                              for k, v in have_edges.items()}
                 have_guards = {k: v for k, v in have_guards.items() if not chart_key(k)}
                 have_exposed = {k for k in have_exposed if not chart_key(k)}
             # Dòng của cạnh từ chart: archctl báo dòng template, helm chỉ có
             # dòng của văn bản dựng ra; so không kèm dòng.
-            no_line = lambda edges: {re.sub(r"\t(" + "|".join(map(re.escape, helm_files or ["\0"])) + r"):\d+\t", r"\t\1:?\t", k): v
-                                     for k, v in edges.items()}
+            # Cạnh từ template Helm: một dòng template dựng ra nhiều dòng (vòng
+            # `range`), archctl báo một lần: so theo tập (mỗi đích một lần).
+            def no_line(edges):
+                out = {}
+                for k, v in edges.items():
+                    nk = re.sub(r"\t(" + "|".join(map(re.escape, helm_files or ["\0"])) + r"):\d+\t", r"\t\1:?\t", k)
+                    if nk == k:
+                        out[k] = collections.Counter(v)
+                    else:
+                        out[nk] = collections.Counter(dict.fromkeys(set(out.get(nk, {})) | set(v), 1))
+                return out
             have_edges, want_edges = no_line(have_edges), no_line(want_edges)
             # Lối vào từ ngoài cụm: tập workload lộ ra.
             kt.imports += len(want_exposed)
@@ -1437,7 +1640,7 @@ def main():
                 check_lines(kt, file, want, have)
             # Cạnh: cùng nguồn, cùng dòng, cùng tên máy thì cùng tập đích.
             for key in sorted(set(want_edges) | set(have_edges)):
-                want, have = want_edges.get(key, set()), have_edges.get(key, set())
+                want, have = want_edges.get(key, collections.Counter()), have_edges.get(key, collections.Counter())
                 kt.imports += len(want)
                 src, at, host = key.split("\t")
                 for t in sorted(want - have):
@@ -1454,8 +1657,17 @@ def main():
                 tallies.append(kt)
             if helm and roots:
                 ht = Tally("Helm")
-                compare_helm(ht, have_all, have_rendered, helm_truth(dep_python, helm_json), helm_files, failed)
+                compare_helm(ht, have_all, have_rendered,
+                             {f: v for f, v in helm_truth(dep_python, helm_json).items() if "<kustomize>" not in f},
+                             helm_files, failed)
                 tallies.append(ht)
+            kroots = kustomize_roots(dep_python, root, yamls)
+            if kroots or built_roots:
+                kt2 = Tally("Kustomize")
+                check_roots(kt2, kroots, built, dunread, kustomize or None, root, KUSTOMIZE_UNREAD_OK.get(repo, ()))
+                if kustomize:
+                    compare_kustomize(kt2, built, kbuilt, kfailed, helm_truth(dep_python, helm_json))
+                tallies.append(kt2)
 
         protos = proto_files(root) if proto_python else []
         if protos:
@@ -1490,7 +1702,7 @@ def main():
     if helm and not args.only:
         for fx in sorted(HERE.glob("fixtures/helm-*")):
             # Cả thư mục: chart mẫu có thể chưa commit.
-            have_all, _, _, _, have_rendered, charts = archctl_k8s(archctl, fx, [])
+            have_all, _, _, _, have_rendered, charts, _, _ = archctl_k8s(archctl, fx, [])
             roots = [c for c in charts if not any(c != o and c.startswith(f"{o}/charts/" if o else "charts/") for o in charts)]
             rendered, failed = helm_render(helm, fx, roots, workdir.name)
             helm_json = str(Path(workdir.name) / f"helm-{fx.name}.json")
@@ -1501,6 +1713,44 @@ def main():
             for e in ht.examples:
                 print(f"      {e}")
             bad += ht.bad
+
+    # Overlay mẫu trong `bench/fixtures/kustomize-*`: các phép biến đổi mà
+    # repo thật của bộ đo không dùng (patch strategic merge và JSON 6902,
+    # `namePrefix`, nhãn, `images`, `configMapGenerator`, component).
+    if kustomize and not args.only:
+        for fx in sorted(HERE.glob("fixtures/kustomize-*")):
+            yamls_fx = sorted(str(p.relative_to(fx)) for p in fx.rglob("*.yaml"))
+            _, h_edges, h_guards, h_exposed, _, _, built_fx, unread_fx = archctl_k8s(archctl, fx, yamls_fx)
+            kb, kf = kustomize_build(kustomize, fx, [b["root"] for b in built_fx])
+            rendered_fx = {f"{d + '/' if d else ''}<kustomize>#{i}": [d, t] for d, docs in kb.items() for i, t in enumerate(docs)}
+            kjson = str(Path(workdir.name) / f"kustomize-{fx.name}.json")
+            Path(kjson).write_text(json.dumps(rendered_fx))
+            same_fx = {d["facts"]["file"] for b in built_fx for d in b["docs"]
+                       if (d["facts"]["file"].rsplit("/", 1)[0] if "/" in d["facts"]["file"] else "") == b["root"]}
+            _, w_edges, w_guards, w_exposed = k8s_truth(dep_python, fx, yamls_fx, kjson, same_fx)
+            (h_edges, h_guards, h_exposed), (w_edges, w_guards, w_exposed) = kustomize_keys(
+                built_fx, True, (h_edges, h_guards, h_exposed), (w_edges, w_guards, w_exposed))
+            kt3 = Tally("Kustomize")
+            check_roots(kt3, kustomize_roots(dep_python, fx, yamls_fx), built_fx, unread_fx, kustomize, fx)
+            compare_kustomize(kt3, built_fx, kb, kf, helm_truth(dep_python, kjson))
+            # Cạnh, NetworkPolicy, lối vào của bản dựng: tính lại trên bản kustomize.
+            bk = built_key_of(built_fx)
+            for key in sorted(k for k in set(w_edges) | set(h_edges) if bk(k.split("\t")[0])):
+                want, have = w_edges.get(key, collections.Counter()), h_edges.get(key, collections.Counter())
+                kt3.imports += len(want)
+                for x in sorted(want - have):
+                    kt3.note(f"thiếu cạnh: {key} → {x}")
+                for x in sorted(have - want):
+                    kt3.note(f"thừa cạnh: {key} → {x}")
+            for key in sorted(k for k in set(w_guards) | set(h_guards) if bk(k)):
+                if w_guards.get(key) != h_guards.get(key):
+                    kt3.note(f"{key} lệch NetworkPolicy: thước đo {w_guards.get(key)}, archctl {h_guards.get(key)}")
+            for key in sorted({k for k in w_exposed ^ h_exposed if bk(k)}):
+                kt3.note(f"{key} lệch lối vào từ Internet")
+            print(kt3.line(fx.name))
+            for e in kt3.examples:
+                print(f"      {e}")
+            bad += kt3.bad
 
     # Mẫu hàng đợi trong `bench/fixtures/queues`: các dạng mà repo thật của bộ
     # đo không có (env, hằng số, khai queue rồi dùng qua biến, Celery, Redis).

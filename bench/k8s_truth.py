@@ -423,11 +423,14 @@ def same_ns(a, b):
     return a is None or b is None or a == b
 
 
-def edges_main(root, helm_json=None):
+def edges_main(root, helm_json=None, skip_json=None):
     """`helm_json`: file JSON `{template: [thư mục chart, văn bản dựng ra]}` của
-    `helm template`, đọc như manifest ở thư mục chart."""
+    `helm template` (và `kustomize build`), đọc như manifest ở thư mục chart
+    (thư mục kustomization gốc). `skip_json`: file thô mà bản dựng Kustomize ở
+    chính thư mục của nó đã gồm, không đọc thô."""
     root = Path(root)
-    rendered = json.loads(Path(helm_json).read_text()) if helm_json else {}
+    rendered = json.loads(Path(helm_json).read_text()) if helm_json and helm_json != "-" else {}
+    skip = set(json.loads(Path(skip_json).read_text())) if skip_json else set()
     listed = [l.strip() for l in sys.stdin if l.strip()]
     charts = [dir_of(f) for f in listed if f.rsplit("/", 1)[-1] == "Chart.yaml" and not aside(f)]
     patch_files, namespaces = set(), {"default"}
@@ -449,6 +452,27 @@ def edges_main(root, helm_json=None):
                     pass
                 break
         return kusts[d]
+
+    def kfiles(d):
+        """File manifest mà kustomization ở `d` kéo vào, đệ quy qua base và
+        component: bản thô của chúng là bản sao base của bản dựng `d`."""
+        out, stack, seen = set(), [(d, 0)], {d}
+        while stack:
+            cur, depth = stack.pop()
+            kk = kust_at(cur)
+            if not isinstance(kk, dict):
+                continue
+            for r in (kk.get("resources") or []) + (kk.get("bases") or []) + (kk.get("components") or []):
+                full = within(cur, r) if isinstance(r, str) else None
+                if full is None:
+                    continue
+                p = Path(root, full)
+                if p.is_file():
+                    out.add(full)
+                elif p.is_dir() and depth < 16 and full not in seen:
+                    seen.add(full)
+                    stack.append((full, depth + 1))
+        return out
 
     reached = set()
     roots = [dir_of(f) for f in listed if f.rsplit("/", 1)[-1] in ("kustomization.yaml", "kustomization.yml") and not aside(f)]
@@ -502,7 +526,7 @@ def edges_main(root, helm_json=None):
         name = f.rsplit("/", 1)[-1]
         if not f.endswith((".yaml", ".yml", ".json")):
             continue
-        if (in_chart(charts, f) or f in patch_files
+        if (in_chart(charts, f) or f in patch_files or f in skip
                 or name in ("skaffold.yaml", "skaffold.yml", "Chart.yaml", "kustomization.yaml", "kustomization.yml")
                 or (name.startswith(("compose", "docker-compose")) and name.endswith((".yml", ".yaml")))):
             continue
@@ -513,8 +537,12 @@ def edges_main(root, helm_json=None):
         if len(text.encode()) > (1 << 20):
             continue
         sources.append((f, dir_of(f), text))
-    sources += [(f, d, t) for f, (d, t) in sorted(rendered.items())]
-    for f, d, text in sources:
+    # Bản dựng Kustomize là một phạm vi riêng (xem `rank`); manifest thô ở thư
+    # mục gốc của bản dựng mà bản dựng không gồm chạy cùng bản dựng đó.
+    kroot_dirs = {d for f, (d, _) in rendered.items() if "<kustomize>" in f}
+    sources = [(f, d, t, None, d if d in kroot_dirs else None) for f, d, t in sources]
+    sources += [(f, d, t, d if "<kustomize>" in f else None, None) for f, (d, t) in sorted(rendered.items())]
+    for f, d, text, scope, attached in sources:
         if not may_be(text):
             continue
         try:
@@ -528,7 +556,7 @@ def edges_main(root, helm_json=None):
                 namespaces.add(meta_ns)
             if kind == "Namespace":
                 namespaces.add(scalar(get(doc, "metadata", "name")) or "")
-            obj = {"file": f, "dir": d, "name": scalar(get(doc, "metadata", "name")) or "", "ns": meta_ns}
+            obj = {"file": f, "dir": d, "scope": scope, "attached": attached, "name": scalar(get(doc, "metadata", "name")) or "", "ns": meta_ns}
             if kind == "NetworkPolicy":
                 policies.append({**obj, **policy_of(doc)})
             if kind is not None and (route := route_of(kind, doc)) is not None:
@@ -557,6 +585,33 @@ def edges_main(root, helm_json=None):
                 obj["containers"] = containers
                 workloads.append(obj)
 
+    build_files = set().union(*(kfiles(sc) for sc in {o["scope"] for o in workloads + services + maps + policies + routes}
+                                if sc is not None))
+
+    def view(o):
+        """Phạm vi một đối tượng nhìn ra: bản dựng của nó, hay bản dựng mà
+        manifest thô ở thư mục gốc gắn kèm."""
+        return o["scope"] if o["scope"] is not None else o["attached"]
+
+    def rank(frm, obj):
+        """0: cùng phạm vi; 1: bản dựng nhìn ra manifest thô không bản dựng nào
+        kéo vào; None: không thấy. Manifest thô (kể cả gắn kèm) thấy mọi
+        manifest thô, không nhìn vào bản dựng; bản dựng không nhìn sang bản
+        dựng khác hay bản thô của base."""
+        if obj["scope"] is not None:
+            return 0 if frm == obj["scope"] else None
+        if frm is None or obj["attached"] == frm:
+            return 0
+        return 1 if obj["file"] not in build_files else None
+
+    def nearest(frm, objs):
+        ranked = [(r, o) for o in objs if (r := rank(frm, o)) is not None]
+        best = min((r for r, _ in ranked), default=None)
+        return [o for r, o in ranked if r == best]
+
+    def policy_sees(pol, w):
+        return rank(view(pol), w) is not None or rank(view(w), pol) is not None
+
     def controller_ok(k, v, w):
         if k == "statefulset.kubernetes.io/pod-name":
             return w["kind"] == "StatefulSet" and v.startswith(w["name"] + "-") and v[len(w["name"]) + 1:].isdigit()
@@ -569,13 +624,13 @@ def edges_main(root, helm_json=None):
             return []
         plain = {p for p in svc["selector"] if p[0] not in CONTROLLER_LABELS}
         ctl = [p for p in svc["selector"] if p[0] in CONTROLLER_LABELS]
-        hits = [w for w in workloads if same_ns(svc["ns"], w["ns"]) and plain <= w["labels"]
-                and all(controller_ok(k, v, w) for k, v in ctl)]
+        hits = nearest(view(svc), [w for w in workloads if same_ns(svc["ns"], w["ns"]) and plain <= w["labels"]
+                                      and all(controller_ok(k, v, w) for k, v in ctl)])
         same = [w for w in hits if w["dir"] == svc["dir"]]
         return same or hits
 
-    def find(name, ns, d):
-        found = [s for s in services if s["name"].lower() == name and same_ns(s["ns"], ns)]
+    def find(name, ns, d, scope):
+        found = nearest(scope, [s for s in services if s["name"].lower() == name and same_ns(s["ns"], ns)])
         same = [s for s in found if s["dir"] == d]
         return same or found
 
@@ -588,21 +643,21 @@ def edges_main(root, helm_json=None):
 
     def resolve_once(host, w):
         l = host.split(".")
-        ns, d = w["ns"], w["dir"]
+        ns, d, sc = w["ns"], w["dir"], view(w)
         if len(l) == 1:
-            return find(l[0], ns, d)
+            return find(l[0], ns, d, sc)
         if len(l) >= 3 and l[2] == "svc":
-            return find(l[0], l[1], d)
+            return find(l[0], l[1], d, sc)
         if len(l) >= 4 and l[3] == "svc":
-            return find(l[1], l[2], d)
+            return find(l[1], l[2], d, sc)
         if len(l) == 2:
-            return find(l[0], l[1], d) if l[1] in namespaces else find(l[1], ns, d)
+            return find(l[0], l[1], d, sc) if l[1] in namespaces else find(l[1], ns, d, sc)
         if len(l) == 3 and l[2] in namespaces:
-            return find(l[1], l[2], d)
+            return find(l[1], l[2], d, sc)
         return []
 
     def config(name, w):
-        ok = [m for m in maps if m["name"] == name and same_ns(m["ns"], w["ns"])]
+        ok = nearest(view(w), [m for m in maps if m["name"] == name and same_ns(m["ns"], w["ns"])])
         return next((m for m in ok if m["dir"] == w["dir"]), ok[0] if ok else None)
 
     out = {}
@@ -656,7 +711,7 @@ def edges_main(root, helm_json=None):
 
     guards = {key_of(w["dir"], w["name"]): [False, False, set(), False, False, set()] for w in workloads}
     for pol in policies:
-        targets = [w for w in workloads if same_ns(pol["ns"], w["ns"]) and matches(pol["pods"], w["labels"])]
+        targets = [w for w in workloads if policy_sees(pol, w) and same_ns(pol["ns"], w["ns"]) and matches(pol["pods"], w["labels"])]
         for side, base in (("ingress", 0), ("egress", 3)):
             if pol[side] is None:
                 continue
@@ -683,6 +738,8 @@ def edges_main(root, helm_json=None):
                         any_ = True
                         continue
                     for w in workloads:
+                        if not policy_sees(pol, w):
+                            continue
                         kind_, val = scope
                         ok = (same_ns(val, w["ns"]) if kind_ == "same" else
                               (w["ns"] is None or w["ns"] in val) if kind_ == "names" else True)
@@ -710,17 +767,18 @@ def edges_main(root, helm_json=None):
     for r in routes:
         if not r["public"]:
             continue
-        targets = [s for name, rns, _ in r["services"] for s in find(name.lower(), rns or r["ns"], r["dir"])]
+        targets = [s for name, rns, _ in r["services"] for s in find(name.lower(), rns or r["ns"], r["dir"], view(r))]
         entry_hosts = [(h, r["ns"]) for h, _ in r["hosts"]]
         for name, dns, _ in r["delegates"]:
             dns = dns or r["ns"]
             for child in routes:
-                if child["kind"] == "VirtualService" and child["name"] == name and same_ns(child["ns"], dns):
+                if (child["kind"] == "VirtualService" and rank(view(r), child) is not None and child["name"] == name
+                        and same_ns(child["ns"], dns)):
                     entry_hosts += [(h, child["ns"] or dns) for h, _ in child["hosts"]]
         for host, hns in entry_hosts:
             hit = in_cluster(host, hns)
             if hit:
-                targets += find(hit[0], hit[1], r["dir"])
+                targets += find(hit[0], hit[1], r["dir"], view(r))
         for s in targets:
             exposed |= {key_of(w["dir"], w["name"]) for w in select(s)}
     print(json.dumps({"exposed": sorted(exposed), "edges": {k: sorted(v) for k, v in out.items()},
@@ -739,12 +797,43 @@ def helm_facts_main(helm_json):
         print(f"{f}\t{json.dumps({'facts': facts}, ensure_ascii=False)}", flush=True)
 
 
+def kroots_main(root):
+    """Kustomization gốc, tính độc lập với archctl: kustomization (không ở thư
+    mục ví dụ, test) không bị kustomization nào khác trỏ tới qua `resources`,
+    `bases`, `components`, và không phải `kind: Component`."""
+    root = Path(root)
+    listed = [l.strip() for l in sys.stdin if l.strip()]
+    dirs = [dir_of(f) for f in listed
+            if f.rsplit("/", 1)[-1] in ("kustomization.yaml", "kustomization.yml") and not aside(f)]
+    referenced, components = set(), set()
+    for d in dirs:
+        for n in ("kustomization.yaml", "kustomization.yml"):
+            p = Path(root, d, n) if d else Path(root, n)
+            if not p.is_file():
+                continue
+            try:
+                k = yaml.safe_load(p.read_text()) or {}
+            except (yaml.YAMLError, UnicodeDecodeError, OSError):
+                k = {}
+            if not isinstance(k, dict):
+                continue
+            if k.get("kind") == "Component":
+                components.add(d)
+            for r in (k.get("resources") or []) + (k.get("bases") or []) + (k.get("components") or []):
+                if isinstance(r, str) and (full := within(d, r)) is not None and Path(root, full).is_dir():
+                    referenced.add(full)
+            break
+    print(json.dumps(sorted(d for d in set(dirs) if d not in referenced and d not in components)))
+
+
 if __name__ == "__main__":
     if sys.argv[1:2] == ["facts"]:
         facts_main()
+    elif sys.argv[1:2] == ["kroots"]:
+        kroots_main(sys.argv[2])
     elif sys.argv[1:2] == ["helmfacts"]:
         helm_facts_main(sys.argv[2])
     elif sys.argv[1:2] == ["edges"]:
-        edges_main(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
+        edges_main(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None, sys.argv[4] if len(sys.argv) > 4 else None)
     else:
         sys.exit("dùng: k8s_truth.py facts | edges <gốc>")

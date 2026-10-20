@@ -164,6 +164,11 @@ K8S_ORACLE_MODES = {
     "k8s-exposed": "thiếu lối vào từ Internet",
     # manifest dựng từ chart Helm: mất một biến môi trường
     "helm-drop": "thiếu:",
+    # bản dựng Kustomize: mất một biến môi trường, thêm một image giả
+    "kustomize-drop": "thiếu:",
+    "kustomize-extra": "thừa:",
+    # bản dựng Kustomize dựng được mà archctl báo "chưa đọc được"
+    "kustomize-unread": "archctl không dựng mà kustomize dựng được",
 }
 
 # phá dữ kiện `.proto` trong `scan --json` → dòng `oracle.py` phải in ra
@@ -216,6 +221,25 @@ def sabotage_k8s(rep: dict, mode: str):
     """Làm hỏng dữ kiện manifest đầu tiên đúng loại, hay cạnh qua Service đầu
     tiên, trong `scan --json`."""
     dep = rep.get("deploy", {})
+    if mode == "kustomize-unread":
+        if dep.get("kustomize"):
+            b = dep["kustomize"].pop(0)
+            dep.setdefault("unread", []).append(
+                {"file": f"{b['root'] or '.'}/kustomization.yaml",
+                 "why": f"Kustomize không dựng được bản dựng `{b['root'] or '.'}`: phá thử"})
+        return
+    if mode in ("kustomize-drop", "kustomize-extra"):
+        for b in dep.get("kustomize", []):
+            for d in b["docs"]:
+                for w in d["facts"].get("workloads", []):
+                    for c in w["containers"]:
+                        if mode == "kustomize-extra":
+                            c["image"] = "khong-co-that"
+                            return
+                        if c["env"]:
+                            c["env"].pop(0)
+                            return
+        return
     if mode == "helm-drop":
         for f in dep.get("files", []):
             for w in f.get("workloads", []) if f.get("rendered") else []:
@@ -521,7 +545,7 @@ def main():
                 need = ["deploy"]
             # Repo manifest Kubernetes có chart Helm: đối chiếu với `helm template`.
             if script == "oracle.py" and repo == args.k8s_repo and (mode in K8S_ORACLE_MODES or not mode):
-                need = [*need, "helm"]
+                need = [*need, "helm", "kustomize"]
             binding_repos = {r for _, r, _ in BINDING_ORACLE_RUNS}
             if mode in BINDING_ORACLE_MODES or (script == "oracle.py" and not mode and repo in binding_repos
                                                 and repo not in (args.notebook_repo, args.rust_repo, args.repo)):

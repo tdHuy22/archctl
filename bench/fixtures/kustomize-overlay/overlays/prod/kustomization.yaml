@@ -1,0 +1,34 @@
+resources:
+- ../../base
+components:
+- ../../components/audit
+namespace: shop
+namePrefix: prod-
+commonLabels:
+  env: prod
+images:
+- name: cart
+  newName: registry.example/cart
+  newTag: "2.0"
+configMapGenerator:
+- name: settings
+  behavior: merge
+  literals:
+  - mode=fast
+  envs:
+  - extra.env
+- name: flags
+  literals:
+  - BETA=on
+replicas:
+- name: cart
+  count: 3
+patches:
+- path: memorystore.yaml
+- target:
+    kind: Service
+    name: cart
+  patch: |-
+    - op: replace
+      path: /spec/ports/0/port
+      value: 8080

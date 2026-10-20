@@ -176,6 +176,14 @@ bộ trích, nên một lỗi trong bộ trích làm cả hai sai giống nhau m
   archctl tự dựng, và bản dựng của helm đi vào phần tính cạnh, lối vào,
   NetworkPolicy của `k8s_truth.py`. Không có helm thì mọi thứ archctl dựng từ
   chart bị bỏ khỏi phép so.
+- Kustomize: mỗi kustomization gốc mà archctl dựng được dựng lại bằng
+  `kustomize build` bản ghim (tải từ GitHub, kiểm sha256, chỉ khi `--require
+  kustomize`; CI bật). Dữ kiện từng tài nguyên (như mục Kubernetes, không kèm
+  dòng) so theo bản dựng; đuôi băm của ConfigMap sinh ra bị bỏ ở phía
+  kustomize vì archctl không thêm nó. Bản dựng của kustomize đi vào phần tính
+  cạnh, lối vào, NetworkPolicy của `k8s_truth.py` ở thư mục gốc; cạnh của bản
+  dựng so không kèm file, dòng. Bộ mẫu `fixtures/kustomize-*` phủ các phép biến
+  đổi repo thật không dùng; chỉ so khi không có `--only`.
 - Tên máy trong chuỗi: `(dòng, máy:cổng)` mà `scan --json` đọc từ chuỗi của mọi
   file Python và Go được tính lại bằng [code_hosts.py](code_hosts.py). Chuỗi và
   chỗ nó đứng (tham số, gán có kiểu hay không, khoá dict, giá trị mặc định của
@@ -276,13 +284,16 @@ Python → Go (`Recommendationservice -> Productcatalogservice`), Go → Python
 Currencyservice`, `Checkoutservice -> Paymentservice`).
 `--proto-repo vllm` thêm hai kiểu ở dữ kiện `.proto` của `scan --json` (mất một
 `rpc`, lệch dòng một `service`), đối chiếu bằng `protoc` của grpcio-tools nên
-cần mạng. Kiểu `queue` xoá cạnh qua hàng đợi bắt buộc (`consistency.QUEUE`:
+cần mạng. Ba kiểu `kustomize-drop`, `kustomize-extra`, `kustomize-unread` (trên
+`--k8s-repo`, cần `kustomize`) làm mất một biến môi trường, đổi image của bản
+dựng Kustomize, hay đổi một bản dựng thành "chưa đọc được" trong `scan --json`
+(bản dựng mà `kustomize build` dựng được thì oracle coi là lệch). Kiểu `queue` xoá cạnh qua hàng đợi bắt buộc (`consistency.QUEUE`:
 rabbitmq-tutorials `Python -> Go`, `Go -> JavascriptNodejs`, `JavascriptNodejs
 -> Python`); ba kiểu `queue-*` phá mục `queues` của `scan --json` (mất, lệch
 dòng, thêm giả), đối chiếu bằng `queue_truth.py` (`ast` cho Python, `go/ast`
 cho Go). CI chạy bước này sau bộ đo, với `--rust-repo ripgrep
 --notebook-repo matplotlib --deploy-repo example-voting-app --k8s-repo
-microservices-demo --proto-repo vllm`: năm mươi ba kiểu phá.
+microservices-demo --proto-repo vllm`: năm mươi sáu kiểu phá.
 
 Nó có mặt vì bộ đo này từng nằm ngoài git, và lúc đưa vào, đọc lại thì bốn
 phép kiểm không kiểm gì: một cái chỉ xét file có tồn tại vì vế sau của `or`

@@ -17,6 +17,7 @@ pub mod grpc;
 pub mod helm;
 pub mod hosts;
 pub mod k8s;
+pub mod kustomize;
 mod notebook;
 mod python;
 pub mod queue;

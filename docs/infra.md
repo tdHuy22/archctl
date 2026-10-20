@@ -446,15 +446,45 @@ workload. Manifest chỉ được đọc khi luật có nguồn `k8s:` (hay khi 
   `list`/`dict` lồng tối đa 64 tầng, chart con lồng tối đa 8 tầng,
   200 000 giá trị đọc từ values (TM-36 tới TM-39). Không in manifest dựng ra
   hay giá trị values; lỗi chỉ có file, dòng, tên hàm.
-- **Kustomize:** file trong `resources` đọc như manifest thường; file patch
-  (`patches`, `patchesStrategicMerge`, `patchesJson6902`) không phải manifest.
-  Patch không được áp. Patch đổi lệnh, biến môi trường hay image của một
-  workload đã khai (kể cả JSON 6902 thay cả nhánh `/spec/template/spec`), trong
-  một kustomization kéo workload đó vào (qua `resources`, `components`), thì
-  được báo "chưa đọc được": workload thật chạy khác thứ archctl thấy. Patch chỉ
-  đổi `replicas`, `resources` thì không. `namePrefix`, `nameSuffix`, `images`,
-  `configMapGenerator`, `replacements`, `vars` cũng được báo như vậy, vì chúng
-  đổi tên Service, image hay giá trị env.
+- **Kustomize:** mỗi kustomization gốc (không bị kustomization khác trỏ tới qua
+  `resources`, `bases`, `components`, và không phải `kind: Component`) là một
+  bản dựng: archctl tự dựng nó như `kustomize build`, không chạy lệnh, rồi đọc
+  như manifest ở thư mục kustomization gốc (`k8s:overlays/prod/cart`). Base
+  vẫn được đọc như manifest thường; bản dựng là một bản sao nữa của workload,
+  kiểm `link`, `runs` như mọi bản. Kustomization gốc nằm cùng thư mục với
+  manifest của nó (`kubernetes-manifests/`) thì bản dựng thay bản đọc thô. Bản
+  dựng tra tên máy, ConfigMap, selector của Service trong chính nó trước;
+  không thấy thì tra manifest thô mà không bản dựng nào kéo vào (DB, hàng
+  đợi khai riêng, chart Helm), không bao giờ tra bản thô của base hay bản dựng
+  khác. Manifest thô không tra vào bản dựng, trừ file nằm ở thư mục
+  gốc của bản dựng mà kustomization không gồm (như `loadgenerator.yaml` triển
+  khai riêng qua skaffold): nó tra tên như bản dựng đó, mà với mọi chỗ khác
+  vẫn là manifest thô. NetworkPolicy áp theo
+  namespace: policy thô không thuộc bản dựng áp lên cả workload của bản dựng.
+  Áp: `resources`, `components`, `patches` (strategic merge theo tên container,
+  env, volume, cổng; JSON 6902 `add`, `replace`, `remove`), `patchesStrategicMerge`,
+  `patchesJson6902`, `namespace`, `namePrefix`/`nameSuffix` (cập nhật cả tham
+  chiếu ConfigMap, Secret, ServiceAccount, backend Ingress như Kustomize; tên
+  máy trong env thì không, như Kustomize), `commonLabels`, `labels`
+  (`includeSelectors`, `includeTemplates`), `images`, `configMapGenerator`
+  (`literals`, `envs`, `files`, `behavior`; sinh trước component, như
+  Kustomize), `replicas`. `target` của patch khớp tên, namespace gốc hay hiện
+  tại (trống là `default`). Patch không phải map, patch không `target` mà
+  thiếu `kind` hay `metadata.name`, mục patch thiếu nội dung: cả bản dựng
+  "chưa đọc được", như Kustomize báo lỗi. `k8s:cart` khớp
+  `prod-cart` do `namePrefix: prod-` sinh ra; dòng trong vi phạm là dòng của
+  file gây ra giá trị: patch, file env, kustomization, hay manifest gốc.
+  Không đọc `secretGenerator`. Ngoài tập con (`replacements`, `vars`,
+  `helmCharts`, generator, transformer, `configurations`, directive `$patch`,
+  `target` theo regex hay `annotationSelector`, resource từ xa, đường dẫn ra
+  ngoài dự án; resource từ xa chỉ in tên máy chủ, không in token trong URL)
+  thì cả bản dựng "chưa đọc được" (`--strict` tính), và patch của
+  các kustomization nó với tới được báo như trước; không áp một phần rồi im.
+  Trần: kustomization lồng 16 tầng, phát hiện vòng, 5 000 tài nguyên một bản
+  dựng, 200 bản dựng và 20 000 tài nguyên cả repo, 2 000 000 bước dựng chung,
+  1 000 000 đơn vị cây chung (một node, cộng một cho mỗi 16 byte khoá và
+  chuỗi; kể cả base dùng lại, bản chép patch, ConfigMap sinh ra), cây sâu 128
+  cấp kể cả qua alias (TM-44 tới TM-47).
 - **Loại lạ có pod template** (Argo `Rollout`, CRD): báo "chưa đọc được", vì
   mã chạy trong đó không được kiểm.
 - **Bản sao:** `k8s:<tên>` khớp workload tên đó ở mọi thư mục, và mỗi bản
@@ -631,9 +661,9 @@ trong các ngôn ngữ archctl chưa đọc (Java, C#, Ruby); đối số đầu
 
 ## Không đọc
 
-- Overlay của Kustomize, Terraform: không render; template Helm ngoài tập con
-  ở trên. Ai cần thì khai `verify` gọi `helm template`, `terraform graph`,
-  kube-linter, checkov.
+- Terraform: không render; Kustomize và template Helm ngoài tập con ở trên. Ai
+  cần thì khai `verify` gọi `kustomize build`, `helm template`, `terraform
+  graph`, kube-linter, checkov.
 - Hàng đợi: hàm bọc tự viết quanh producer (`publish_event("orders")`), tên
   topic từ module khác, kombu,
   aio-pika, Faust, NATS, SQS, Pub/Sub của Google; Kafka subscribe theo regex

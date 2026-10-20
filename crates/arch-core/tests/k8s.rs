@@ -5,6 +5,12 @@ use arch_core::check::{Reason, Report, Via, check, check_files};
 use arch_core::scan::deploy::{self, Entry, Key};
 use std::path::PathBuf;
 
+// Đồng hồ thời gian CPU của luồng, dùng chung với test trong lib: máy tải nặng
+// (CI, test chạy song song) không làm test thời gian trượt.
+#[path = "../src/testclock.rs"]
+#[allow(dead_code)]
+mod testclock;
+
 struct Repo(PathBuf);
 
 impl Repo {
@@ -411,27 +417,20 @@ fn helm_khong_doc_va_loai_la_duoc_bao() {
 }
 
 #[test]
-fn patch_kustomize_doi_env_thi_bao() {
+fn patch_kustomize_duoc_ap_va_tro_ve_patch() {
+    // Kustomization ở `k8s/` là một bản dựng: patch được áp, bản dựng thay
+    // bản đọc thô, vi phạm từ giá trị của patch trỏ về file patch.
     let r = shop("kustomize");
     r.write("k8s/kustomization.yaml", "resources: [api.yaml, worker.yaml, db.yaml, cfg.yaml]\npatches:\n- path: more-env.yaml\n- path: replicas.yaml\n")
         .write(
             "k8s/more-env.yaml",
-            "apiVersion: apps/v1\nkind: Deployment\nmetadata: {name: api}\nspec:\n  template:\n    spec:\n      containers:\n      - name: server\n        env: [{name: EXTRA_URL, value: \"http://evil:1\"}]\n",
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata: {name: api}\nspec:\n  template:\n    spec:\n      containers:\n      - name: server\n        env:\n        - name: DB_HOST\n          value: none\n        - name: REPORT_URL\n          value: \"http://db:9\"\n",
         )
         .write("k8s/replicas.yaml", "apiVersion: apps/v1\nkind: Deployment\nmetadata: {name: worker}\nspec:\n  replicas: 3\n");
+    only_worker_link(&r);
     let rep = r.report();
-    let unread: Vec<String> = rep
-        .deploy_unread
-        .iter()
-        .map(|u| format!("{} {}", u.file, u.why))
-        .collect();
-    assert_eq!(unread.len(), 1, "{unread:?}");
-    assert!(
-        unread[0].starts_with("k8s/more-env.yaml patch Kustomize"),
-        "{unread:?}"
-    );
-    // File patch không phải workload thứ hai tên `api`.
-    assert!(rep.missing.is_empty(), "{:?}", rep.missing);
+    assert!(rep.deploy_unread.is_empty(), "{:?}", rep.deploy_unread);
+    assert_eq!(violations(&rep), ["NotLinked Api -> Db k8s/more-env.yaml:12"]);
 }
 
 #[test]
@@ -524,7 +523,7 @@ fn manifest_doi_khang_khong_lam_treo() {
         r.write(&format!("other/f{i}.yaml"), "a: 1\n");
     }
     r.rules("service W from k8s:w0\n");
-    let t = std::time::Instant::now();
+    let t = testclock::Clock::start();
     let rep = r.report();
     assert!(t.elapsed().as_secs_f64() < 5.0, "{:?}", t.elapsed());
     assert!(!rep.deploy_unread.is_empty(), "vượt trần thì phải báo");
@@ -685,29 +684,24 @@ fn nhan_qua_tran_thi_bao_chu_khong_cat() {
 }
 
 #[test]
-fn bien_doi_cua_kustomize_va_json6902_thi_bao() {
+fn name_prefix_van_khop_ten_goc_va_ngoai_tap_con_thi_bao() {
     let r = shop("transform");
     r.write(
         "k8s/kustomization.yaml",
         "namePrefix: prod-\nresources: [api.yaml, worker.yaml, db.yaml, cfg.yaml]\n",
     );
     let rep = r.report();
-    assert!(
-        rep.deploy_unread
-            .iter()
-            .any(|u| u.why.starts_with("`namePrefix` của Kustomize")),
-        "{:?}",
-        rep.deploy_unread
-    );
+    assert!(rep.deploy_unread.is_empty(), "{:?}", rep.deploy_unread);
+    // `k8s:api` khớp `prod-api`: không có nguồn nào bị báo là không thấy.
+    assert!(rep.missing.is_empty(), "{:?}", rep.missing);
+    // Phép biến đổi ngoài tập con: cả bản dựng "chưa đọc được" (TM-45).
     r.write(
         "k8s/kustomization.yaml",
-        "resources: [api.yaml, worker.yaml, db.yaml, cfg.yaml]\npatches:\n- target: {kind: Deployment, name: api}\n  patch: |-\n    - op: replace\n      path: /spec/template/spec\n      value: {}\n",
+        "resources: [api.yaml, worker.yaml, db.yaml, cfg.yaml]\nreplacements:\n- path: r.yaml\n",
     );
     let rep = r.report();
     assert!(
-        rep.deploy_unread
-            .iter()
-            .any(|u| u.why.starts_with("patch Kustomize")),
+        rep.deploy_unread.iter().any(|u| u.file == "k8s/kustomization.yaml:2" && u.why.contains("replacements")),
         "{:?}",
         rep.deploy_unread
     );
@@ -874,9 +868,11 @@ fn cung_ten_may_lap_lai_va_patch_nhan_workload_khong_lam_treo() {
         );
     }
     r.rules("service Client from k8s:client\nservice D from k8s:d0\n");
-    let t = std::time::Instant::now();
+    let t = testclock::Clock::start();
     let rep = r.partial(&["k8s/client.yaml"]);
     assert!(t.elapsed().as_secs_f64() < 5.0, "{:?}", t.elapsed());
+    // Bản dựng không dựng được thì nói ra (patch thêm vào `env` chưa có).
+    assert!(rep.deploy_unread.iter().any(|u| u.why.starts_with("Kustomize không dựng được")), "{:?}", rep.deploy_unread.len());
     assert!(!rep.violations.is_empty() || !rep.deploy_unread.is_empty());
 }
 
@@ -1024,7 +1020,7 @@ fn nhieu_networkpolicy_khong_lam_treo() {
     }
     r.write("k8s/p.yaml", &pol);
     r.rules("service W from k8s:w0\nservice V from k8s:w1\nlink W -> V\n");
-    let t = std::time::Instant::now();
+    let t = testclock::Clock::start();
     let rep = r.report();
     assert!(t.elapsed().as_secs_f64() < 5.0, "{:?}", t.elapsed());
     assert!(!rep.deploy_unread.is_empty() || !rep.violations.is_empty());
@@ -1109,7 +1105,7 @@ fn mot_policy_nhieu_peer_va_nhieu_service_khong_lam_treo() {
         ),
     );
     r.rules(&rules);
-    let t = std::time::Instant::now();
+    let t = testclock::Clock::start();
     let rep = r.report();
     assert!(t.elapsed().as_secs_f64() < 5.0, "{:?}", t.elapsed());
     // Mỗi cặp service một vi phạm: 30 × 29.
@@ -1285,7 +1281,7 @@ fn loi_vao_cac_ca_kho() {
         .write("k8s/s.yaml", "apiVersion: v1\nkind: Service\nmetadata: {name: web}\nspec: {selector: {app: x}}\n")
         .write("k8s/r.yaml", &format!("apiVersion: gateway.networking.k8s.io/v1\nkind: HTTPRoute\nmetadata: {{name: r}}\nspec:\n  parentRefs: [{{name: gw}}]\n  rules:\n  - backendRefs:\n{refs}"))
         .rules("service W from k8s:w0\n");
-    let t = std::time::Instant::now();
+    let t = testclock::Clock::start();
     let rep = r.partial(&["k8s/r.yaml"]);
     assert!(t.elapsed().as_secs_f64() < 5.0, "{:?}", t.elapsed());
     assert!(!rep.violations.is_empty() || !rep.deploy_unread.is_empty());
@@ -1453,4 +1449,201 @@ fn chart_helm_ngoai_tap_con_thi_bao() {
     );
     // Lý do không trích giá trị.
     assert!(rep.deploy_unread.iter().all(|u| !u.why.contains("nowhere")));
+}
+
+/// Quyết định 3: patch đổi giá trị env đã có thì vi phạm trỏ về patch; giá trị
+/// từ file env của `configMapGenerator` thì trỏ về đúng file, dòng đó.
+#[test]
+fn kustomize_dong_tro_ve_nguon_gay_ra_gia_tri() {
+    let r = shop("kustomize-dong");
+    r.write(
+        "k8s/kustomization.yaml",
+        "resources: [api.yaml, worker.yaml, db.yaml, cfg.yaml]\npatches:\n- path: patch.yaml\nconfigMapGenerator:\n- name: cfg\n  behavior: merge\n  envs: [cfg.env]\n",
+    )
+    .write(
+        "k8s/patch.yaml",
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata: {name: api}\nspec:\n  template:\n    spec:\n      containers:\n      - name: server\n        env:\n        - name: DB_HOST\n          value: db\n",
+    )
+    .write("k8s/cfg.env", "# bộ đệm\ncache=db:5432\n");
+    only_worker_link(&r);
+    let rep = r.report();
+    assert!(rep.deploy_unread.is_empty(), "{:?}", rep.deploy_unread);
+    let got = violations(&rep);
+    assert!(got.contains(&"NotLinked Api -> Db k8s/patch.yaml:10".to_string()), "{got:?}");
+    assert!(got.contains(&"NotLinked Api -> Db k8s/cfg.env:2".to_string()), "{got:?}");
+}
+
+#[test]
+fn ban_dung_khong_muon_ban_tho_cua_base_ma_thay_manifest_khac() {
+    // Bản dựng kéo `api`, `db` vào và đổi tên thành `prod-*`: env `db` không
+    // khớp `prod-db`, và cũng không rơi về bản thô `k8s/db.yaml` mà chính bản
+    // dựng đã kéo vào. `worker` là manifest thô bản dựng không kéo vào (DB,
+    // hàng đợi khai riêng): bản dựng thấy nó. Manifest thô không mượn ConfigMap
+    // của bản dựng.
+    let r = shop("pham-vi");
+    r.write("prod/kustomization.yaml", "resources: [../k8s/api.yaml, ../k8s/db.yaml, cfg.yaml]\nnamePrefix: prod-\n")
+        .write(
+            "prod/cfg.yaml",
+            "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: cfg}\ndata:\n  cache: \"worker:8080\"\n",
+        );
+    r.remove("k8s/cfg.yaml");
+    let d = r.load();
+    assert!(d.unread.is_empty(), "{:?}", d.unread);
+    let edges = |dir: &str| -> Vec<String> {
+        d.services
+            .iter()
+            .find(|s| s.key == Key::K8s { dir: dir.into(), name: "api".into() })
+            .unwrap()
+            .edges
+            .iter()
+            .map(|e| format!("{:?} {}", e.target, e.file))
+            .collect()
+    };
+    let prod = edges("prod");
+    assert!(!prod.iter().any(|t| t.contains("name: \"db\"")), "{prod:?}");
+    assert!(prod.iter().any(|t| t.contains("dir: \"k8s\", name: \"worker\"")), "{prod:?}");
+    let raw = edges("k8s");
+    assert!(!raw.is_empty() && raw.iter().all(|t| !t.contains("prod")), "{raw:?}");
+}
+
+#[test]
+fn overlay_goi_db_khai_tho_o_thu_muc_khac_van_la_vi_pham() {
+    // Ứng dụng dựng bằng overlay, DB là manifest thô ở thư mục khác: patch đổi
+    // env sang `db` thì bản prod gọi DB, thiếu `link` là vi phạm.
+    let r = Repo::new("overlay-db");
+    r.write("app/main.py", "import os\n")
+        .write(
+            "redis/redis.yaml",
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata: {name: db}\nspec:\n  template:\n    metadata:\n      labels: {app: db}\n    spec:\n      containers: [{name: db, image: postgres:16}]\n---\napiVersion: v1\nkind: Service\nmetadata: {name: db}\nspec:\n  selector: {app: db}\n",
+        )
+        .write("k/base/kustomization.yaml", "resources: [cart.yaml]\n")
+        .write(
+            "k/base/cart.yaml",
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata: {name: cart}\nspec:\n  template:\n    metadata:\n      labels: {app: cart}\n    spec:\n      containers:\n      - name: s\n        image: cart\n        env: [{name: REDIS_ADDR, value: \"cache:6379\"}]\n",
+        )
+        .write(
+            "k/prod/kustomization.yaml",
+            "resources: [../base]\npatches:\n- target: {kind: Deployment, name: cart}\n  patch: |-\n    - op: replace\n      path: /spec/template/spec/containers/0/env/0/value\n      value: db:5432\n",
+        )
+        .rules("component App at app/**\nservice Cart from k8s:cart\nservice Db from k8s:db\n");
+    let rep = r.report();
+    assert!(
+        violations(&rep).contains(&"NotLinked Cart -> Db k/prod/kustomization.yaml:7".to_string()),
+        "{:?}",
+        violations(&rep)
+    );
+}
+
+#[test]
+fn url_tu_xa_co_token_khong_lot_ra() {
+    let r = shop("token");
+    r.write(
+        "prod/kustomization.yaml",
+        "resources:\n- ../k8s/api.yaml\n- https://oauth2:glpat-SECRETTOKEN123@gitlab.example.com/org/infra.git//base?ref=v1\n",
+    );
+    let d = r.load();
+    let all = format!("{:?}{:?}{:?}", d.unread, d.services, r.report());
+    assert!(all.contains("gitlab.example.com"), "{all}");
+    assert!(!all.contains("SECRETTOKEN123"), "lọt token");
+}
+
+#[test]
+fn ban_dung_khong_muon_base_tho_cua_ban_dung_khac() {
+    // Hai ứng dụng, mỗi cái base + prod (`namePrefix: prod-`): bản prod chỉ có
+    // `prod-redis`, nên `redis` không khớp gì, kể cả bản thô `app2/base` mà
+    // bản dựng khác kéo vào.
+    let r = Repo::new("hai-app");
+    for app in ["app1", "app2"] {
+        r.write(&format!("{app}/base/kustomization.yaml"), "resources: [all.yaml]\n")
+            .write(
+                &format!("{app}/base/all.yaml"),
+                "apiVersion: apps/v1\nkind: Deployment\nmetadata: {name: cart}\nspec:\n  template:\n    metadata:\n      labels: {app: cart}\n    spec:\n      containers:\n      - name: s\n        image: cart\n        env: [{name: R, value: \"redis:6379\"}]\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata: {name: redis}\nspec:\n  template:\n    metadata:\n      labels: {app: redis}\n    spec:\n      containers: [{name: r, image: redis}]\n---\napiVersion: v1\nkind: Service\nmetadata: {name: redis}\nspec:\n  selector: {app: redis}\n",
+            )
+            .write(&format!("{app}/prod/kustomization.yaml"), "resources: [../base]\nnamePrefix: prod-\n");
+    }
+    r.write(".arch/system.arch", "component X at x/**\n");
+    let d = r.load();
+    for app in ["app1", "app2"] {
+        let prod = d
+            .services
+            .iter()
+            .find(|s| s.key == Key::K8s { dir: format!("{app}/prod"), name: "cart".into() })
+            .unwrap();
+        assert!(prod.edges.is_empty(), "{app}: {:?}", prod.edges.iter().map(|e| &e.target).collect::<Vec<_>>());
+    }
+}
+
+#[test]
+fn kustomize_env_bi_mat_khong_lot_ra() {
+    // Giá trị từ file `.env` của configMapGenerator, env do patch đặt, và
+    // `secretGenerator` không xuất hiện trong báo cáo hay dữ kiện (TM-46).
+    let r = shop("kz-secret");
+    r.write(
+        "k8s/kustomization.yaml",
+        "resources: [api.yaml, worker.yaml, db.yaml, cfg.yaml]\nconfigMapGenerator:\n- name: extra\n  envs: [extra.env]\nsecretGenerator:\n- name: s\n  literals: [PASSWORD=hunter2-kz]\npatches:\n- target: {kind: Deployment, name: api}\n  patch: |-\n    - op: add\n      path: /spec/template/spec/containers/0/env/-\n      value: {name: TOKEN, value: \"tok-s3cret-xyz\"}\n",
+    )
+    .write("k8s/extra.env", "DB_URL=postgres://admin:p4ss-kz@db:5432/x\n");
+    let rep = r.report();
+    let all = format!("{rep:?}{:?}{:?}", r.load().services, r.load().unread);
+    for secret in ["hunter2-kz", "p4ss-kz", "tok-s3cret-xyz"] {
+        assert!(!all.contains(secret), "lọt `{secret}`");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn kustomize_symlink_va_duong_dan_tuyet_doi_bi_chan() {
+    // Base là symlink, file env của generator là đường dẫn tuyệt đối: cả bản
+    // dựng "chưa đọc được", không đọc ra ngoài (TM-47).
+    let r = shop("kz-link");
+    std::fs::create_dir_all(r.0.join("real")).unwrap();
+    r.write("real/kustomization.yaml", "resources: [../k8s/api.yaml]\n");
+    std::os::unix::fs::symlink(r.0.join("real"), r.0.join("linked")).unwrap();
+    r.write("o1/kustomization.yaml", "resources: [../linked]\n")
+        .write("o2/kustomization.yaml", "resources: [../real]\nconfigMapGenerator:\n- name: x\n  envs: [/etc/hosts]\n");
+    let d = r.load();
+    let why: Vec<String> = d.unread.iter().map(|u| format!("{} {}", u.file, u.why)).collect();
+    for root in ["o1", "o2"] {
+        assert!(why.iter().any(|w| w.contains(&format!("bản dựng `{root}`"))), "{why:?}");
+    }
+    assert!(!d.services.iter().any(|s| matches!(&s.key, Key::K8s { dir, .. } if dir == "o1" || dir == "o2")));
+}
+
+#[test]
+fn manifest_tho_o_thu_muc_goc_ban_dung_chay_cung_ban_dung() {
+    // `load.yaml` nằm cạnh kustomization mà không được nó gồm (triển khai riêng
+    // qua skaffold): nó tra `api` của bản dựng cùng thư mục, không sang bản
+    // sao ở thư mục khác.
+    let r = shop("cung-goc");
+    r.write("k8s/kustomization.yaml", "resources: [api.yaml, worker.yaml, db.yaml, cfg.yaml]\n")
+        .write(
+            "k8s/load.yaml",
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata: {name: load}\nspec:\n  template:\n    metadata:\n      labels: {app: load}\n    spec:\n      containers:\n      - {name: l, image: load, env: [{name: API, value: \"api:80\"}]}\n",
+        )
+        .write("release/api.yaml", API);
+    let d = r.load();
+    let load = d
+        .services
+        .iter()
+        .find(|s| s.key == Key::K8s { dir: "k8s".into(), name: "load".into() })
+        .unwrap();
+    let targets: Vec<&Key> = load.edges.iter().map(|e| &e.target).collect();
+    assert_eq!(targets, [&Key::K8s { dir: "k8s".into(), name: "api".into() }], "{targets:?}");
+    // Nó vẫn là manifest thô với chỗ khác: Job thô ở thư mục khác thấy nó.
+    r.write(
+        "jobs/ping.yaml",
+        "apiVersion: batch/v1\nkind: Job\nmetadata: {name: ping}\nspec:\n  template:\n    spec:\n      containers:\n      - {name: p, image: ping, env: [{name: T, value: \"load:80\"}]}\n",
+    )
+    .write(
+        "k8s/load.yaml",
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata: {name: load}\nspec:\n  template:\n    metadata:\n      labels: {app: load}\n    spec:\n      containers:\n      - {name: l, image: load, env: [{name: API, value: \"api:80\"}]}\n---\napiVersion: v1\nkind: Service\nmetadata: {name: load}\nspec:\n  selector: {app: load}\n",
+    );
+    let d = r.load();
+    let ping = d
+        .services
+        .iter()
+        .find(|s| s.key == Key::K8s { dir: "jobs".into(), name: "ping".into() })
+        .unwrap();
+    let targets: Vec<&Key> = ping.edges.iter().map(|e| &e.target).collect();
+    assert_eq!(targets, [&Key::K8s { dir: "k8s".into(), name: "load".into() }], "{targets:?}");
 }

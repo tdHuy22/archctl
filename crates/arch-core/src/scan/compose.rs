@@ -93,6 +93,9 @@ pub struct Env {
     /// hỏi, xem [`parse_with`]), nó trông như một cái tên và khoá không mang
     /// dấu hiệu bí mật (TM-19, TM-43).
     pub word: Option<String>,
+    /// File khai biến này khi khác file của đối tượng chứa nó: patch
+    /// Kustomize đổi env thì vi phạm trỏ về patch.
+    pub origin: Option<String>,
 }
 
 /// Biến môi trường được giữ giá trị.
@@ -392,6 +395,7 @@ pub fn env_entry_with(key: &str, line: usize, value: &str, wanted: &[String]) ->
         cut,
         value: KEPT.contains(&key).then(|| value.to_string()),
         word: if wanted.iter().any(|w| w == key) { word_value(key, value) } else { None },
+        origin: None,
     }
 }
 

@@ -11,6 +11,7 @@ use super::command::{self, Launch};
 use super::compose;
 use super::dockerfile::{self, Command, Dockerfile, join_container};
 use super::helm;
+use super::kustomize;
 use super::k8s;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -184,6 +185,9 @@ pub struct Deploy {
     /// Manifest dựng từ chart Helm `(thư mục chart, file)`, khi
     /// [`Options::keep_rendered`].
     pub rendered: Vec<(String, helm::Rendered)>,
+    /// Bản dựng Kustomize `(thư mục gốc, bản dựng)`, khi
+    /// [`Options::keep_rendered`].
+    pub built: Vec<(String, kustomize::Build)>,
 }
 
 /// Điều chỉnh một lần nạp.
@@ -1263,7 +1267,28 @@ fn same_ns(a: Option<&str>, b: Option<&str>) -> bool {
 struct Placed<T> {
     file: String,
     dir: String,
+    /// Bản dựng Kustomize chứa nó (chỉ số), `None` cho manifest thô và Helm.
+    /// Tra Service, ConfigMap, NetworkPolicy theo phạm vi, xem [`Cluster::rank`].
+    build: Option<usize>,
+    /// Manifest thô ở thư mục gốc của bản dựng này mà kustomization không gồm
+    /// (`loadgenerator.yaml` triển khai riêng qua skaffold): chạy cùng bản dựng
+    /// đó, mà vẫn là manifest thô với mọi chỗ khác.
+    attached: Option<usize>,
     item: T,
+}
+
+/// Chỗ của một đối tượng khi tra phạm vi: bản dựng, bản dựng gắn kèm, file.
+type Spot<'c> = (Option<usize>, Option<usize>, &'c str);
+
+impl<T> Placed<T> {
+    fn spot(&self) -> Spot<'_> {
+        (self.build, self.attached, &self.file)
+    }
+
+    /// Phạm vi mà đối tượng này nhìn ra khi tra tên.
+    fn view(&self) -> Option<usize> {
+        self.build.or(self.attached)
+    }
 }
 
 /// Mọi thứ đọc được từ manifest của repo.
@@ -1275,6 +1300,43 @@ struct Cluster {
     routes: Vec<Placed<k8s::Route>>,
     config_maps: Vec<Placed<k8s::ConfigMap>>,
     namespaces: HashSet<String>,
+    /// File mà các bản dựng Kustomize đã kéo vào: bản thô của chúng là bản
+    /// sao base (không được triển khai như vậy), bản dựng không tra sang.
+    build_files: HashSet<String>,
+}
+
+impl Cluster {
+    /// Đối tượng ở `at` nhìn từ phạm vi `from` (`None`: manifest thô; `Some(b)`:
+    /// bản dựng `b` hay manifest thô gắn kèm nó): `Some(0)` cùng phạm vi,
+    /// `Some(1)` chỉ khi cùng phạm vi không có (bản dựng nhìn ra manifest thô
+    /// mà không bản dựng nào kéo vào: DB, hàng đợi khai riêng, Helm), `None`
+    /// không thấy. Manifest thô (kể cả gắn kèm) thấy mọi manifest thô, không
+    /// nhìn vào bản dựng; bản dựng không nhìn sang bản dựng khác hay bản thô
+    /// của base.
+    fn rank(&self, from: Option<usize>, at: Spot<'_>) -> Option<u8> {
+        let (build, attached, file) = at;
+        match (from, build) {
+            (Some(a), Some(b)) if a == b => Some(0),
+            (_, Some(_)) => None,
+            (None, None) => Some(0),
+            (Some(b), None) if attached == Some(b) => Some(0),
+            (Some(_), None) if !self.build_files.contains(file) => Some(1),
+            _ => None,
+        }
+    }
+
+    /// Chỉ giữ đối tượng có hạng tốt nhất (xem [`Cluster::rank`]).
+    fn nearest<'c>(&'c self, from: Option<usize>, hits: Vec<usize>, at: &dyn Fn(usize) -> Spot<'c>) -> Vec<usize> {
+        let ranked: Vec<(u8, usize)> = hits.into_iter().filter_map(|i| self.rank(from, at(i)).map(|r| (r, i))).collect();
+        let best = ranked.iter().map(|(r, _)| *r).min();
+        ranked.into_iter().filter(|(r, _)| Some(*r) == best).map(|(_, i)| i).collect()
+    }
+
+    /// NetworkPolicy áp theo namespace: policy và workload thấy nhau khi một
+    /// bên thấy bên kia theo [`Cluster::rank`].
+    fn policy_sees(&self, p: Spot<'_>, w: Spot<'_>) -> bool {
+        self.rank(p.0.or(p.1), w).is_some() || self.rank(w.0.or(w.1), p).is_some()
+    }
 }
 
 /// `kustomization.yaml` đã đọc.
@@ -1468,7 +1530,10 @@ fn load_k8s(
     if opts.keep_rendered {
         out.rendered = rendered.clone();
     }
-    let mut cluster = read_manifests(shared, &all, &in_chart, &kz.patch_files, rendered, out);
+    let mut cluster = read_manifests(shared, &all, &in_chart, &kz.patch_files, rendered, &kz.built, out);
+    if opts.keep_rendered {
+        out.built = kz.built.clone();
+    }
     cluster.namespaces.extend(kz.namespaces.iter().cloned());
     cluster.namespaces.insert("default".into());
     let patched = apply_patches(&kz, &cluster, &steps);
@@ -1537,6 +1602,7 @@ fn load_k8s(
                 hits.push(wi);
             }
         }
+        let hits = cluster.nearest(s.view(), hits, &|wi| cluster.workloads[wi].spot());
         let same: Vec<usize> = hits
             .iter()
             .copied()
@@ -1586,7 +1652,7 @@ fn load_k8s(
         }
     }
     // Service theo tên từ một route: cùng namespace, ưu tiên cùng thư mục.
-    let services_named = |name: &str, ns: Option<&str>, dir: &str| -> Vec<usize> {
+    let services_named = |name: &str, ns: Option<&str>, dir: &str, build: Option<usize>| -> Vec<usize> {
         let all: Vec<usize> = svc_by_name
             .get(&name.to_ascii_lowercase())
             .map(|v| {
@@ -1596,6 +1662,7 @@ fn load_k8s(
                     .collect()
             })
             .unwrap_or_default();
+        let all = cluster.nearest(build, all, &|si| cluster.services[si].spot());
         let same: Vec<usize> = all
             .iter()
             .copied()
@@ -1627,7 +1694,7 @@ fn load_k8s(
         // Đích của route, gộp trùng: một route có thể lặp một Service hàng nghìn lần.
         let mut targets: BTreeMap<usize, usize> = BTreeMap::new();
         for (name, ref_ns, line) in &r.services {
-            for si in services_named(name, ref_ns.as_deref().or(ns), &route.dir) {
+            for si in services_named(name, ref_ns.as_deref().or(ns), &route.dir, route.view()) {
                 targets.entry(si).or_insert(*line);
             }
         }
@@ -1637,6 +1704,9 @@ fn load_k8s(
         for (name, dns, line) in &r.delegates {
             let dns = dns.as_deref().or(ns);
             for &ci in vs_by_name.get(name.as_str()).map_or(&[][..], Vec::as_slice) {
+                if cluster.rank(route.view(), cluster.routes[ci].spot()).is_none() {
+                    continue;
+                }
                 let child = &cluster.routes[ci].item;
                 if same_ns(child.namespace.as_deref(), dns) {
                     hosts.extend(
@@ -1656,7 +1726,7 @@ fn load_k8s(
             let Some((svc_name, svc_ns)) = in_cluster(host, hns) else {
                 continue;
             };
-            for si in services_named(&svc_name, svc_ns.as_deref(), &route.dir) {
+            for si in services_named(&svc_name, svc_ns.as_deref(), &route.dir, route.view()) {
                 targets.entry(si).or_insert(line);
             }
         }
@@ -1688,7 +1758,7 @@ fn load_k8s(
         {
             continue;
         }
-        for si in resolve_host(&cluster, &svc_by_name, h, None, None) {
+        for si in resolve_host(&cluster, &svc_by_name, h, None, None, None) {
             for &wi in select(si).iter() {
                 if !Shared::spend(&steps, 1) {
                     steps_over.set(true);
@@ -1745,7 +1815,7 @@ fn load_k8s(
         };
         // Tên máy → Service → workload.
         let resolve =
-            |host: &str| resolve_host(&cluster, &svc_by_name, host, ns, Some(&placed.dir));
+            |host: &str| resolve_host(&cluster, &svc_by_name, host, ns, Some(&placed.dir), Some(placed.view()));
         // `x.y` mà `x` là Service của repo, `y` không phải namespace nào đã
         // biết: có thể là Service ở namespace chưa khai, có thể là tên miền
         // ngoài. Không đoán, nhưng báo (TM-21).
@@ -1763,23 +1833,26 @@ fn load_k8s(
             let mut envs: Vec<(String, compose::Env)> = c
                 .env
                 .iter()
-                .map(|e| (placed.file.clone(), e.clone()))
+                .map(|e| (e.origin.clone().unwrap_or_else(|| placed.file.clone()), e.clone()))
                 .collect();
             let config = |name: &str| -> Option<&Placed<k8s::ConfigMap>> {
                 let list = cm_by_name.get(name)?;
-                let ok =
-                    |&&i: &&usize| same_ns(cluster.config_maps[i].item.namespace.as_deref(), ns);
-                list.iter()
-                    .filter(ok)
+                let ok: Vec<usize> = list
+                    .iter()
+                    .copied()
+                    .filter(|&i| same_ns(cluster.config_maps[i].item.namespace.as_deref(), ns))
+                    .collect();
+                let ok = cluster.nearest(placed.view(), ok, &|i| cluster.config_maps[i].spot());
+                ok.iter()
                     .find(|&&i| cluster.config_maps[i].dir == placed.dir)
-                    .or_else(|| list.iter().find(ok))
+                    .or_else(|| ok.first())
                     .map(|&i| &cluster.config_maps[i])
             };
             for r in &c.refs {
                 if let Some(cm) = config(&r.config_map)
                     && let Some(e) = cm.item.entry(&r.item, &r.key, &opts.env_words)
                 {
-                    envs.push((cm.file.clone(), e));
+                    envs.push((e.origin.clone().unwrap_or_else(|| cm.file.clone()), e));
                 }
             }
             for f in &c.env_from {
@@ -1788,7 +1861,7 @@ fn load_k8s(
                         cm.item
                             .entries(&f.prefix, &opts.env_words)
                             .into_iter()
-                            .map(|e| (cm.file.clone(), e)),
+                            .map(|e| (e.origin.clone().unwrap_or_else(|| cm.file.clone()), e)),
                     );
                 }
             }
@@ -1953,6 +2026,7 @@ fn resolve_host(
     host: &str,
     ns: Option<&str>,
     dir: Option<&str>,
+    build: Option<Option<usize>>,
 ) -> Vec<usize> {
     let once = |host: &str| -> Vec<usize> {
         let l: Vec<&str> = host.split('.').collect();
@@ -1966,6 +2040,10 @@ fn resolve_host(
                         .collect()
                 })
                 .unwrap_or_default();
+            let all = match build {
+                Some(from) => cluster.nearest(from, all, &|si| cluster.services[si].spot()),
+                None => all,
+            };
             let same: Vec<usize> = all
                 .iter()
                 .copied()
@@ -2055,11 +2133,14 @@ fn chart_files(root: &Path, dir: &str) -> (Vec<String>, Vec<Unread>) {
 fn network_policies(cluster: &Cluster, steps: &Cell<usize>) -> HashMap<usize, (Guard, Guard)> {
     const NAME: &str = "kubernetes.io/metadata.name";
     let mut out: HashMap<usize, (Guard, Guard)> = HashMap::new();
-    let pick = |sel: &k8s::Selector, scope: &Scope<'_>| -> Option<Vec<usize>> {
+    let pick = |sel: &k8s::Selector, scope: &Scope<'_>, pol: Spot<'_>| -> Option<Vec<usize>> {
         let mut hits = Vec::new();
         for (wi, w) in cluster.workloads.iter().enumerate() {
             if !Shared::spend(steps, 1) {
                 return None;
+            }
+            if !cluster.policy_sees(pol, w.spot()) {
+                continue;
             }
             let ns = w.item.namespace.as_deref();
             let in_scope = match scope {
@@ -2082,7 +2163,7 @@ fn network_policies(cluster: &Cluster, steps: &Cell<usize>) -> HashMap<usize, (G
     };
     for p in &cluster.policies {
         let pol = &p.item;
-        let Some(targets) = pick(&pol.pods, &Scope::Same(pol.namespace.as_deref())) else {
+        let Some(targets) = pick(&pol.pods, &Scope::Same(pol.namespace.as_deref()), p.spot()) else {
             return out;
         };
         if targets.is_empty() {
@@ -2138,7 +2219,7 @@ fn network_policies(cluster: &Cluster, steps: &Cell<usize>) -> HashMap<usize, (G
                         });
                         continue;
                     }
-                    let Some(hits) = pick(&pods, &scope) else {
+                    let Some(hits) = pick(&pods, &scope, p.spot()) else {
                         return out;
                     };
                     if !kept.insert(hits.clone()) {
@@ -2213,12 +2294,26 @@ fn read_manifests(
     in_chart: &dyn Fn(&str) -> bool,
     patch_files: &HashSet<String>,
     rendered: Vec<(String, helm::Rendered)>,
+    built: &[(String, kustomize::Build)],
     out: &mut Deploy,
 ) -> Cluster {
-    let mut c = Cluster::default();
+    let mut c = Cluster {
+        build_files: built.iter().flat_map(|(_, b)| b.files.iter().cloned()).collect(),
+        ..Cluster::default()
+    };
     let mut objects = 0usize;
+    // Manifest thô ở thư mục gốc của một bản dựng mà bản dựng không gồm (ví dụ
+    // `loadgenerator.yaml` triển khai riêng qua skaffold) chạy cùng bản dựng
+    // đó: cùng phạm vi tra Service, ConfigMap.
+    let root_of: HashMap<&str, usize> = built.iter().enumerate().map(|(i, (dir, _))| (dir.as_str(), i)).collect();
+    // Manifest mà bản dựng Kustomize ở chính thư mục của nó đã gồm: bản dựng
+    // thay bản đọc thô (cùng `k8s:<thư mục>/<tên>`, không báo hai lần).
+    let in_build: HashSet<&str> = built
+        .iter()
+        .flat_map(|(dir, b)| b.docs.iter().filter(move |d| dir_of(&d.file) == dir.as_str()).map(|d| d.file.as_str()))
+        .collect();
     for f in candidates {
-        if in_chart(f) || patch_files.contains(f.as_str()) {
+        if in_chart(f) || patch_files.contains(f.as_str()) || in_build.contains(f.as_str()) {
             continue;
         }
         let f = &f;
@@ -2268,7 +2363,7 @@ fn read_manifests(
             }
             Err(_) => continue,
         };
-        if !place(shared, &mut c, &mut objects, f, dir_of(f), file, out) {
+        if !place(shared, &mut c, &mut objects, f, (dir_of(f), None, root_of.get(dir_of(f)).copied()), file, out) {
             break;
         }
     }
@@ -2303,8 +2398,39 @@ fn read_manifests(
         };
         let lines = r.lines;
         file.remap_lines(&|l| lines.get(l.saturating_sub(1)).copied().unwrap_or(l));
-        if !place(shared, &mut c, &mut objects, &r.file, &dir, file, out) {
+        if !place(shared, &mut c, &mut objects, &r.file, (&dir, None, None), file, out) {
             break;
+        }
+    }
+    // Bản dựng Kustomize: thư mục là thư mục kustomization gốc
+    // (`k8s:overlays/prod/cart`), dòng trỏ về file gây ra giá trị (manifest
+    // gốc hay patch), tên workload là tên trước `namePrefix`.
+    'builds: for (bi, (dir, b)) in built.iter().enumerate() {
+        for d in &b.docs {
+            if !Shared::spend(&shared.k8s_read, d.text.len()) {
+                out.unread.push(Unread {
+                    file: d.file.clone(),
+                    why: format!("quá {} MB YAML cho cả repo", MAX_K8S_READ >> 20),
+                });
+                break 'builds;
+            }
+            if !k8s::may_be(&d.text) {
+                continue;
+            }
+            let Ok(mut file) = k8s::parse_with(&d.text, &shared.env_words) else {
+                out.unread.push(Unread { file: d.file.clone(), why: "bản dựng Kustomize không phải YAML đọc được".into() });
+                continue;
+            };
+            let at = |l: usize| d.lines.get(l.saturating_sub(1)).copied();
+            let name_of = |f: u32| b.files.get(f as usize).cloned();
+            file.remap_origins(&|l| at(l).and_then(|(f, _)| name_of(f)).filter(|f| *f != d.file));
+            file.remap_lines(&|l| at(l).map_or(l, |(_, x)| x as usize));
+            for w in &mut file.workloads {
+                w.name = d.original.clone();
+            }
+            if !place(shared, &mut c, &mut objects, &d.file, (dir, Some(bi), None), file, out) {
+                break 'builds;
+            }
         }
     }
     c
@@ -2317,7 +2443,7 @@ fn place(
     c: &mut Cluster,
     objects: &mut usize,
     f: &str,
-    dir: &str,
+    (dir, build, attached): (&str, Option<usize>, Option<usize>),
     file: k8s::File,
     out: &mut Deploy,
 ) -> bool {
@@ -2388,6 +2514,8 @@ fn place(
         c.workloads.push(Placed {
             file: (*f).clone(),
             dir: dir.clone(),
+            build,
+            attached,
             item: w,
         });
     }
@@ -2396,6 +2524,8 @@ fn place(
         c.services.push(Placed {
             file: (*f).clone(),
             dir: dir.clone(),
+            build,
+            attached,
             item: s,
         });
     }
@@ -2404,6 +2534,8 @@ fn place(
         c.config_maps.push(Placed {
             file: (*f).clone(),
             dir: dir.clone(),
+            build,
+            attached,
             item: m,
         });
     }
@@ -2411,6 +2543,8 @@ fn place(
         c.policies.push(Placed {
             file: (*f).clone(),
             dir: dir.clone(),
+            build,
+            attached,
             item: p,
         });
     }
@@ -2418,6 +2552,8 @@ fn place(
         c.routes.push(Placed {
             file: (*f).clone(),
             dir: dir.clone(),
+            build,
+            attached,
             item: r,
         });
     }
@@ -2437,6 +2573,8 @@ struct Kz {
     /// Với mỗi kustomization: file manifest nó kéo vào (qua `resources`,
     /// `components`), và thứ nó đè lên chúng.
     roots: Vec<(HashSet<String>, Vec<Overlay>)>,
+    /// Bản dựng của các kustomization gốc dựng được, kèm thư mục gốc.
+    built: Vec<(String, kustomize::Build)>,
     patch_files: HashSet<String>,
     reached: HashSet<String>,
     namespaces: Vec<String>,
@@ -2538,6 +2676,8 @@ fn kustomize(shared: &Shared<'_>, listed: &[&String], steps: &Cell<usize>, out: 
         kb.by_dir.insert(dir, i);
     }
     let mut kz = Kz::default();
+    // Kustomization mà mỗi kustomization với tới (kể cả chính nó).
+    let mut reach: Vec<HashSet<usize>> = Vec::new();
     let mut touch_cache: HashMap<String, Rc<Vec<k8s::Touch>>> = HashMap::new();
     // Kustomization đọc thêm khi lần cũng là gốc: patch của một base trỏ vào
     // thư mục ví dụ vẫn áp lên base đó.
@@ -2660,8 +2800,10 @@ fn kustomize(shared: &Shared<'_>, listed: &[&String], steps: &Cell<usize>, out: 
         }
         kz.reached.extend(files.iter().cloned());
         kz.roots.push((files, patches));
+        reach.push(visited);
         root += 1;
     }
+    build_roots(shared, &kb, &reach, &mut kz, out);
     for k in &kb.ks {
         kz.namespaces.extend(k.k.namespace.clone());
         for p in &k.k.patches {
@@ -2673,6 +2815,65 @@ fn kustomize(shared: &Shared<'_>, listed: &[&String], steps: &Cell<usize>, out: 
         }
     }
     kz
+}
+
+/// Bản dựng tối đa và tài nguyên dựng ra tối đa cho cả repo (TM-44).
+const MAX_BUILDS: usize = 200;
+const MAX_BUILT_DOCS: usize = 20_000;
+
+/// Dựng mọi kustomization gốc (không bị kustomization khác trỏ tới). Dựng
+/// được thì patch, phép biến đổi của mọi kustomization nó với tới đã được áp:
+/// không còn báo "chưa đọc được" cho chúng, trừ khi một bản dựng khác cũng với
+/// tới chúng mà không dựng được.
+fn build_roots(shared: &Shared<'_>, kb: &Kusts, reach: &[HashSet<usize>], kz: &mut Kz, out: &mut Deploy) {
+    let n = kb.ks.len().min(reach.len());
+    let referenced: HashSet<usize> =
+        (0..n).flat_map(|i| reach[i].iter().copied().filter(move |&j| j != i)).collect();
+    let read = |p: &str| shared.read(p).map(|t| t.to_string());
+    let kind = |p: &str| match kind_in(shared.root, p) {
+        Some(Kind::Dir) => Some(true),
+        Some(Kind::File) => Some(false),
+        None => None,
+    };
+    let budget = Cell::new(kustomize::MAX_STEPS);
+    let nodes = Cell::new(kustomize::MAX_NODES);
+    let parsed = RefCell::new(HashMap::new());
+    let fs = kustomize::Fs { read: &read, kind: &kind, budget: &budget, nodes: &nodes, parsed: &parsed };
+    let (mut good, mut bad) = (vec![false; n], vec![false; n]);
+    let (mut builds, mut docs) = (0usize, 0usize);
+    for i in (0..n).filter(|i| !referenced.contains(i)) {
+        let dir = kb.ks[i].dir.clone();
+        // Component chỉ dựng trong kustomization dùng nó.
+        if shared.read(&kb.ks[i].file).is_ok_and(|t| kustomize::is_component(&t)) {
+            continue;
+        }
+        if builds >= MAX_BUILDS || docs >= MAX_BUILT_DOCS {
+            out.unread.push(Unread {
+                file: kb.ks[i].file.clone(),
+                why: format!("quá {MAX_BUILDS} bản dựng hay {MAX_BUILT_DOCS} tài nguyên Kustomize cho cả repo; bản dựng này không dựng"),
+            });
+            reach[i].iter().filter(|&&j| j < n).for_each(|&j| bad[j] = true);
+            continue;
+        }
+        builds += 1;
+        match kustomize::build(&dir, &fs) {
+            Ok(b) => {
+                docs += b.docs.len();
+                reach[i].iter().filter(|&&j| j < n).for_each(|&j| good[j] = true);
+                kz.built.push((dir, b));
+            }
+            Err(f) => {
+                reach[i].iter().filter(|&&j| j < n).for_each(|&j| bad[j] = true);
+                let root = if dir.is_empty() { "." } else { dir.as_str() };
+                out.unread.push(Unread { file: f.file, why: format!("Kustomize không dựng được bản dựng `{root}`: {}", f.why) });
+            }
+        }
+    }
+    for i in 0..n {
+        if good[i] && !bad[i] {
+            kz.roots[i].1.clear();
+        }
+    }
 }
 
 /// Patch và phép biến đổi của Kustomize đè lên workload nào, theo chỉ số
@@ -2830,13 +3031,13 @@ fn k8s_starts(
         let from_image = |x: &Option<(Command, usize)>| {
             x.as_ref().map(|(c, l)| (c.argv(), (df_path.clone(), *l)))
         };
-        let from_pod = |x: &Option<(Vec<String>, usize)>| {
+        let from_pod = |x: &Option<(Vec<String>, usize)>, origin: &Option<String>| {
             x.as_ref()
-                .map(|(a, l)| (a.clone(), (placed.file.clone(), *l)))
+                .map(|(a, l)| (a.clone(), (origin.clone().unwrap_or_else(|| placed.file.clone()), *l)))
         };
-        let entry = from_pod(&c.command).or_else(|| from_image(&eff.entrypoint));
+        let entry = from_pod(&c.command, &c.command_origin).or_else(|| from_image(&eff.entrypoint));
         let cmd = match (&c.args, &c.command) {
-            (Some(_), _) => from_pod(&c.args),
+            (Some(_), _) => from_pod(&c.args, &c.args_origin),
             (None, Some(_)) => None,
             (None, None) => from_image(&eff.cmd),
         };

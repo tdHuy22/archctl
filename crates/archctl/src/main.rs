@@ -1506,6 +1506,24 @@ fn scan_deploy(
             file_json.push(j);
         }
     }
+    // Bản dựng Kustomize: dữ kiện từng tài nguyên dựng ra, theo kustomization
+    // gốc; tên trước `namePrefix` để nối khoá với bản dựng thật.
+    let mut built_json: Vec<String> = Vec::new();
+    for (root_dir, b) in &loaded.built {
+        let docs: Vec<String> = b
+            .docs
+            .iter()
+            .filter_map(|d| {
+                let lines: Vec<usize> = d.lines.iter().map(|(_, l)| *l as usize).collect();
+                scan_k8s_file(&d.file, &d.text, &command, &quoted, Some(&lines))
+                    .map(|j| format!(r#"{{"original":{},"facts":{j}}}"#, json::string(&d.original)))
+            })
+            .collect();
+        built_json.push(format!(r#"{{"root":{},"docs":[{}]}}"#, json::string(root_dir), docs.join(",")));
+        if !as_json {
+            say!("bản dựng Kustomize {} ({} tài nguyên)", if root_dir.is_empty() { "." } else { root_dir }, b.docs.len());
+        }
+    }
     let mut services: Vec<String> = Vec::new();
     for svc in &loaded.services {
         let key = svc.key.text();
@@ -1618,11 +1636,12 @@ fn scan_deploy(
         .map(|u| format!(r#"{{"file":{},"why":{}}}"#, json::string(&u.file), json::string(&u.why)))
         .collect();
     format!(
-        r#"{{"files":[{}],"services":[{}],"unread":[{}],"charts":{}}}"#,
+        r#"{{"files":[{}],"services":[{}],"unread":[{}],"charts":{},"kustomize":[{}]}}"#,
         file_json.join(","),
         services.join(","),
         unread.join(","),
-        json::strings(loaded.charts.iter().map(String::as_str))
+        json::strings(loaded.charts.iter().map(String::as_str)),
+        built_json.join(",")
     )
 }
 
