@@ -562,7 +562,7 @@ git, `cargo clean` dọn.
    37 gốc, bộ mẫu shop 14, refused bị từ chối đúng); logs-t7 sabotage 79
    kiểu 0 trượt (60 kiểu khai trong CI cộng các lượt "không phá"), `verify`
    3/3, `check --strict` 0. Còn lại đợt 7: `kubernetes_*` qua Terraform.
-   Việc tiếp: commit khi bạn bảo; đẩy nhánh thử, CI xanh thì lên main.
+   Đã commit và push lên main đợt 7 (fe195de + bản sửa oracle xoá thư mục plan); CI xanh ở thu/dot7 (run 39535809428). Việc tiếp: 11.1 `kubernetes_*` qua Terraform, rồi đợt 8.
    d. Chạy lần lượt, mỗi lệnh qua `receipt.py run --`, dừng ở lệnh trượt:
       `cargo test --workspace`; `cargo clippy --workspace --all-targets --
       -D warnings`; `cargo +1.88 check --workspace --tests`; `cargo build
