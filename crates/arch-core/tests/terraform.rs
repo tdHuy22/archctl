@@ -47,7 +47,7 @@ impl Repo {
 
     fn load(&self) -> deploy::Deploy {
         let files = arch_core::check::deploy_files(&self.0, &[]);
-        deploy::load(&self.0, &files, &deploy::Options { tf: true, ..Default::default() })
+        deploy::load(&self.0, &files, &deploy::Options { tf: true, k8s: true, ..Default::default() })
     }
 }
 
@@ -259,4 +259,597 @@ fn repo_chi_co_terraform_van_sinh_ban_nhap() {
     let law = arch_core::discover::render(&found, "2026-10-20");
     assert!(law.contains("from tf:aws_ecs_service.api"), "{law}");
     assert!(law.lines().any(|l| l.starts_with("link Internet")), "{law}");
+}
+
+// `kubernetes_*` khai qua Terraform: dựng thành manifest rồi đi qua bộ đọc
+// Kubernetes, khoá là `k8s:<thư mục module gốc>/<tên>`.
+const K8S: &str = r#"resource "aws_db_instance" "main" {
+  engine = "postgres"
+}
+resource "kubernetes_deployment_v1" "cart" {
+  metadata {
+    name = "cart"
+  }
+  spec {
+    selector {
+      match_labels = { app = "cart" }
+    }
+    template {
+      metadata {
+        labels = { app = "cart" }
+      }
+      spec {
+        container {
+          name  = "cart"
+          image = "shop/cart:1"
+          env {
+            name  = "DB_HOST"
+            value = aws_db_instance.main.address
+          }
+          env {
+            name  = "DB_PASSWORD"
+            value = "hunter2-k8s"
+          }
+        }
+      }
+    }
+  }
+}
+resource "kubernetes_service_v1" "cart" {
+  metadata {
+    name = "cart"
+  }
+  spec {
+    selector = kubernetes_deployment_v1.cart.spec[0].template[0].metadata[0].labels
+    port {
+      port = 80
+    }
+  }
+}
+resource "kubernetes_deployment_v1" "web" {
+  metadata {
+    name = "web"
+  }
+  spec {
+    selector {
+      match_labels = { app = "web" }
+    }
+    template {
+      metadata {
+        labels = { app = "web" }
+      }
+      spec {
+        container {
+          name  = "web"
+          image = "shop/web:1"
+          env {
+            name  = "CART_URL"
+            value = "http://${kubernetes_service_v1.cart.metadata[0].name}:80"
+          }
+        }
+      }
+    }
+  }
+}
+resource "kubernetes_service_v1" "web" {
+  metadata {
+    name = "web"
+  }
+  spec {
+    selector = { app = "web" }
+    type     = "LoadBalancer"
+    port {
+      port = 80
+    }
+  }
+}
+"#;
+
+const K8S_RULES: &str = "service Cart from k8s:cart\nservice Web from k8s:web\nservice Db from tf:aws_db_instance.main\n";
+
+#[test]
+fn kubernetes_qua_terraform_thanh_canh_va_loi_vao() {
+    let r = Repo::new("k8s");
+    r.write("infra/main.tf", K8S).rules(K8S_RULES);
+    let rep = r.report();
+    let v = violations(&rep);
+    // Cạnh qua Service mà selector là tham chiếu tới nhãn của Deployment;
+    // dòng là dòng của mục `env`, như manifest viết tay.
+    assert!(v.contains(&"NotLinked Web -> Cart infra/main.tf:61".to_string()), "{v:?}");
+    // Cạnh tới tài nguyên Terraform khác qua tham chiếu.
+    assert!(v.contains(&"NotLinked Cart -> Db infra/main.tf:22".to_string()), "{v:?}");
+    assert!(v.iter().any(|x| x.starts_with("NotLinked Internet -> Web infra/main.tf:69")), "{v:?}");
+    assert!(rep.deploy_unread.is_empty(), "{:?}", rep.deploy_unread);
+    r.rules(&format!("{K8S_RULES}link Web -> Cart\nlink Cart -> Db\nlink Internet -> Web\n"));
+    let rep = r.report();
+    assert!(rep.violations.is_empty() && rep.missing.is_empty(), "{:?} {:?}", violations(&rep), rep.missing);
+    let all = format!("{rep:?}{:?}", r.load().services);
+    assert!(!all.contains("hunter2-k8s"), "lọt mật khẩu");
+}
+
+#[test]
+fn hook_doc_lai_kubernetes_khi_sua_file_tf() {
+    let r = Repo::new("k8s-hook");
+    r.write("infra/main.tf", K8S)
+        .rules(&format!("{K8S_RULES}link Web -> Cart\nlink Cart -> Db\nlink Internet -> Web\n"));
+    assert!(r.partial(&["infra/main.tf"]).violations.is_empty());
+    // Agent cho cart gọi thẳng web.
+    r.write(
+        "infra/main.tf",
+        &K8S.replacen(
+            "          env {\n            name  = \"DB_PASSWORD\"",
+            "          env {\n            name  = \"WEB\"\n            value = \"http://web\"\n          }\n          env {\n            name  = \"DB_PASSWORD\"",
+            1,
+        ),
+    );
+    let v = violations(&r.partial(&["infra/main.tf"]));
+    assert!(v.contains(&"NotLinked Cart -> Web infra/main.tf:25".to_string()), "{v:?}");
+}
+
+#[test]
+fn kubernetes_manifest_ingress_va_config_map() {
+    let r = Repo::new("k8s-manifest");
+    r.write(
+        "main.tf",
+        r#"resource "kubernetes_manifest" "api" {
+  manifest = {
+    apiVersion = "apps/v1"
+    kind       = "Deployment"
+    metadata   = { name = "api" }
+    spec = {
+      selector = { matchLabels = { app = "api" } }
+      template = {
+        metadata = { labels = { app = "api" } }
+        spec = {
+          containers = [{
+            name    = "api"
+            image   = "shop/api:1"
+            envFrom = [{ configMapRef = { name = "api-env" } }]
+          }]
+        }
+      }
+    }
+  }
+}
+resource "kubernetes_config_map_v1" "env" {
+  metadata {
+    name = "api-env"
+  }
+  data = {
+    WORKER_URL = "http://worker:9000"
+  }
+}
+resource "kubernetes_deployment_v1" "worker" {
+  metadata {
+    name = "worker"
+  }
+  spec {
+    selector {
+      match_labels = { app = "worker" }
+    }
+    template {
+      metadata {
+        labels = { app = "worker" }
+      }
+      spec {
+        container {
+          name  = "worker"
+          image = "shop/worker:1"
+        }
+      }
+    }
+  }
+}
+resource "kubernetes_service_v1" "worker" {
+  metadata {
+    name = "worker"
+  }
+  spec {
+    selector = { app = "worker" }
+    port {
+      port = 9000
+    }
+  }
+}
+resource "kubernetes_service_v1" "api" {
+  metadata {
+    name = "api"
+  }
+  spec {
+    selector = { app = "api" }
+    port {
+      port = 80
+    }
+  }
+}
+resource "kubernetes_ingress_v1" "public" {
+  metadata {
+    name = "public"
+  }
+  spec {
+    rule {
+      http {
+        path {
+          path = "/"
+          backend {
+            service {
+              name = kubernetes_service_v1.api.metadata[0].name
+              port {
+                number = 80
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"#,
+    )
+    .rules("service Api from k8s:api\nservice Worker from k8s:worker\n");
+    let v = violations(&r.report());
+    assert!(v.contains(&"NotLinked Api -> Worker main.tf:26".to_string()), "{v:?}");
+    assert!(v.iter().any(|x| x.starts_with("NotLinked Internet -> Api main.tf:")), "{v:?}");
+}
+
+#[test]
+fn kubernetes_chua_doc_duoc_thi_bao() {
+    let r = Repo::new("k8s-chua-doc");
+    r.write(
+        "main.tf",
+        r#"variable "envs" {}
+resource "kubernetes_deployment_v1" "a" {
+  metadata {
+    name = "a"
+  }
+  spec {
+    template {
+      spec {
+        container {
+          name  = "a"
+          image = "x"
+          dynamic "env" {
+            for_each = var.envs
+            content {
+              name  = env.key
+              value = env.value
+            }
+          }
+        }
+      }
+    }
+  }
+}
+resource "kubernetes_horizontal_thing" "b" {
+  spec {
+    template {
+      container {
+        image = "y"
+      }
+    }
+  }
+}
+resource "kubernetes_secret_v1" "s" {
+  metadata {
+    name = "s"
+  }
+  data = {
+    TOKEN = "hunter2-secret"
+  }
+}
+"#,
+    )
+    .rules("service A from k8s:a\n");
+    let rep = r.report();
+    let u: Vec<String> = rep.deploy_unread.iter().map(|u| format!("{} {}", u.file, u.why)).collect();
+    assert!(u.iter().any(|x| x.starts_with("main.tf:12 ") && x.contains("dynamic \"env\"")), "{u:?}");
+    assert!(u.iter().any(|x| x.starts_with("main.tf:24 ") && x.contains("kubernetes_horizontal_thing")), "{u:?}");
+    let all = format!("{rep:?}{:?}", r.load().services);
+    assert!(!all.contains("hunter2-secret"), "lọt secret");
+}
+
+#[test]
+fn kubernetes_tham_chieu_vong_va_no_khong_treo() {
+    let r = Repo::new("k8s-vong");
+    // Hai ConfigMap trỏ nhau, và nhãn nhân đôi qua nhiều tầng tham chiếu.
+    let mut tf = String::from(
+        r#"resource "kubernetes_config_map_v1" "a" {
+  metadata {
+    name   = "a"
+    labels = kubernetes_config_map_v1.b.metadata[0].labels
+  }
+}
+resource "kubernetes_config_map_v1" "b" {
+  metadata {
+    name   = "b"
+    labels = kubernetes_config_map_v1.a.metadata[0].labels
+  }
+}
+resource "kubernetes_config_map_v1" "m0" {
+  metadata {
+    name = "m0"
+  }
+  data = { k = "v" }
+}
+"#,
+    );
+    for i in 1..300 {
+        tf.push_str(&format!(
+            "resource \"kubernetes_config_map_v1\" \"m{i}\" {{\n  metadata {{\n    name = \"m{i}\"\n  }}\n  data = merge(kubernetes_config_map_v1.m{p}.data, {{ a = kubernetes_config_map_v1.m{p}.data, b = kubernetes_config_map_v1.m{p}.data }})\n}}\n",
+            p = i - 1
+        ));
+    }
+    r.write("main.tf", &tf).rules("service A from k8s:a\n");
+    let t = std::time::Instant::now();
+    let rep = r.report();
+    assert!(t.elapsed().as_secs_f64() < 10.0, "{:?}", t.elapsed());
+    // Chạm trần thì báo, không lặng lẽ bỏ phần đó.
+    let u: Vec<String> = rep.deploy_unread.iter().map(|u| format!("{} {}", u.file, u.why)).collect();
+    assert!(u.iter().any(|x| x.starts_with("main.tf:1 ") && x.contains("vòng")), "{u:?}");
+}
+
+#[test]
+fn kubernetes_gia_tri_qua_tham_chieu_qua_lon_thi_bao() {
+    let r = Repo::new("k8s-lon");
+    // Một ConfigMap 2 000 khoá, tài nguyên kia lấy nó 1 000 lần: hai triệu
+    // đơn vị, quá trần giá trị chép qua tham chiếu.
+    let mut tf = String::from("resource \"kubernetes_config_map_v1\" \"big\" {\n  metadata {\n    name = \"big\"\n  }\n  data = {\n");
+    for i in 0..2000 {
+        tf.push_str(&format!("    k{i} = \"v\"\n"));
+    }
+    tf.push_str("  }\n}\nresource \"kubernetes_config_map_v1\" \"fan\" {\n  metadata {\n    name = \"fan\"\n    labels = {\n");
+    for i in 0..1000 {
+        tf.push_str(&format!("      a{i} = kubernetes_config_map_v1.big.data\n"));
+    }
+    tf.push_str("    }\n  }\n}\n");
+    r.write("main.tf", &tf).rules("service A from k8s:a\n");
+    let t = std::time::Instant::now();
+    let rep = r.report();
+    assert!(t.elapsed().as_secs_f64() < 10.0, "{:?}", t.elapsed());
+    let u: Vec<String> = rep.deploy_unread.iter().map(|u| format!("{} {}", u.file, u.why)).collect();
+    assert!(u.iter().any(|x| x.contains("kubernetes_config_map_v1") && x.contains("đơn vị") && !x.contains("vòng")), "{u:?}");
+}
+
+/// Chép `K8S` với một thay thế, kiểm `check`.
+fn k8s_variant(name: &str, from: &str, to: &str, rules: &str) -> (Vec<String>, Vec<String>) {
+    let r = Repo::new(name);
+    assert!(K8S.contains(from), "{from}");
+    r.write("infra/main.tf", &K8S.replacen(from, to, 1)).rules(rules);
+    let rep = r.report();
+    (violations(&rep), rep.deploy_unread.iter().map(|u| format!("{} {}", u.file, u.why)).collect())
+}
+
+#[test]
+fn review_k8s_khong_lang_le_mat_canh() {
+    let all = format!("{K8S_RULES}link Web -> Cart\nlink Cart -> Db\nlink Internet -> Web\n");
+    // Env tên bí mật tham chiếu cơ sở dữ liệu: không thành cạnh.
+    let (v, _) = k8s_variant("k8s-secret-ref", "value = aws_db_instance.main.address", "value = \"x\"", K8S_RULES);
+    assert!(!v.iter().any(|x| x.contains("Cart -> Db")), "{v:?}");
+    let (v, _) = k8s_variant(
+        "k8s-secret-ref2",
+        "value = \"hunter2-k8s\"",
+        "value = aws_db_instance.main.password",
+        K8S_RULES,
+    );
+    assert!(v.iter().filter(|x| x.contains("Cart -> Db")).count() == 1, "{v:?}");
+    // Thuộc tính chỉ biết lúc apply của Service vẫn là Service đó.
+    let (v, u) = k8s_variant("k8s-cluster-ip", "kubernetes_service_v1.cart.metadata[0].name", "kubernetes_service_v1.cart.spec[0].cluster_ip", K8S_RULES);
+    assert!(v.contains(&"NotLinked Web -> Cart infra/main.tf:61".to_string()), "{v:?} {u:?}");
+    // Tham chiếu tới `kubernetes_*` không giải được thì báo.
+    let (_, u) = k8s_variant("k8s-uid", "kubernetes_service_v1.cart.metadata[0].name", "kubernetes_deployment_v1.cart.metadata[0].uid", &all);
+    assert!(u.iter().any(|x| x.starts_with("infra/main.tf:62 ") && x.contains("chưa giải được")), "{u:?}");
+    // `merge` trên nhãn lấy qua tham chiếu: báo, không ra selector rỗng.
+    let (_, u) = k8s_variant(
+        "k8s-merge",
+        "selector = kubernetes_deployment_v1.cart.spec[0].template[0].metadata[0].labels",
+        "selector = merge(kubernetes_deployment_v1.cart.spec[0].template[0].metadata[0].labels, {})",
+        &all,
+    );
+    assert!(u.iter().any(|x| x.contains("`merge` trên tham chiếu tài nguyên")), "{u:?}");
+    // Tên chưa biết mà có cạnh tới Terraform: báo.
+    let (_, u) = k8s_variant("k8s-ten", "    name = \"cart\"\n  }\n  spec {\n    selector {", "    name = var.name\n  }\n  spec {\n    selector {", &all);
+    assert!(u.iter().any(|x| x.starts_with("infra/main.tf:4 ") && x.contains("metadata.name")), "{u:?}");
+}
+
+#[test]
+fn review_k8s_config_map_ingress_cu_va_manifest_env() {
+    let r = Repo::new("k8s-review2");
+    r.write(
+        "main.tf",
+        r#"resource "aws_db_instance" "main" {
+  engine = "postgres"
+}
+resource "kubernetes_config_map_v1" "cfg" {
+  metadata {
+    name = "cfg"
+  }
+  data = {
+    DB_HOST = aws_db_instance.main.address
+  }
+}
+resource "kubernetes_manifest" "api" {
+  manifest = {
+    apiVersion = "v1"
+    kind       = "Pod"
+    metadata   = { name = "api" }
+    spec = {
+      containers = [{
+        name  = "api"
+        image = "shop/api:1"
+        env = [
+          { name = "DB_URL", value = "postgres://${kubernetes_config_map_v1.cfg.data.DB_HOST}:5432" },
+          { name = "DB_HOST2", value = aws_db_instance.main.address },
+        ]
+      }]
+    }
+  }
+}
+resource "kubernetes_ingress" "old" {
+  metadata {
+    name = "old"
+  }
+  spec {
+    backend {
+      service_name = "api"
+      service_port = 80
+    }
+  }
+}
+resource "kubernetes_manifest" "file" {
+  manifest = yamldecode(file("${path.module}/x.yaml"))
+}
+"#,
+    )
+    // Luật chỉ có `k8s:`: phần chưa đọc vẫn phải báo.
+    .rules("service Api from k8s:api\n");
+    let rep = r.report();
+    let v = violations(&rep);
+    assert!(v.contains(&"NotLinked Api -> aws_db_instance.main main.tf:22".to_string()), "{v:?}");
+    assert!(v.contains(&"NotLinked Api -> aws_db_instance.main main.tf:23".to_string()), "{v:?}");
+    let u: Vec<String> = rep.deploy_unread.iter().map(|u| format!("{} {}", u.file, u.why)).collect();
+    assert!(u.iter().any(|x| x.starts_with("main.tf:29 ") && x.contains("kubernetes_ingress")), "{u:?}");
+    assert!(u.iter().any(|x| x.starts_with("main.tf:41 ") && x.contains("yamldecode")), "{u:?}");
+}
+
+#[test]
+fn chuoi_doi_khang_khong_chen_truong_vao_yaml() {
+    let r = Repo::new("k8s-chen");
+    // Nếu chuỗi không được thoát, nhãn này thêm `hostNetwork: true` (lộ ra
+    // ngoài cụm) và đổi tên workload.
+    r.write(
+        "main.tf",
+        r#"resource "kubernetes_pod_v1" "a" {
+  metadata {
+    name   = "a"
+    labels = { "x\"\n    hostNetwork: true\n#" = "y\"\nkind: Secret\n" }
+  }
+  spec {
+    container {
+      name  = "a\"\n      hostPort: 80"
+      image = "shop/a:1"
+    }
+  }
+}
+"#,
+    )
+    .rules("service A from k8s:a\n");
+    let rep = r.report();
+    assert!(rep.deploy_unread.is_empty(), "{:?}", rep.deploy_unread);
+    assert!(!violations(&rep).iter().any(|v| v.contains("Internet")), "{:?}", violations(&rep));
+    assert!(r.load().services.iter().any(|s| s.key == Key::K8s { dir: String::new(), name: "a".into() }));
+}
+
+#[test]
+fn review2_config_map_override_va_element() {
+    // B: ConfigMap giữ tham chiếu tới cơ sở dữ liệu, workload lấy qua
+    // `env_from` và `config_map_key_ref`.
+    let cm = "resource \"kubernetes_config_map_v1\" \"cfg\" {\n  metadata {\n    name = \"cfg\"\n  }\n  data = {\n    DB_HOST = aws_db_instance.main.address\n  }\n}\n";
+    let r = Repo::new("k8s-cm");
+    r.write(
+        "infra/main.tf",
+        &format!(
+            "{cm}{}",
+            K8S.replacen(
+                "          env {\n            name  = \"DB_HOST\"\n            value = aws_db_instance.main.address\n          }\n",
+                "          env_from {\n            config_map_ref {\n              name = \"cfg\"\n            }\n          }\n          env {\n            name = \"DB2\"\n            value_from {\n              config_map_key_ref {\n                name = \"cfg\"\n                key  = \"DB_HOST\"\n              }\n            }\n          }\n",
+                1,
+            )
+        ),
+    )
+    .rules(K8S_RULES);
+    let v = violations(&r.report());
+    // Dòng của `env_from` và của `env` lấy giá trị (sau 8 dòng ConfigMap).
+    assert!(v.contains(&"NotLinked Cart -> Db infra/main.tf:28".to_string()), "{v:?}");
+    assert!(v.contains(&"NotLinked Cart -> Db infra/main.tf:33".to_string()), "{v:?}");
+
+    // A: file override đổi `kubernetes_*`, luật chỉ có `k8s:`: báo.
+    let r = Repo::new("k8s-override");
+    r.write("main.tf", "resource \"kubernetes_namespace_v1\" \"a\" {\n  metadata {\n    name = \"a\"\n  }\n}\n")
+        .write("main_override.tf", "resource \"kubernetes_deployment_v1\" \"cart\" {}\n")
+        .rules("service A from k8s:a\n");
+    let u: Vec<String> = r.report().deploy_unread.iter().map(|u| u.file.clone()).collect();
+    assert!(u.contains(&"main_override.tf".to_string()), "{u:?}");
+
+    // C: Terraform thuần AWS có module registry, luật chỉ có `k8s:`: không nhiễu.
+    let r = Repo::new("k8s-khong-nhieu");
+    r.write("infra/main.tf", "module \"vpc\" {\n  source = \"terraform-aws-modules/vpc/aws\"\n}\n")
+        .write("k8s/web.yaml", "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\nspec:\n  template:\n    spec:\n      containers:\n        - name: web\n          image: shop/web:1\n")
+        .rules("service Web from k8s:web\n");
+    let rep = r.report();
+    assert!(rep.deploy_unread.is_empty(), "{:?}", rep.deploy_unread);
+
+    // D: `element(x.*.address, 0)` với `count` vẫn là cạnh.
+    let r = Repo::new("element");
+    r.write(
+        "main.tf",
+        "resource \"aws_db_instance\" \"main\" {\n  count = 1\n}\nresource \"aws_lambda_function\" \"fn\" {\n  image_uri = \"x\"\n  environment {\n    variables = {\n      DB_HOST = element(aws_db_instance.main.*.address, 0)\n    }\n  }\n}\n",
+    )
+    .rules("service Fn from tf:aws_lambda_function.fn\nservice Db from tf:aws_db_instance.main\n");
+    let rep = r.report();
+    assert!(violations(&rep).contains(&"NotLinked Fn -> Db main.tf:8".to_string()), "{:?} {:?}", violations(&rep), rep.deploy_unread);
+}
+
+#[test]
+fn review3_file_hong_provider_va_config_map_cho_yaml() {
+    // E: file `.tf` hỏng có `kubernetes_*`, luật chỉ có `k8s:`: báo.
+    let r = Repo::new("k8s-hong");
+    let deep = format!("resource \"kubernetes_deployment_v1\" \"a\" {{}}\nlocals {{\n  x = {}1{}\n}}\n", "[".repeat(70), "]".repeat(70));
+    r.write("main.tf", &deep).rules("service A from k8s:a\n");
+    let u: Vec<String> = r.report().deploy_unread.iter().map(|u| u.why.clone()).collect();
+    assert!(u.iter().any(|x| x.starts_with("HCL:")), "{u:?}");
+
+    // F: chỉ có `required_providers.kubernetes` và module registry: báo module.
+    let r = Repo::new("k8s-required");
+    r.write(
+        "main.tf",
+        "terraform {\n  required_providers {\n    kubernetes = { source = \"hashicorp/kubernetes\" }\n  }\n}\nmodule \"app\" {\n  source = \"example/app/aws\"\n}\n",
+    )
+    .rules("service A from k8s:a\n");
+    let u: Vec<String> = r.report().deploy_unread.iter().map(|u| u.why.clone()).collect();
+    assert!(u.iter().any(|x| x.contains("registry")), "{u:?}");
+
+    // G, H: workload YAML lấy ConfigMap do Terraform dựng; ConfigMap cùng tên ở
+    // namespace khác không thành cạnh; ARN của bucket không phải cạnh mạng.
+    let r = Repo::new("k8s-yaml-cm");
+    r.write(
+        "infra/main.tf",
+        r#"resource "aws_db_instance" "a" {}
+resource "aws_db_instance" "b" {}
+resource "aws_s3_bucket" "x" {}
+resource "kubernetes_config_map_v1" "cfg" {
+  metadata {
+    name      = "cfg"
+    namespace = "shop"
+  }
+  data = {
+    DB_HOST    = aws_db_instance.a.address
+    BUCKET_ARN = aws_s3_bucket.x.arn
+  }
+}
+resource "kubernetes_config_map_v1" "other" {
+  metadata {
+    name      = "cfg"
+    namespace = "other"
+  }
+  data = {
+    DB_HOST = aws_db_instance.b.address
+  }
+}
+"#,
+    )
+    .write(
+        "k8s/api.yaml",
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\n  namespace: shop\nspec:\n  template:\n    spec:\n      containers:\n        - name: api\n          image: shop/api:1\n          envFrom:\n            - configMapRef:\n                name: cfg\n          env:\n            - name: DB2\n              valueFrom:\n                configMapKeyRef:\n                  name: cfg\n                  key: DB_HOST\n",
+    )
+    .rules("service Api from k8s:k8s/api\nservice A from tf:infra/aws_db_instance.a\nservice B from tf:infra/aws_db_instance.b\n");
+    let rep = r.report();
+    let v = violations(&rep);
+    assert!(v.contains(&"NotLinked Api -> A k8s/api.yaml:13".to_string()), "{v:?}");
+    assert!(v.contains(&"NotLinked Api -> A k8s/api.yaml:16".to_string()), "{v:?}");
+    assert!(!v.iter().any(|x| x.contains("-> B") || x.contains("aws_s3_bucket")), "{v:?}");
+    // Workload YAML không ghi namespace (quyết lúc `helm --namespace`): khớp
+    // ConfigMap ở namespace nào cũng được.
+    r.write("k8s/api.yaml", "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\nspec:\n  template:\n    spec:\n      containers:\n        - name: api\n          image: shop/api:1\n          envFrom:\n            - configMapRef:\n                name: cfg\n");
+    let v = violations(&r.report());
+    assert!(v.contains(&"NotLinked Api -> A k8s/api.yaml:12".to_string()), "{v:?}");
 }

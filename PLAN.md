@@ -562,7 +562,7 @@ git, `cargo clean` dọn.
    37 gốc, bộ mẫu shop 14, refused bị từ chối đúng); logs-t7 sabotage 79
    kiểu 0 trượt (60 kiểu khai trong CI cộng các lượt "không phá"), `verify`
    3/3, `check --strict` 0. Còn lại đợt 7: `kubernetes_*` qua Terraform.
-   Đã commit và push lên main đợt 7 (fe195de + bản sửa oracle xoá thư mục plan); CI xanh ở thu/dot7 (run 39535809428). Việc tiếp: 11.1 `kubernetes_*` qua Terraform, rồi đợt 8.
+   Đã commit và push lên main đợt 7 (fe195de, 34d8021, e449f56). 11.1 `kubernetes_*` qua Terraform XONG, CHƯA COMMIT (chờ bạn bảo): `terraform.rs` (`k8s_manifests` dựng YAML, `resolve_v` có trần, `env_refs`/`from_cm`, `Scope`/`k8s_unread`, `Out.config_maps`), `deploy.rs` (`read_terraform`, `tf_k8s_edges`, `tf_config_map_edges`, `load_k8s(…, tf, tf_cms)`), `tests/terraform.rs` 22 test, TM-53..55, docs/infra.md. Biên nhận 2026-10-21: cargo test workspace, clippy, MSRV 1.88, release, bench 32 repo 0 bất nhất, oracle khớp hết, sabotage đạt, verify, check --strict. Việc tiếp: commit 11.1 khi bạn bảo (git add đúng 6 file, không add bench/__pycache__); đẩy nhánh thử, CI xanh thì lên main; rồi đợt 8 (12.1 đọc plan JSON qua `verify tf_plan`).
    d. Chạy lần lượt, mỗi lệnh qua `receipt.py run --`, dừng ở lệnh trượt:
       `cargo test --workspace`; `cargo clippy --workspace --all-targets --
       -D warnings`; `cargo +1.88 check --workspace --tests`; `cargo build
@@ -844,7 +844,7 @@ không có `link` là vi phạm, có `link` mà cụm chặn là cảnh báo (`-
 - [x] Rút service, cạnh, lối vào từ Terraform (`scan/terraform.rs`): ECS (`jsonencode` của `container_definitions`), Lambda, Cloud Run, `kubernetes_*`; tham chiếu `aws_db_instance.x.address` và tên máy trong chuỗi; `variable` có mặc định, `locals`, module cục bộ; khoá `tf:<loại>.<tên>`; module registry, `count`/`for_each` không hằng, `dynamic` thì "chưa đọc được".
 - [x] Nối vào `check`, hook, `scan`, `init`; tài liệu.
 - [x] Bộ đo: OpenTofu ghim SHA-256 cùng provider ghim, `tofu plan` với khoá giả, so tham chiếu (`--require terraform`); bộ mẫu `fixtures/terraform-*`; kiểu phá; CI. (2026-10-21, chưa commit; biên nhận logs-t5..t7)
-- [ ] `kubernetes_*` khai qua Terraform: dựng thành manifest rồi đi qua bộ đọc Kubernetes.
+- [x] `kubernetes_*` khai qua Terraform: dựng thành manifest rồi đi qua bộ đọc Kubernetes (2026-10-21, chưa commit; review opus 4 lượt, 16 phát hiện đã sửa; biên nhận đủ).
 
 ### Tầng hạ tầng, đợt 8: Terraform qua plan
 

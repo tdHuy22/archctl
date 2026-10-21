@@ -840,11 +840,24 @@ pub fn load(root: &Path, files: &[String], opts: &Options) -> Deploy {
         project(&shared, &dir, &records, &mut out);
         builds.extend(records.iter().filter_map(compose_build));
     }
+    // Terraform đọc trước: tài nguyên `kubernetes_*` thành manifest cho bộ
+    // đọc Kubernetes.
+    let mut tf = if opts.tf || opts.k8s { read_terraform(&shared, files) } else { None };
+    let manifests = tf.as_mut().map(|t| std::mem::take(&mut t.manifests)).unwrap_or_default();
     if opts.k8s {
-        load_k8s(&shared, files, opts, &builds, &mut out);
+        let cms = tf.as_ref().map_or(&[][..], |t| t.config_maps.as_slice());
+        load_k8s(&shared, files, opts, &builds, &manifests, cms, &mut out);
+        tf_k8s_edges(&manifests, &mut out);
     }
-    if opts.tf {
-        load_terraform(&shared, files, opts, &builds, &mut out);
+    if let Some(mut t) = tf {
+        // Phần không đọc được của `kubernetes_*` báo khi luật dùng `k8s:`, kể
+        // cả khi không có `tf:` nào: không để mất cạnh mà không ai biết.
+        if opts.k8s {
+            out.unread.extend(std::mem::take(&mut t.k8s_unread).into_iter().map(|(file, why)| Unread { file, why }));
+        }
+        if opts.tf {
+            load_terraform(&shared, t, opts, &builds, &mut out);
+        }
     }
     // Cùng một file hỏng được nhắc từ nhiều service: báo một lần.
     let mut seen: HashSet<(String, String)> = HashSet::new();
@@ -1367,6 +1380,8 @@ fn load_k8s(
     files: &[String],
     opts: &Options,
     compose_builds: &[BuildRef],
+    tf: &[terraform::Manifest],
+    tf_cms: &[terraform::TfConfigMap],
     out: &mut Deploy,
 ) {
     let mut charts: Vec<String> = Vec::new();
@@ -1542,6 +1557,11 @@ fn load_k8s(
         .map(|f| (*f).clone())
         .chain(reached)
         .collect();
+    // Manifest dựng từ `kubernetes_*` của Terraform: thư mục là thư mục module
+    // gốc (`k8s:infra/cart`), dòng trỏ về file `.tf`.
+    rendered.extend(tf.iter().map(|m| {
+        (m.root.clone(), helm::Rendered { file: m.file.clone(), text: m.text.clone(), lines: m.lines.clone() })
+    }));
     if opts.keep_rendered {
         out.rendered = rendered.clone();
     }
@@ -1968,6 +1988,9 @@ fn load_k8s(
             &mut svc,
             &mut out.unread,
         );
+        if !placed.file.ends_with(".tf") {
+            svc.edges.extend(tf_config_map_edges(tf_cms, placed, w));
+        }
         out.services.push(svc);
     }
     if steps_over.get() || steps.get() == 0 {
@@ -2934,18 +2957,86 @@ fn apply_patches(kz: &Kz, cluster: &Cluster, steps: &Cell<usize>) -> HashMap<usi
 /// Nạp Terraform: service chạy mã (ECS, Lambda, Cloud Run) và đích của cạnh
 /// thành [`Svc`] với khoá [`Key::Tf`]. Image lần về nơi dựng như workload
 /// Kubernetes (`dockerfile:` trong luật, hay compose có `image:` và `build:`).
-fn load_terraform(shared: &Shared<'_>, files: &[String], opts: &Options, builds: &[BuildRef], out: &mut Deploy) {
+fn read_terraform(shared: &Shared<'_>, files: &[String]) -> Option<terraform::Out> {
     let tf: Vec<String> = files
         .iter()
         .filter(|f| is_tf_file(f.rsplit('/').next().unwrap_or(f)) && !aside(f))
         .cloned()
         .collect();
     if tf.is_empty() {
-        return;
+        return None;
     }
     let read = |p: &str| shared.read(p).map(|t| t.to_string());
     let is_dir = |p: &str| matches!(kind_in(shared.root, p), Some(Kind::Dir));
-    let res = terraform::load(&tf, &terraform::Fs { read: &read, is_dir: &is_dir, env_words: &shared.env_words });
+    Some(terraform::load(&tf, &terraform::Fs { read: &read, is_dir: &is_dir, env_words: &shared.env_words }))
+}
+
+/// Cạnh `tf:` của workload viết bằng YAML hay Helm lấy khoá từ ConfigMap mà
+/// Terraform dựng với giá trị tham chiếu tài nguyên khác
+/// (`DB_HOST = aws_db_instance.main.address`): qua `envFrom` hay
+/// `configMapKeyRef`. Tên biến như secret không thành cạnh (TM-50).
+fn tf_config_map_edges(cms: &[terraform::TfConfigMap], placed: &Placed<k8s::Workload>, w: &k8s::Workload) -> Vec<Edge> {
+    // Không ghi namespace: quyết lúc apply (`kubectl -n`, `helm --namespace`),
+    // khớp mọi namespace như bộ đọc Kubernetes.
+    let ns = w.namespace.as_deref();
+    let mut edges = Vec::new();
+    let mut push = |cm: &terraform::TfConfigMap, env: String, refs: &[(String, String)], line: usize| {
+        if compose::secret_key(&env) {
+            return;
+        }
+        for (addr, rhs) in refs {
+            edges.push(Edge {
+                to: addr.clone(),
+                target: Key::Tf { dir: cm.root.clone(), addr: addr.clone() },
+                file: placed.file.clone(),
+                line,
+                shown: format!("{env} → {rhs}"),
+            });
+        }
+    };
+    let found = |name: &str| -> Vec<&terraform::TfConfigMap> {
+        cms.iter().filter(|cm| cm.name == name && terraform::same_ns(cm.namespace.as_deref(), ns)).collect()
+    };
+    for c in &w.containers {
+        for ef in &c.env_from {
+            for cm in found(&ef.config_map) {
+                for (k, refs) in &cm.keys {
+                    push(cm, format!("{}{k}", ef.prefix), refs, ef.line);
+                }
+            }
+        }
+        for r in &c.refs {
+            for cm in found(&r.config_map) {
+                for (_, refs) in cm.keys.iter().filter(|(k, _)| *k == r.item) {
+                    push(cm, r.key.clone(), refs, r.line);
+                }
+            }
+        }
+    }
+    edges
+}
+
+/// Cạnh từ workload `kubernetes_*` tới tài nguyên Terraform khác (cơ sở dữ
+/// liệu, hàng đợi) qua tham chiếu trong biến môi trường.
+fn tf_k8s_edges(manifests: &[terraform::Manifest], out: &mut Deploy) {
+    for m in manifests.iter().filter(|m| !m.edges.is_empty()) {
+        let Some(name) = &m.name else { continue };
+        for s in out.services.iter_mut() {
+            if !matches!(&s.key, Key::K8s { dir, name: n } if *dir == m.root && n == name) || s.file != m.file {
+                continue;
+            }
+            s.edges.extend(m.edges.iter().map(|e| Edge {
+                to: e.target.clone(),
+                target: Key::Tf { dir: m.root.clone(), addr: e.target.clone() },
+                file: e.file.clone(),
+                line: e.line,
+                shown: e.shown.clone(),
+            }));
+        }
+    }
+}
+
+fn load_terraform(shared: &Shared<'_>, res: terraform::Out, opts: &Options, builds: &[BuildRef], out: &mut Deploy) {
     out.unread.extend(res.unread.into_iter().map(|(file, why)| Unread { file, why }));
     let mut by_image: HashMap<String, Vec<&BuildRef>> = HashMap::new();
     for b in builds {

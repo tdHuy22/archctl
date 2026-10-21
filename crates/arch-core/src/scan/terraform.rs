@@ -103,12 +103,53 @@ pub struct RefEdge {
     pub shown: String,
 }
 
+/// Tài nguyên `kubernetes_*` dựng thành manifest YAML để đi qua bộ đọc
+/// Kubernetes, như manifest dựng từ chart Helm. Dòng thứ `i + 1` của `text`
+/// ứng với dòng `lines[i]` của `file`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Manifest {
+    /// Thư mục module gốc: thư mục của khoá `k8s:<root>/<tên>`.
+    pub root: String,
+    pub addr: String,
+    pub file: String,
+    pub text: String,
+    pub lines: Vec<usize>,
+    /// `metadata.name`, nếu biết.
+    pub name: Option<String>,
+    /// Cạnh qua tham chiếu từ biến môi trường tới tài nguyên Terraform không
+    /// phải `kubernetes_*` (cơ sở dữ liệu, hàng đợi).
+    pub edges: Vec<RefEdge>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Out {
     pub units: Vec<Unit>,
+    pub manifests: Vec<Manifest>,
+    /// Phần không đọc được của tài nguyên `kubernetes_*` và phần chung (module,
+    /// file): báo khi luật có service `k8s:`, kể cả khi không có `tf:`.
+    pub k8s_unread: Vec<(String, String)>,
     pub roots: Vec<String>,
     /// File (kèm dòng) và lý do không đọc được.
     pub unread: Vec<(String, String)>,
+    /// ConfigMap dựng từ Terraform có khoá tham chiếu tài nguyên Terraform
+    /// khác: workload viết bằng YAML hay Helm lấy khoá đó cũng có cạnh `tf:`.
+    pub config_maps: Vec<TfConfigMap>,
+}
+
+/// ConfigMap `kubernetes_*` mà giá trị tham chiếu tài nguyên Terraform không
+/// phải `kubernetes_*` (`DB_HOST = aws_db_instance.main.address`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TfConfigMap {
+    pub root: String,
+    /// Địa chỉ Terraform của ConfigMap.
+    pub addr: String,
+    pub name: String,
+    /// `None`: namespace chưa biết, khớp mọi namespace.
+    pub namespace: Option<String>,
+    /// Khoá, và mỗi cạnh: đích (đã giải như cạnh của service chạy mã: bộ
+    /// cân bằng tải thành service phía sau, ARN của bucket không là cạnh),
+    /// cách hiển thị phía phải (`aws_db_instance.main.address`).
+    pub keys: Vec<(String, Vec<(String, String)>)>,
 }
 
 /// Đọc file trong repo (đã qua chốt chặn đường dẫn, trần cỡ, TM-51), hỏi một
@@ -119,6 +160,15 @@ pub struct Fs<'a> {
     /// Biến môi trường mà mã đọc làm tên topic: giữ giá trị dạng tên của
     /// chúng (xem `compose::parse_with`).
     pub env_words: &'a [String],
+}
+
+/// Mục "chưa đọc được" thuộc về đường nào: service chạy mã của Terraform,
+/// tài nguyên `kubernetes_*`, hay cả hai (module, file).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    Both,
+    Tf,
+    K8s,
 }
 
 /// Vì sao một giá trị không biết.
@@ -272,6 +322,8 @@ struct Module {
     data: HashMap<String, (usize, usize)>,
     /// `module "x" { source = … }`: tên, file, dòng, thân.
     calls: Vec<(String, usize, usize, Rc<Body>)>,
+    /// Có tài nguyên `kubernetes_*` hay provider `kubernetes`/`helm`.
+    k8s: bool,
 }
 
 /// Một lần dựng module: module nào, tiền tố địa chỉ, đối số.
@@ -294,23 +346,39 @@ struct Cx<'a> {
     units: usize,
     out: Out,
     reported: HashSet<(String, String)>,
+    /// Phạm vi của mục "chưa đọc được" đang ghi.
+    scope: Scope,
+    /// Đơn vị giá trị đã chép khi giải tham chiếu `kubernetes_*`.
+    resolved: usize,
+    /// Mục chưa đọc chung (module, file): sang `k8s_unread` chỉ khi repo dùng
+    /// Kubernetes qua Terraform, không thì là nhiễu cho luật chỉ có `k8s:`.
+    both: Vec<(String, String)>,
+    /// Có file `.tf` không đọc được mà có thể khai `kubernetes_*`.
+    k8s_seen: bool,
 }
 
 /// Đọc mọi file Terraform trong `files` (đường dẫn trong repo, đã lọc `.tf`).
 pub fn load(files: &[String], fs: &Fs<'_>) -> Out {
     let mut by_dir: HashMap<String, Vec<String>> = HashMap::new();
-    let mut out = Out::default();
+    let out = Out::default();
+    let mut early: Vec<(String, String)> = Vec::new();
+    let mut k8s_file = false;
     for f in files {
         let name = f.rsplit('/').next().unwrap_or(f);
-        if name.ends_with(".tf.json") {
-            out.unread.push((f.clone(), "Terraform dạng JSON (`.tf.json`) chưa được đọc".into()));
+        let skipped = if name.ends_with(".tf.json") {
+            "Terraform dạng JSON (`.tf.json`) chưa được đọc"
+        } else if name.ends_with(".tf") && (name == "override.tf" || name.ends_with("_override.tf")) {
+            "file override của Terraform chưa được áp"
+        } else {
+            ""
+        };
+        if !skipped.is_empty() {
+            // File không đọc mà đổi được `kubernetes_*` (TM-55).
+            k8s_file |= (fs.read)(f).is_ok_and(|t| t.contains("kubernetes"));
+            early.push((f.clone(), skipped.into()));
             continue;
         }
         if !name.ends_with(".tf") {
-            continue;
-        }
-        if name == "override.tf" || name.ends_with("_override.tf") {
-            out.unread.push((f.clone(), "file override của Terraform chưa được áp".into()));
             continue;
         }
         by_dir.entry(dir_of(f).to_string()).or_default().push(f.clone());
@@ -330,6 +398,10 @@ pub fn load(files: &[String], fs: &Fs<'_>) -> Out {
         units: 0,
         out,
         reported: HashSet::new(),
+        scope: Scope::Both,
+        resolved: 0,
+        both: Vec::new(),
+        k8s_seen: false,
     };
     // Thư mục có `.tf`: đọc trước để biết module nào được gọi tới.
     let mut dirs: Vec<String> = files.iter().filter(|f| f.ends_with(".tf")).map(|f| dir_of(f).to_string()).collect();
@@ -360,6 +432,12 @@ pub fn load(files: &[String], fs: &Fs<'_>) -> Out {
         }
     }
     cx.out.roots = roots;
+    cx.both.extend(early.iter().cloned());
+    cx.out.unread.splice(0..0, early);
+    if k8s_file || cx.k8s_seen || cx.modules.values().flatten().any(|m| m.k8s) {
+        let both = std::mem::take(&mut cx.both);
+        cx.out.k8s_unread.extend(both);
+    }
     cx.out
 }
 
@@ -379,7 +457,14 @@ fn local_source(dir: &str, src: &str) -> Option<String> {
 impl Cx<'_> {
     fn unread(&mut self, file: String, why: String) {
         if self.reported.insert((file.clone(), why.clone())) {
-            self.out.unread.push((file, why));
+            match self.scope {
+                Scope::K8s => self.out.k8s_unread.push((file, why)),
+                Scope::Tf => self.out.unread.push((file, why)),
+                Scope::Both => {
+                    self.both.push((file.clone(), why.clone()));
+                    self.out.unread.push((file, why));
+                }
+            }
         }
     }
 
@@ -399,6 +484,8 @@ impl Cx<'_> {
             let text = match (self.fs.read)(&f) {
                 Ok(t) => t,
                 Err(why) => {
+                    // Không biết file khai gì: coi như có thể có `kubernetes_*`.
+                    self.k8s_seen = true;
                     self.unread(f.clone(), why);
                     continue;
                 }
@@ -406,6 +493,9 @@ impl Cx<'_> {
             let body = match hcl::parse(&text) {
                 Ok(b) => b,
                 Err(e) => {
+                    // File hỏng có thể khai workload: luật `k8s:` phải thấy
+                    // mục này (TM-55).
+                    self.k8s_seen |= text.contains("kubernetes") || text.contains("helm");
                     self.unread(format!("{f}:{}", e.line), format!("HCL: {}", e.msg));
                     continue;
                 }
@@ -772,13 +862,42 @@ impl Cx<'_> {
                 _ => None,
             })
         };
+        // Cả một tài nguyên (hay thuộc tính của nó) làm đối số của hàm xử lý
+        // cấu trúc: giá trị chỉ biết sau (nhãn của `kubernetes_*`) hay lúc
+        // apply. Bỏ đi là mất cạnh mà không ai biết, nên báo (TM-49).
+        // `element`, `lookup`, `one` trên tài nguyên (`element(aws_x.main.*.address, 0)`
+        // với `count`): kết quả vẫn là thuộc tính đó của tài nguyên.
+        if matches!(name, "element" | "lookup" | "one")
+            && let Some(V::Res(..)) = vs.first()
+        {
+            return vs.remove(0);
+        }
+        if matches!(name, "concat" | "merge" | "flatten" | "keys" | "values")
+            && let Some(V::Res(a, p, _)) = vs.iter().find(|v| matches!(v, V::Res(..)))
+        {
+            let shown = if p.is_empty() { a.clone() } else { format!("{a}.{}", p.join(".")) };
+            return self.hard(inst, fid, line, format!("`{name}` trên tham chiếu tài nguyên `{shown}` chưa được đọc"));
+        }
         match (name, vs.len()) {
             // Mã hoá giữ nguyên cấu trúc: người đọc (container_definitions) cần nó.
             ("jsonencode" | "yamlencode" | "tolist" | "toset" | "tomap" | "sensitive" | "nonsensitive", 1) => vs.remove(0),
             ("tostring" | "trimspace", 1) => vs.remove(0),
-            ("lower" | "upper", 1) => match vs[0].known() {
-                Some(s) => V::text(&if name == "lower" { s.to_lowercase() } else { s.to_uppercase() }),
-                None => first_unknown(&vs).unwrap_or_else(|| self.soft(inst, fid, line, format!("`{name}` của giá trị chưa biết"))),
+            ("lower" | "upper", 1) => match vs.remove(0) {
+                // Tham chiếu giữ nguyên, chỉ đổi phần chữ đã biết: tên máy
+                // không phân biệt hoa thường, cạnh không mất.
+                V::Str(ps) => V::Str(
+                    ps.into_iter()
+                        .map(|p| match p {
+                            P::Text(t) => P::Text(if name == "lower" { t.to_lowercase() } else { t.to_uppercase() }),
+                            other => other,
+                        })
+                        .collect(),
+                ),
+                r @ V::Res(..) => r,
+                v => match v.known() {
+                    Some(s) => V::text(&if name == "lower" { s.to_lowercase() } else { s.to_uppercase() }),
+                    None => first_unknown(&[v]).unwrap_or_else(|| self.soft(inst, fid, line, format!("`{name}` của giá trị chưa biết"))),
+                },
             },
             // Đối số là đầu vào chưa biết (`var.extra_env`) thì bỏ qua nó nhưng
             // giữ phần đã biết: không để một biến làm mất cạnh của các khoá khác.
@@ -947,6 +1066,14 @@ impl Cx<'_> {
         let mut task_used: HashSet<String> = HashSet::new();
         let mut sorted: Vec<(usize, usize)> = decls.clone();
         sorted.sort_by_key(|&(i, r)| addr_of(self, i, r));
+        // `kubernetes_*`: dựng manifest. Cạnh từ biến môi trường tới tài
+        // nguyên Terraform khác đi qua cùng bước giải cạnh như service chạy
+        // mã, dưới dạng service tạm, rồi được gỡ ra gắn vào manifest.
+        self.scope = Scope::K8s;
+        let (mut manifests, pseudo) = self.k8s_manifests(&root, &sorted, &by_addr);
+        self.scope = Scope::Tf;
+        let pseudo_addrs: HashSet<String> = pseudo.iter().map(|u| u.addr.clone()).collect();
+        units.extend(pseudo);
         for &(i, r) in &sorted {
             let d = &self.insts[i].module.resources[r];
             if d.ty != "aws_ecs_service" {
@@ -1016,7 +1143,7 @@ impl Cx<'_> {
             v.dedup();
         }
         // Lối vào Internet.
-        for u in &mut units {
+        for u in units.iter_mut().filter(|u| !pseudo_addrs.contains(&u.addr)) {
             let mut exposed = Vec::new();
             self.exposure(u, &refs_of, &back, &by_addr, &mut exposed);
             u.exposed = exposed;
@@ -1090,7 +1217,23 @@ impl Cx<'_> {
                 exposed: Vec::new(),
             });
         }
+        for u in units.iter_mut().filter(|u| pseudo_addrs.contains(&u.addr)) {
+            if let Some(cm) = self.out.config_maps.iter_mut().find(|c| c.addr == u.addr && c.root == root) {
+                for e in std::mem::take(&mut u.edges) {
+                    let rhs = e.shown.split_once(" → ").map_or(e.target.clone(), |(_, r)| r.to_string());
+                    match cm.keys.iter_mut().find(|(k, _)| *k == e.key) {
+                        Some((_, v)) => v.push((e.target, rhs)),
+                        None => cm.keys.push((e.key, vec![(e.target, rhs)])),
+                    }
+                }
+            } else if let Some(m) = manifests.iter_mut().find(|m| m.addr == u.addr) {
+                m.edges = std::mem::take(&mut u.edges);
+            }
+        }
+        units.retain(|u| !pseudo_addrs.contains(&u.addr));
         self.out.units.extend(units);
+        self.out.manifests.extend(manifests);
+        self.scope = Scope::Both;
         // Hết ngân sách: các giá trị sau đó thành "không biết", tham chiếu và
         // lối vào trong chúng mất. Báo, không im lặng (TM-48).
         if self.steps > MAX_STEPS || self.units > MAX_UNITS {
@@ -1279,6 +1422,191 @@ impl Cx<'_> {
                 self.unread(format!("{file}:{}", d.line), format!("khối `dynamic \"{kind}\"` chưa được đọc"));
             }
         }
+    }
+
+    /// Dựng mỗi tài nguyên `kubernetes_*` (đã sắp theo địa chỉ) thành một
+    /// manifest. Trả manifest và service tạm mang cạnh tới tài nguyên khác.
+    fn k8s_manifests(&mut self, root: &str, sorted: &[(usize, usize)], by_addr: &HashMap<String, (usize, usize)>) -> (Vec<Manifest>, Vec<Unit>) {
+        let mut trees: HashMap<String, K> = HashMap::new();
+        let mut order: Vec<(String, usize, usize)> = Vec::new();
+        for &(i, r) in sorted {
+            let d = &self.insts[i].module.resources[r];
+            if !d.ty.starts_with("kubernetes_") {
+                continue;
+            }
+            let (ty, line, fid, body, each) = (d.ty.clone(), d.line, d.file, d.body.clone(), d.each.clone());
+            let file = self.insts[i].module.files[fid].clone();
+            let addr = format!("{}{ty}.{}", self.insts[i].prefix, d.name);
+            if ty.starts_with("kubernetes_secret") {
+                continue;
+            }
+            if ty != "kubernetes_manifest" && k8s_kind(&ty).is_none() {
+                // Loại không dựng: nếu không chắc nó vô hại với cạnh và lối vào
+                // (pod template, Ingress bản cũ, `kubernetes_env`, nhãn sửa
+                // workload có sẵn) thì báo (như TM-21 với CRD).
+                if has_block(&body, &["template", "container", "job_template"]) {
+                    self.unread(format!("{file}:{line}"), format!("tài nguyên `{ty}` có pod template mà archctl chưa dựng thành manifest"));
+                } else if !K8S_HARMLESS.iter().any(|p| ty.starts_with(p)) {
+                    self.unread(format!("{file}:{line}"), format!("tài nguyên `{ty}` chưa được dựng thành manifest: có thể đổi cạnh hay lối vào"));
+                }
+                continue;
+            }
+            if let Some((kind, x)) = &each {
+                match (kind.as_str(), &x.e) {
+                    ("count", E::Num(_)) => {}
+                    _ => self.unread(format!("{file}:{}", x.line), format!("`{kind}` không hằng: số bản của tài nguyên chưa biết, cạnh có thể khác giữa các bản")),
+                }
+            }
+            let tree = self.k_body(i, fid, &body, &file);
+            trees.insert(addr.clone(), tree);
+            order.push((addr, i, r));
+        }
+        let _ = by_addr;
+        let mut manifests = Vec::new();
+        let mut pseudo = Vec::new();
+        let mut resolved: Vec<(String, String, String, usize, K)> = Vec::new();
+        for (addr, i, r) in order {
+            let d = &self.insts[i].module.resources[r];
+            let (ty, line) = (d.ty.clone(), d.line);
+            let file = self.insts[i].module.files[d.file].clone();
+            let Some(tree) = trees.get(&addr) else { continue };
+            let start = MAX_UNITS.saturating_sub(self.units).min(MAX_RESOLVED.saturating_sub(self.resolved));
+            let mut cut = Cut { budget: start, deep: false, big: false };
+            let tree = resolve_k(tree, &trees, 0, &mut cut);
+            self.units += start - cut.budget;
+            self.resolved += start - cut.budget;
+            if cut.deep {
+                self.unread(format!("{file}:{line}"), format!("`{ty}`: tham chiếu tới tài nguyên `kubernetes_*` khác vòng hay sâu quá {MAX_RESOLVE} tầng; phần đó không đọc"));
+            }
+            if cut.big {
+                self.unread(format!("{file}:{line}"), format!("`{ty}`: giá trị lấy qua tham chiếu quá {MAX_RESOLVED} đơn vị cho cả repo; phần đó không đọc"));
+            }
+            if let Some(w) = k_hard(&tree) {
+                self.unread(format!("{}:{}", w.file, w.line), format!("`{ty}`: {}", w.what));
+            }
+            let mut y = Yaml::default();
+            let top = match &tree {
+                K::Body(es) => es.as_slice(),
+                _ => &[],
+            };
+            if ty == "kubernetes_manifest" {
+                let Some((_, K::Val(V::Obj(es)), _)) = top.iter().rev().find(|(n, _, _)| n == "manifest") else {
+                    self.unread(format!("{file}:{line}"), "`kubernetes_manifest` không có `manifest` đọc được".into());
+                    continue;
+                };
+                if es.iter().any(|(k, v, _)| k == "kind" && v.known().is_some_and(|x| x == "Secret")) {
+                    continue;
+                }
+                let mut lead = None;
+                y.obj(es, 0, line, &mut lead);
+            } else {
+                let Some((api, kind)) = k8s_kind(&ty) else { continue };
+                y.put(format!("apiVersion: {}", quote(api)), line);
+                y.put(format!("kind: {}", quote(kind)), line);
+                let kept: Vec<(String, K, usize)> = top.iter().filter(|(n, _, _)| !TF_META.contains(&n.as_str())).cloned().collect();
+                let mut lead = None;
+                y.body(&kept, "", 0, &mut lead);
+            }
+            let name = k_get(&tree, &["metadata".into(), "name".into()])
+                .or_else(|| k_get(&tree, &["manifest".into(), "metadata".into(), "name".into()]))
+                .and_then(|v| v.known());
+            manifests.push(Manifest { root: root.to_string(), addr: addr.clone(), file: file.clone(), text: y.text, lines: y.lines, name, edges: Vec::new() });
+            resolved.push((addr, ty, file, line, tree));
+        }
+        // ConfigMap theo tên: khoá và giá trị (giữ tham chiếu tới tài nguyên
+        // Terraform khác), để lần cạnh qua `env_from` và `config_map_key_ref`.
+        let mut cms: Cms = HashMap::new();
+        for ((addr, ty, file, line, tree), m) in resolved.iter().zip(&manifests) {
+            let (data, ns) = if ty.starts_with("kubernetes_config_map") {
+                (k_get(tree, &["data".into()]), k_ns(tree, false))
+            } else if ty == "kubernetes_manifest" && k_get(tree, &["manifest".into(), "kind".into()]).and_then(|v| v.known()).as_deref() == Some("ConfigMap") {
+                (k_get(tree, &["manifest".into(), "data".into()]), k_ns(tree, true))
+            } else {
+                (None, None)
+            };
+            if let (Some(V::Obj(es)), Some(name)) = (data, &m.name) {
+                // Tham chiếu trong `data` đi qua bước giải cạnh như service
+                // tạm; kết quả vào `config_maps` cho workload YAML, Helm.
+                let mut edges = Vec::new();
+                for (k, v, at) in &es {
+                    let mut refs = Vec::new();
+                    v.refs(&mut refs);
+                    for (a, p, _) in refs.into_iter().filter(|(a, _, _)| !type_of(a).starts_with("kubernetes_")) {
+                        let shown = if p.is_empty() { format!("{k} → {a}") } else { format!("{k} → {a}.{}", p.join(".")) };
+                        edges.push(RefEdge { key: k.clone(), file: file.clone(), line: *at, target: a, shown });
+                    }
+                }
+                if !edges.is_empty() {
+                    self.out.config_maps.push(TfConfigMap { root: root.to_string(), addr: addr.clone(), name: name.clone(), namespace: ns.clone(), keys: Vec::new() });
+                    pseudo.push(Unit {
+                        root: root.to_string(),
+                        addr: addr.clone(),
+                        ty: ty.clone(),
+                        file: file.clone(),
+                        line: *line,
+                        compute: true,
+                        containers: Vec::new(),
+                        edges,
+                        exposed: Vec::new(),
+                    });
+                }
+                cms.entry(name.clone()).or_default().extend(es.into_iter().map(|(k, v, _)| (ns.clone(), k, v)));
+            }
+        }
+        // Cạnh từ biến môi trường tới tài nguyên không phải `kubernetes_*`;
+        // tham chiếu tới `kubernetes_*` mà không giải được thì báo.
+        for ((addr, ty, file, line, tree), m) in resolved.iter().zip(&manifests) {
+            let mut edges = Vec::new();
+            let mut unresolved = Vec::new();
+            let ns = k_ns(tree, ty == "kubernetes_manifest");
+            env_refs(tree, file, &(&cms, ns.as_deref()), &mut edges, &mut unresolved);
+            for (at, shown) in unresolved {
+                self.unread(format!("{file}:{at}"), format!("biến môi trường {shown}: tham chiếu chưa giải được"));
+            }
+            if m.name.is_none() && !edges.is_empty() {
+                self.unread(format!("{file}:{line}"), format!("`{ty}`: `metadata.name` chưa biết, cạnh tới tài nguyên Terraform không gắn được"));
+            }
+            if !edges.is_empty() {
+                pseudo.push(Unit {
+                    root: root.to_string(),
+                    addr: addr.clone(),
+                    ty: ty.clone(),
+                    file: file.clone(),
+                    line: *line,
+                    compute: true,
+                    containers: Vec::new(),
+                    edges,
+                    exposed: Vec::new(),
+                });
+            }
+        }
+        (manifests, pseudo)
+    }
+
+    /// Thân khối thành cây: thuộc tính đã đánh giá, khối cùng tên gộp thành
+    /// danh sách.
+    fn k_body(&mut self, inst: usize, fid: usize, body: &Body, file: &str) -> K {
+        let mut out: Vec<(String, K, usize)> = Vec::new();
+        for it in &body.items {
+            match it {
+                hcl::Item::Attr(a) => {
+                    let v = self.eval(inst, fid, &a.expr, 0);
+                    out.push((a.name.clone(), K::Val(v), a.line));
+                }
+                hcl::Item::Block(b) if b.kind == "dynamic" => {
+                    let kind = b.labels.first().map_or("", String::as_str).to_string();
+                    self.unread(format!("{file}:{}", b.line), format!("khối `dynamic \"{kind}\"` chưa được đọc"));
+                }
+                hcl::Item::Block(b) => {
+                    let k = self.k_body(inst, fid, &b.body, file);
+                    match out.iter_mut().find(|(n, x, _)| *n == b.kind && matches!(x, K::Blocks(_))) {
+                        Some((_, K::Blocks(v), _)) => v.push((k, b.line)),
+                        _ => out.push((b.kind.clone(), K::Blocks(vec![(k, b.line)]), b.line)),
+                    }
+                }
+            }
+        }
+        K::Body(out)
     }
 
     /// Một biến môi trường: tên máy trong giá trị (như compose), tham chiếu tài
@@ -1515,6 +1843,501 @@ impl Module {
     }
 }
 
+/// Thân tài nguyên `kubernetes_*` đã đánh giá: khối giữ tên HCL (đổi sang tên
+/// Kubernetes lúc in), thuộc tính giữ giá trị (khoá của map như `labels` giữ
+/// nguyên).
+#[derive(Debug, Clone, PartialEq)]
+enum K {
+    Body(Vec<(String, K, usize)>),
+    /// Các khối cùng tên, kèm dòng mỗi khối.
+    Blocks(Vec<(K, usize)>),
+    Val(V),
+}
+
+/// Loại `kubernetes_*` không dựng mà không đổi cạnh hay lối vào của workload:
+/// quyền, tài khoản, lưu trữ, giới hạn, co giãn.
+const K8S_HARMLESS: &[&str] = &[
+    "kubernetes_role", "kubernetes_cluster_role", "kubernetes_service_account", "kubernetes_default_service_account",
+    "kubernetes_persistent_volume", "kubernetes_storage_class", "kubernetes_priority_class", "kubernetes_resource_quota",
+    "kubernetes_limit_range", "kubernetes_horizontal_pod_autoscaler", "kubernetes_pod_disruption_budget",
+    "kubernetes_certificate_signing_request", "kubernetes_token_request", "kubernetes_csi_driver", "kubernetes_runtime_class",
+];
+
+/// Meta-argument và thuộc tính chỉ của provider: không phải trường manifest.
+const TF_META: &[&str] = &[
+    "count", "for_each", "provider", "depends_on", "lifecycle", "timeouts", "wait_for_rollout", "wait_for_load_balancer",
+    "wait_for_completion", "wait_for_default_service_account",
+];
+
+/// Khối HCL lặp lại được, ứng với trường danh sách trong Kubernetes.
+const LIST_BLOCKS: &[(&str, &str)] = &[
+    ("container", "containers"),
+    ("init_container", "initContainers"),
+    ("port", "ports"),
+    ("ports", "ports"),
+    ("env", "env"),
+    ("env_from", "envFrom"),
+    ("volume", "volumes"),
+    ("volume_mount", "volumeMounts"),
+    ("toleration", "tolerations"),
+    ("rule", "rules"),
+    ("path", "paths"),
+    ("tls", "tls"),
+    ("match_expressions", "matchExpressions"),
+    ("ingress", "ingress"),
+    ("egress", "egress"),
+    ("from", "from"),
+    ("to", "to"),
+    ("image_pull_secrets", "imagePullSecrets"),
+    ("host_aliases", "hostAliases"),
+    ("topology_spread_constraint", "topologySpreadConstraints"),
+    ("readiness_gate", "readinessGates"),
+];
+
+/// Loại Terraform → `apiVersion`, `kind`.
+fn k8s_kind(ty: &str) -> Option<(&'static str, &'static str)> {
+    let base = ty.strip_prefix("kubernetes_")?;
+    let v1 = base.ends_with("_v1");
+    let base = base.strip_suffix("_v1").unwrap_or(base);
+    Some(match base {
+        "deployment" => ("apps/v1", "Deployment"),
+        "stateful_set" => ("apps/v1", "StatefulSet"),
+        "daemonset" | "daemon_set" => ("apps/v1", "DaemonSet"),
+        "replication_controller" => ("v1", "ReplicationController"),
+        "job" => ("batch/v1", "Job"),
+        "cron_job" => ("batch/v1", "CronJob"),
+        "pod" => ("v1", "Pod"),
+        "service" => ("v1", "Service"),
+        "config_map" => ("v1", "ConfigMap"),
+        "namespace" => ("v1", "Namespace"),
+        "network_policy" => ("networking.k8s.io/v1", "NetworkPolicy"),
+        // `kubernetes_ingress` cũ theo lược đồ v1beta1 (`service_name`).
+        "ingress" if v1 => ("networking.k8s.io/v1", "Ingress"),
+        _ => return None,
+    })
+}
+
+fn has_block(body: &Body, kinds: &[&str]) -> bool {
+    body.items.iter().any(|it| match it {
+        hcl::Item::Block(b) => kinds.contains(&b.kind.as_str()) || has_block(&b.body, kinds),
+        _ => false,
+    })
+}
+
+/// Tên trường Kubernetes của khối hay thuộc tính HCL `name` dưới `parent`.
+fn k8s_name(name: &str, parent: &str, blocks: bool) -> String {
+    // `port { number }` trong `backend.service` của Ingress là một object.
+    if blocks
+        && !(name == "port" && parent == "service")
+        && let Some(&(_, y)) = LIST_BLOCKS.iter().find(|(h, _)| *h == name)
+    {
+        return y.to_string();
+    }
+    match name {
+        "external_ips" => return "externalIPs".into(),
+        "cluster_ip" => return "clusterIP".into(),
+        "cluster_ips" => return "clusterIPs".into(),
+        "load_balancer_ip" => return "loadBalancerIP".into(),
+        "host_ip" => return "hostIP".into(),
+        _ => {}
+    }
+    let mut out = String::new();
+    let mut up = false;
+    for c in name.chars() {
+        if c == '_' {
+            up = true;
+        } else if up {
+            out.extend(c.to_uppercase());
+            up = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Giá trị ở đường `path` (tên thuộc tính, chỉ số đã bỏ) trong cây.
+fn k_get(k: &K, path: &[String]) -> Option<V> {
+    k_ref(k, path).cloned()
+}
+
+fn k_ref<'k>(k: &'k K, path: &[String]) -> Option<&'k V> {
+    let mut cur = k;
+    for (n, seg) in path.iter().enumerate() {
+        let body = match cur {
+            K::Blocks(v) => match v.first() {
+                Some((K::Body(es), _)) => es,
+                _ => return None,
+            },
+            K::Body(es) => es,
+            K::Val(v) => {
+                let mut v = v;
+                for s in &path[n..] {
+                    v = v.get(s)?;
+                }
+                return Some(v);
+            }
+        };
+        cur = &body.iter().rev().find(|(x, _, _)| x == seg)?.1;
+    }
+    match cur {
+        K::Val(v) => Some(v),
+        _ => None,
+    }
+}
+
+/// Độ sâu giải tham chiếu giữa các tài nguyên `kubernetes_*`, và cỡ giá trị
+/// chép qua tham chiếu cho cả repo (manifest thật chép vài nhãn, vài tên).
+const MAX_RESOLVE: usize = 8;
+pub const MAX_RESOLVED: usize = 200_000;
+
+/// Ngân sách giải tham chiếu, và cờ đã chạm trần độ sâu, trần cỡ.
+struct Cut {
+    budget: usize,
+    deep: bool,
+    big: bool,
+}
+
+/// Thay tham chiếu tới tài nguyên `kubernetes_*` khác bằng giá trị của nó
+/// (`kubernetes_service.cart.metadata[0].name` thành tên Service). Có trần độ
+/// sâu và cỡ (TM-53): quá thì giữ tham chiếu và bật cờ để báo.
+fn resolve_k(k: &K, trees: &HashMap<String, K>, depth: usize, cut: &mut Cut) -> K {
+    match k {
+        K::Body(es) => K::Body(es.iter().map(|(n, x, l)| (n.clone(), resolve_k(x, trees, depth, cut), *l)).collect()),
+        K::Blocks(v) => K::Blocks(v.iter().map(|(x, l)| (resolve_k(x, trees, depth, cut), *l)).collect()),
+        K::Val(v) => K::Val(resolve_v(v.clone(), trees, depth, cut)),
+    }
+}
+
+fn resolve_v(v: V, trees: &HashMap<String, K>, depth: usize, cut: &mut Cut) -> V {
+    let lookup = |a: &str, p: &[String], cut: &mut Cut| -> Option<V> {
+        if cut.big {
+            return None;
+        }
+        let tree = trees.get(a)?;
+        let x = match k_ref(tree, p) {
+            Some(x) => x,
+            // Thuộc tính chỉ biết lúc apply của một Service (`cluster_ip`,
+            // `id`, `status`): vẫn là chính Service đó, gọi theo tên.
+            None if type_of(a).starts_with("kubernetes_service") => k_ref(tree, &["metadata".into(), "name".into()]).filter(|n| n.known().is_some())?,
+            None => return None,
+        };
+        if depth >= MAX_RESOLVE {
+            cut.deep = true;
+            return None;
+        }
+        // Đo trước khi chép: giá trị lớn lấy nhiều lần không được chép ra.
+        let n = x.size();
+        if n > cut.budget {
+            cut.big = true;
+            return None;
+        }
+        cut.budget -= n;
+        Some(resolve_v(x.clone(), trees, depth + 1, cut))
+    };
+    match v {
+        V::Res(a, p, l) => lookup(&a, &p, cut).unwrap_or(V::Res(a, p, l)),
+        V::Str(ps) => {
+            let mut out = Vec::new();
+            for part in ps {
+                match part {
+                    P::Ref(a, p, l) => match lookup(&a, &p, cut) {
+                        Some(V::Str(qs)) => out.extend(qs),
+                        // Giá trị là tham chiếu tới tài nguyên khác (ConfigMap
+                        // giữ `aws_db_instance.main.address`): giữ tham chiếu đó.
+                        Some(V::Res(a2, p2, l2)) => out.push(P::Ref(a2, p2, l2)),
+                        Some(x) if x.known().is_some() => out.push(P::Text(x.known().unwrap_or_default())),
+                        _ => out.push(P::Ref(a, p, l)),
+                    },
+                    other => out.push(other),
+                }
+            }
+            V::Str(out)
+        }
+        V::List(xs) => V::List(xs.into_iter().map(|x| resolve_v(x, trees, depth, cut)).collect()),
+        V::Obj(es) => V::Obj(es.into_iter().map(|(k, x, l)| (k, resolve_v(x, trees, depth, cut), l)).collect()),
+        other => other,
+    }
+}
+
+fn k_hard(k: &K) -> Option<&Why> {
+    match k {
+        K::Body(es) => es.iter().filter(|(n, _, _)| !TF_META.contains(&n.as_str())).find_map(|(_, x, _)| k_hard(x)),
+        K::Blocks(v) => v.iter().find_map(|(x, _)| k_hard(x)),
+        K::Val(v) => v.hard(),
+    }
+}
+
+/// ConfigMap theo tên: namespace (`None` là chưa biết), khoá, giá trị.
+type Cms = HashMap<String, Vec<(Option<String>, String, V)>>;
+
+/// Bảng ConfigMap và namespace của workload đang xét.
+type CmCx<'a> = (&'a Cms, Option<&'a str>);
+
+/// Namespace của tài nguyên: `default` khi không ghi, `None` khi chưa biết.
+fn k_ns(tree: &K, manifest: bool) -> Option<String> {
+    let path: Vec<String> = if manifest { vec!["manifest".into(), "metadata".into(), "namespace".into()] } else { vec!["metadata".into(), "namespace".into()] };
+    match k_get(tree, &path) {
+        None | Some(V::Null) => Some("default".into()),
+        Some(v) => v.known(),
+    }
+}
+
+/// Hai namespace có thể là một: chưa biết thì khớp.
+pub fn same_ns(a: Option<&str>, b: Option<&str>) -> bool {
+    match (a, b) {
+        (Some(x), Some(y)) => x == y,
+        _ => true,
+    }
+}
+
+/// Cạnh từ biến môi trường (khối `env { name, value }` của HCL, hay
+/// `env: [{name, value}]` trong `kubernetes_manifest`; cả giá trị lấy từ
+/// ConfigMap qua `env_from`, `config_map_key_ref`) tới tài nguyên Terraform
+/// không phải `kubernetes_*`. Tham chiếu tới `kubernetes_*` còn lại sau khi
+/// giải là chưa giải được: vào `unresolved` để báo. Biến tên như secret không
+/// thành cạnh, và không giữ giá trị (TM-50).
+fn env_refs(k: &K, file: &str, cms: &CmCx<'_>, out: &mut Vec<RefEdge>, unresolved: &mut Vec<(usize, String)>) {
+    let known = |k: &K, path: &[&str]| k_get(k, &path.iter().map(|s| s.to_string()).collect::<Vec<_>>()).and_then(|v| v.known());
+    match k {
+        K::Blocks(v) => v.iter().for_each(|(x, _)| env_refs(x, file, cms, out, unresolved)),
+        K::Val(v) => v_env_refs(v, file, cms, out, unresolved),
+        K::Body(es) => {
+            for (n, x, _) in es {
+                match (n.as_str(), x) {
+                    ("env", K::Blocks(v)) => {
+                        for (e, at) in v {
+                            let K::Body(fields) = e else { continue };
+                            let Some(name) = known(e, &["name"]) else { continue };
+                            if let Some((_, K::Val(val), line)) = fields.iter().rev().find(|(x, _, _)| x == "value") {
+                                env_item(&name, val, *line, file, out, unresolved);
+                            }
+                            if let (Some(cm), Some(key)) = (known(e, &["value_from", "config_map_key_ref", "name"]), known(e, &["value_from", "config_map_key_ref", "key"])) {
+                                from_cm(cms, &cm, Some(&key), &name, *at, file, out, unresolved);
+                            }
+                        }
+                    }
+                    ("env_from", K::Blocks(v)) => {
+                        for (e, at) in v {
+                            if let Some(cm) = known(e, &["config_map_ref", "name"]) {
+                                let prefix = known(e, &["prefix"]).unwrap_or_default();
+                                from_cm(cms, &cm, None, &prefix, *at, file, out, unresolved);
+                            }
+                        }
+                    }
+                    _ => env_refs(x, file, cms, out, unresolved),
+                }
+            }
+        }
+    }
+}
+
+fn v_env_refs(v: &V, file: &str, cms: &CmCx<'_>, out: &mut Vec<RefEdge>, unresolved: &mut Vec<(usize, String)>) {
+    let known = |v: &V, path: &[&str]| path.iter().try_fold(v, |v, k| v.get(k)).and_then(V::known);
+    match v {
+        V::Obj(es) => {
+            for (k, x, line) in es {
+                match k.as_str() {
+                    "env" => {
+                        for e in x.items() {
+                            let Some(name) = known(e, &["name"]) else { continue };
+                            if let Some(val) = e.get("value") {
+                                env_item(&name, val, e.line_of("value").unwrap_or(*line), file, out, unresolved);
+                            }
+                            if let (Some(cm), Some(key)) = (known(e, &["valueFrom", "configMapKeyRef", "name"]), known(e, &["valueFrom", "configMapKeyRef", "key"])) {
+                                from_cm(cms, &cm, Some(&key), &name, e.line_of("valueFrom").unwrap_or(*line), file, out, unresolved);
+                            }
+                        }
+                    }
+                    "envFrom" => {
+                        for e in x.items() {
+                            if let Some(cm) = known(e, &["configMapRef", "name"]) {
+                                let prefix = known(e, &["prefix"]).unwrap_or_default();
+                                from_cm(cms, &cm, None, &prefix, e.line_of("configMapRef").unwrap_or(*line), file, out, unresolved);
+                            }
+                        }
+                    }
+                    _ => v_env_refs(x, file, cms, out, unresolved),
+                }
+            }
+        }
+        V::List(xs) => xs.iter().for_each(|x| v_env_refs(x, file, cms, out, unresolved)),
+        _ => {}
+    }
+}
+
+/// Biến môi trường lấy từ ConfigMap `cm`: một khoá (`config_map_key_ref`, tên
+/// biến là `env`), hay mọi khoá (`env_from`, `env` là tiền tố). Dòng là dòng
+/// của workload lấy giá trị.
+#[allow(clippy::too_many_arguments)]
+fn from_cm(cms: &CmCx<'_>, cm: &str, key: Option<&str>, env: &str, line: usize, file: &str, out: &mut Vec<RefEdge>, unresolved: &mut Vec<(usize, String)>) {
+    let (cms, ns) = cms;
+    for (_, k, v) in cms.get(cm).into_iter().flatten().filter(|(n, _, _)| same_ns(n.as_deref(), *ns)) {
+        match key {
+            Some(want) if want == k => env_item(env, v, line, file, out, unresolved),
+            Some(_) => {}
+            None => env_item(&format!("{env}{k}"), v, line, file, out, unresolved),
+        }
+    }
+}
+
+fn env_item(name: &str, val: &V, line: usize, file: &str, out: &mut Vec<RefEdge>, unresolved: &mut Vec<(usize, String)>) {
+    if compose::secret_key(name) {
+        return;
+    }
+    let mut refs = Vec::new();
+    val.refs(&mut refs);
+    for (addr, path, _) in refs {
+        let shown = if path.is_empty() { format!("{name} → {addr}") } else { format!("{name} → {addr}.{}", path.join(".")) };
+        if type_of(&addr).starts_with("kubernetes_") {
+            unresolved.push((line, format!("`{shown}`")));
+            continue;
+        }
+        out.push(RefEdge { key: name.to_string(), file: file.to_string(), line, target: addr, shown });
+    }
+}
+
+/// Chuỗi YAML trong nháy kép. Phần không biết (tham chiếu chưa giải, giá trị
+/// chưa biết) thành `\0`, như compose: bộ tìm tên máy coi đó là chỗ ngắt.
+fn quote(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            c if (c as u32) < 0x20 || c == '\u{7f}' => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Giá trị vô hướng in được; `None` cho object, list, null, không biết.
+fn scalar(v: &V) -> Option<String> {
+    match v {
+        V::Bool(b) => Some(b.to_string()),
+        V::Num(n) => Some(n.clone()),
+        V::Str(ps) => Some(quote(&ps.iter().map(|p| match p {
+            P::Text(t) => t.as_str(),
+            _ => "\0",
+        }).collect::<String>())),
+        V::Res(..) => Some(quote("\0")),
+        _ => None,
+    }
+}
+
+/// Văn bản YAML dạng khối kèm dòng nguồn của từng dòng.
+#[derive(Default)]
+struct Yaml {
+    text: String,
+    lines: Vec<usize>,
+}
+
+impl Yaml {
+    fn put(&mut self, s: String, at: usize) {
+        self.text.push_str(&s);
+        self.text.push('\n');
+        self.lines.push(at);
+    }
+
+    /// Đầu dòng: `- ` của mục danh sách đang chờ, hay thụt lề.
+    fn start(lead: &mut Option<String>, ind: usize) -> String {
+        lead.take().unwrap_or_else(|| " ".repeat(ind))
+    }
+
+    fn body(&mut self, es: &[(String, K, usize)], parent: &str, ind: usize, lead: &mut Option<String>) {
+        for (n, k, line) in es {
+            match k {
+                K::Val(v) => self.entry(&quote(&k8s_name(n, parent, false)), v, ind, *line, lead),
+                K::Body(inner) => {
+                    let s = Self::start(lead, ind);
+                    self.put(format!("{s}{}:", quote(&k8s_name(n, parent, false))), *line);
+                    self.body(inner, n, ind + 2, &mut None);
+                }
+                K::Blocks(bs) => {
+                    let key = k8s_name(n, parent, true);
+                    let list = LIST_BLOCKS.iter().any(|(_, y)| *y == key) && !(n == "port" && parent == "service");
+                    let s = Self::start(lead, ind);
+                    self.put(format!("{s}{}:", quote(&key)), *line);
+                    for (b, bl) in if list { &bs[..] } else { &bs[..1] } {
+                        let K::Body(inner) = b else { continue };
+                        if list {
+                            let mut item = Some(format!("{}- ", " ".repeat(ind + 2)));
+                            self.body(inner, n, ind + 4, &mut item);
+                            if let Some(s) = item {
+                                self.put(format!("{s}{{}}"), *bl);
+                            }
+                        } else if inner.is_empty() {
+                            self.text.truncate(self.text.len() - 1);
+                            self.text.push_str(" {}\n");
+                        } else {
+                            self.body(inner, n, ind + 2, &mut None);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn entry(&mut self, key: &str, v: &V, ind: usize, line: usize, lead: &mut Option<String>) {
+        if let Some(x) = scalar(v) {
+            let s = Self::start(lead, ind);
+            self.put(format!("{s}{key}: {x}"), line);
+            return;
+        }
+        match v {
+            V::List(xs) => {
+                let s = Self::start(lead, ind);
+                if xs.is_empty() {
+                    self.put(format!("{s}{key}: []"), line);
+                    return;
+                }
+                self.put(format!("{s}{key}:"), line);
+                self.list(xs, ind + 2, line);
+            }
+            V::Obj(es) => {
+                let s = Self::start(lead, ind);
+                if es.is_empty() {
+                    self.put(format!("{s}{key}: {{}}"), line);
+                    return;
+                }
+                self.put(format!("{s}{key}:"), line);
+                self.obj(es, ind + 2, line, &mut None);
+            }
+            _ => {}
+        }
+    }
+
+    fn list(&mut self, xs: &[V], ind: usize, line: usize) {
+        for x in xs {
+            let pre = format!("{}- ", " ".repeat(ind));
+            if let Some(s) = scalar(x) {
+                self.put(format!("{pre}{s}"), line);
+            } else if let V::Obj(es) = x {
+                let mut item = Some(pre);
+                self.obj(es, ind + 2, line, &mut item);
+                if let Some(s) = item {
+                    self.put(format!("{s}{{}}"), line);
+                }
+            } else {
+                self.put(format!("{pre}{}", quote("\0")), line);
+            }
+        }
+    }
+
+    /// Object của một giá trị: khoá giữ nguyên (nhãn, `data`).
+    fn obj(&mut self, es: &[(String, V, usize)], ind: usize, line: usize, lead: &mut Option<String>) {
+        let _ = line;
+        for (k, v, l) in es {
+            self.entry(&quote(k), v, ind, *l, lead);
+        }
+    }
+}
+
 fn dot(d: &str) -> String {
     if d.is_empty() { ".".to_string() } else { d.to_string() }
 }
@@ -1577,7 +2400,12 @@ fn add_block(m: &mut Module, fid: usize, b: Block) {
                 m.outputs.insert(name.clone(), (fid, a.expr.clone()));
             }
         }
+        ("provider", [name]) if name == "kubernetes" || name == "helm" => m.k8s = true,
+        ("terraform", []) => {
+            m.k8s |= b.body.blocks("required_providers").any(|r| r.body.attr("kubernetes").is_some() || r.body.attr("helm").is_some());
+        }
         ("resource", [ty, name]) => {
+            m.k8s |= ty.starts_with("kubernetes_") || ty.starts_with("helm_");
             let each = b
                 .body
                 .attr("count")
@@ -1586,9 +2414,14 @@ fn add_block(m: &mut Module, fid: usize, b: Block) {
             m.resources.push(ResDecl { ty: ty.clone(), name: name.clone(), file: fid, line, body: Rc::new(b.body), each });
         }
         ("data", [ty, name]) => {
+            m.k8s |= ty.starts_with("kubernetes_") || ty.starts_with("helm_");
             m.data.insert(format!("{ty}.{name}"), (fid, line));
         }
-        ("module", [name]) => m.calls.push((name.clone(), fid, line, Rc::new(b.body))),
+        ("module", [name]) => {
+            // Module registry mà tên nguồn nhắc Kubernetes, Helm: có thể triển khai workload.
+            m.k8s |= b.body.attr("source").and_then(|a| a.expr.literal()).is_some_and(|s| s.contains("kubernetes") || s.contains("helm"));
+            m.calls.push((name.clone(), fid, line, Rc::new(b.body)))
+        }
         _ => {}
     }
 }

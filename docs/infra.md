@@ -558,7 +558,28 @@ Terraform chưa khai" khi chưa.
   biết), khối `dynamic` ở chỗ khai container, env, biến môi trường; biểu thức
   `for`, chỉ dẫn `%{…}`, hàm `file`/`templatefile` và hàm lạ khi giá trị đó
   cần cho env hay image; file `.tf.json`, file `*_override.tf`.
-  `kubernetes_*` khai qua Terraform chưa đọc (đợt sau).
+- **`kubernetes_*`:** `kubernetes_deployment`, `stateful_set`, `daemonset`,
+  `job`, `cron_job`, `pod`, `replication_controller`, `service`,
+  `config_map`, `namespace`, `network_policy`, `ingress_v1` (cả bản `_v1`) và
+  `kubernetes_manifest` được dựng thành manifest rồi đi qua bộ đọc
+  Kubernetes, như manifest dựng từ chart Helm: khoá là
+  `k8s:<thư mục module gốc>/<tên>` (`k8s:cart` khi tên là duy nhất), dòng trỏ
+  về file `.tf`. Tham chiếu giữa chúng được giải
+  (`kubernetes_service_v1.cart.metadata[0].name`, selector lấy nhãn của
+  Deployment); env tham chiếu tài nguyên Terraform khác
+  (`aws_db_instance.main.address`) là cạnh tới `tf:` như trên, kể cả khi giá
+  trị nằm trong ConfigMap mà workload lấy qua `env_from` hay
+  `config_map_key_ref`, và cả khi workload đó viết bằng YAML hay Helm
+  (`envFrom`, `configMapKeyRef` tới ConfigMap do Terraform dựng, cùng
+  namespace).
+  Thuộc tính chỉ biết lúc apply của Service (`cluster_ip`, `id`) vẫn là Service
+  đó. `kubernetes_secret*` và manifest `kind: Secret` không đọc. "Chưa đọc
+  được", báo cả khi luật chỉ có `k8s:`: loại khác (trừ quyền, tài khoản, lưu
+  trữ, giới hạn, co giãn), `kubernetes_ingress` bản cũ, khối `dynamic`,
+  `manifest = yamldecode(file(…))`, `merge`/`concat` trên tham chiếu tài
+  nguyên, tham chiếu tới `kubernetes_*` không giải được, tên chưa biết mà có
+  cạnh, tham chiếu vòng hay sâu quá 8 tầng, giá trị chép qua tham chiếu quá
+  200 000 đơn vị cho cả repo.
 - **Trần** (TM-48 tới TM-51): độ lồng HCL 64, độ sâu đánh giá 96, module lồng
   16 tầng và 500 module cho cả repo, 2 000 000 bước, cỡ giá trị 1 000 000 đơn
   vị, một chuỗi 64 KB. Module chỉ theo đường dẫn trong repo, không qua symlink.
