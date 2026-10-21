@@ -5,7 +5,7 @@ Mô tả sản phẩm ở [README.md](README.md); file này chỉ ghi trạng th
 
 ## §0 Đang ở đâu, việc tiếp theo
 
-Cập nhật 2026-10-20.
+Cập nhật 2026-10-21.
 
 ### Đã xong, có bằng chứng
 
@@ -464,13 +464,126 @@ git, `cargo clean` dọn.
    Biên nhận ALL-OK trên mã cuối (logs-k10): `cargo test` (709), clippy,
    MSRV 1.88, release, bộ đo 31 repo 0 bất nhất 1085/1085, oracle khớp hết
    (microservices-demo 142, bộ mẫu 43), sabotage 56 kiểu 0 trượt, `verify`
-   3/3, `check --strict` 0.
+   3/3, `check --strict` 0. Lên `main` sau CI xanh 5/5 (run 39356060638).
 6. Test thời gian sang thời gian CPU (2026-10-20), commit `f0101b6` (chưa push): 12 chỗ đo
    ngưỡng thời gian ở `tests/ffi.rs`, `grpc.rs`, `glob.rs`, `infra.rs` dùng
    `testclock::Clock` (thư viện chạy một luồng nên đo đủ). Giữ đồng hồ thật,
    có ghi lý do: test FIFO `infra.rs` (luồng treo ở `open` không tốn CPU);
    `archctl/tests/serve.rs` chờ tiến trình khác; `setup.rs` là mã sản
    phẩm. Biên nhận: `cargo test --workspace` 713 đạt, clippy, MSRV 1.88.
+7. Đợt 7 Terraform (2026-10-20), XONG phần chính, CHƯA COMMIT (chờ bạn bảo): bạn chốt "theo
+   đề xuất" (phương án D, trang https://claude.ai/artifact/CbuM77HWUaHLd2ySvKFTTF).
+   `f0101b6`, `217b5cb`, `81c32a8` đã lên main sau CI xanh (run
+   39356060638). Đã có: threat model TM-48..52; `scan/hcl.rs` (bộ đọc tập
+   con HCL) và `scan/terraform.rs` (đánh giá tĩnh var/locals/module cục bộ,
+   ECS, Lambda, Cloud Run, cạnh qua tham chiếu và qua bộ cân bằng tải, lối
+   vào Internet, trần bước/cỡ/độ sâu/chuỗi 64 KB): 13 test đạt, clippy sạch.
+   `kubernetes_*` qua Terraform để làm sau trong đợt 7. Đã nối: `Source::Tf`
+   (`tf:<địa chỉ>`, `tf:<thư mục gốc>/<địa chỉ>`), `Key::Tf`, `Options.tf`,
+   `load_terraform` (image lần về Dockerfile qua `k8s_starts`, ghim
+   `dockerfile:`), `check` (khớp, `UNDECLARED_TF`, workload chưa khai), `init`
+   sinh `service tf:` và `link`, `scan`, hook đọc lại khi sửa `.tf`. Test
+   tích hợp `tests/terraform.rs` 8 đạt; cả workspace đạt, clippy, MSRV.
+   Tài liệu (`docs/infra.md` mục Terraform, README) đã có. Bộ đo:
+   `oracle.py --require terraform` tải OpenTofu 1.12.7, provider aws 6.67.0,
+   google 8.5.0 ghim SHA-256 vào mirror, plan từng module gốc offline với
+   khoá giả (TM-52); `bench/tf_truth.py` (python-hcl2 ghim băm cho `locals`,
+   `bench/tf-requirements.txt`) tính cạnh, lối vào, image; bộ mẫu
+   `fixtures/terraform-shop` khớp 14 dữ kiện. Repo đo mới
+   `terraform-docs-samples` (sparse `run/`, 47 service); `sabotage.py
+   --tf-repo` 4 kiểu phá. `scan --json` có `image` (chỉ với `--verbatim`).
+   Thước đo trên terraform-docs-samples (2026-10-20): 37 module gốc, 42 dữ
+   kiện khớp; 11 module gốc không plan được (bỏ qua; lời báo lấy nhầm dòng
+   tóm tắt thay vì dòng `Error:` của stderr, cần sửa trong `tf_plan`). Biên
+   nhận: `cargo test --workspace` 734 đạt, clippy, MSRV 1.88 (test chạy trước
+   khi gom kiểu `RefMap` trong terraform.rs, chỉ đổi kiểu, cần chạy lại).
+   Reviewer opus đang chạy (TM-48..52, ngữ nghĩa, hiệu năng 5 000 tài nguyên,
+   `tf_plan`). CHƯA COMMIT.
+   VIỆC TIẾP, theo thứ tự:
+   a. (xong; reviewer xác nhận lần 2, còn 2 lỗ đã sửa: `join` nhánh khác
+      dạng mất tham chiếu, heredoc hỏng quay về đếm thô; test
+      `nhanh_khac_dang_van_giu_canh`; TM-48..52 "đã có". Ghi chú thấp còn
+      lại: module tên `data` bị `is_tf_addr` từ chối) Sửa phát hiện của reviewer (2026-10-20, repro trong scratchpad t1..t11,
+      perf5k, u20000, p20000, bl200000), mỗi cái một test; cập nhật TM-48..52:
+      1 cao `hcl.rs` tràn stack: `unary` không gọi `deep`; `skip_balanced`
+        gọi `quoted` với độ sâu cố định (`%{` lồng); chuỗi `1+1+…` dài (đếm
+        hạng tử, có trần).
+      2 cao bậc hai và cạn ngân sách im lặng trong `collect`/`exposure`/
+        `open_world` (5 000 Lambda: 26 s, mất lối vào): dựng `refs_of` một
+        lần cho cả `integration_uri`, `security_group_id`, `listener_arn`,
+        chỉ mục ngược đích → nguồn; cạn ngân sách thì báo.
+      3 cao `listener_arn` thiếu trong danh sách khoá (`terraform.rs:894`):
+        ECS sau `aws_lb_listener_rule` mất lối vào, cạnh.
+      4 cao giá trị đầu vào xoá phần đã biết: `merge`/`concat` giữ phần biết;
+        `? :` điều kiện chưa biết thì hợp tham chiếu hai nhánh.
+      5 vừa `merge` ghi đè vẫn tạo cạnh: khử trùng khoá, giữ giá trị sau.
+      6 vừa thuộc tính lối vào hard-unknown (`internal`, `assign_public_ip`,
+        `authorization_type`, `member`, CIDR) thì báo chưa đọc được.
+      7 vừa đích `data.*`: `is_tf_addr` nhận `data.<loại>.<tên>`.
+      8 vừa `skip_balanced` không biết heredoc, `/* */`: giấu tài nguyên.
+      9 vừa `aws_alb*` là alias của `aws_lb*`; IAM policy Cloud Run v1,
+        function URL qua alias: báo chưa đọc được (sửa cả tf_truth.py).
+      10 thấp `count = 0` chỉ xét ở compute: xét cho mọi tài nguyên.
+      11 vừa oracle TM-52: không plan khi có module không cục bộ; quét
+        `data "external"`/provisioner ở mọi module con; kiểm lại băm khi
+        dùng lại cache; fixture có `data "external"` trong module con.
+      12 thấp `shown_path` để lộ query của `source` (`s3::…?aws_access_key_id`).
+      d oracle: trần tỉ lệ module gốc bị bỏ qua (`t.skipped` không làm đỏ).
+   b. (xong) `tf_plan`: lấy dòng `Error:` của stderr làm lý do bỏ qua.
+   c. (xong) CI `.github/workflows/ci.yml`: thêm `terraform` vào `--require` của
+      bước oracle, `--tf-repo terraform-docs-samples` vào bước sabotage, sửa
+      số kiểu phá (56 + 4 = 60) ở ci.yml, docs/ci.md, bench/README.md; thêm
+      repo vào số repo (31 → 32) ở README/docs nếu có.
+   (2026-10-20) bench.py trượt ở terraform-docs-samples: repo chỉ có
+   Terraform thì `init --from-code` từ chối. Đã sửa: `discover` vẫn sinh
+   service, link khi không có file mã (`setup.rs` chỉ từ chối khi không có
+   cả mã lẫn cấu hình triển khai); test `repo_chi_co_terraform_van_sinh_ban_nhap`.
+   Bộ đo cũng mở rộng cho repo chỉ có hạ tầng: `consistency.py` không coi là
+   "không có gì để kiểm" khi luật có `service`, chấp nhận `link` làm thứ để
+   kiểm, `DEPLOY[repo]["unread"]` khai chỗ chưa đọc được đã biết
+   (`run/multiple_regions/main.tf:151`, `count` theo biến); `flows.py` đòi
+   cả `service`, `link` bắt đầu ở `#draft`, phép kiểm hash chỉ khi luật đổi.
+   `bench.py --only terraform-docs-samples`: 0 bất nhất, luồng 24/24.
+   logs-t4: oracle lệch 1 chỗ ở microservices-demo (`terraform/` dùng
+   provisioner nên bị từ chối plan, 1/1 gốc) do trần "bỏ qua quá nửa" đếm cả
+   lần từ chối có chủ ý; đã sửa (chỉ đếm plan hỏng). logs-t5: test,
+   clippy, MSRV, release, bench 32 repo, oracle (khớp hết) đạt có biên nhận;
+   sabotage chạm trần 1 800 s của receipt.py (5 lượt Terraform plan lại ~48
+   gốc mỗi lượt). Đã sửa: `tf_plan` nhớ plan JSON theo băm `.tf` + OpenTofu +
+   provider (`target/bench/tf-oracle/plans/`); final.sh chạy sabotage với
+   `--timeout 3600`. logs-t6: oracle đạt có biên nhận (khớp hết); sabotage
+   805 s, 77 kiểu bắt, `tf-edge` trượt (phá service đầu tiên mà nó nằm ở
+   module gốc không plan được). Đã sửa: 4 kiểu `tf-*` phá mọi service
+   Terraform, như `sabotage_protos`. Đang chạy logs-t7 (sabotage, verify,
+   check; oracle không chạy lại vì `oracle.py` không đổi từ logs-t6).
+   KIỂM CHỨNG XONG (2026-10-21), mọi bước có biên nhận đạt: logs-t5 `cargo
+   test` (734+), clippy, MSRV 1.88, release, bench 32 repo 0 bất nhất;
+   logs-t6 oracle `--require …,terraform` khớp hết (terraform-docs-samples
+   37 gốc, bộ mẫu shop 14, refused bị từ chối đúng); logs-t7 sabotage 79
+   kiểu 0 trượt (60 kiểu khai trong CI cộng các lượt "không phá"), `verify`
+   3/3, `check --strict` 0. Còn lại đợt 7: `kubernetes_*` qua Terraform.
+   Việc tiếp: commit khi bạn bảo; đẩy nhánh thử, CI xanh thì lên main.
+   d. Chạy lần lượt, mỗi lệnh qua `receipt.py run --`, dừng ở lệnh trượt:
+      `cargo test --workspace`; `cargo clippy --workspace --all-targets --
+      -D warnings`; `cargo +1.88 check --workspace --tests`; `cargo build
+      --release`; `python3 bench/bench.py --rounds 1`; `python3
+      bench/oracle.py --require clang,node,go,syn,ipython,deploy,proto,helm,kustomize,terraform`;
+      `python3 bench/sabotage.py --archctl target/release/archctl
+      --rust-repo ripgrep --notebook-repo matplotlib --deploy-repo
+      example-voting-app --k8s-repo microservices-demo --proto-repo vllm
+      --tf-repo terraform-docs-samples`; `target/release/archctl verify`;
+      `target/release/archctl check --strict`. Gồm: test, clippy, MSRV,
+      release, bench.py (repo mới phải 0 bất nhất), oracle, sabotage,
+      `verify`, `check --strict`.
+   e. Chốt việc, báo cáo, chờ bạn bảo commit.
+   MỐC KIỂM TRA: `python3 bench/oracle.py --require clang,node,go,syn,ipython,deploy,proto,helm,kustomize,terraform`
+   khớp hết; sabotage 60 kiểu 0 trượt. Bản đồ tích hợp (Explore): `model.rs` Source,
+   `parser.rs:569` nhánh nguồn, `validate.rs:42-81`, `deploy.rs` Key/Options/
+   `load`/`is_deploy_file`/`touches_deploy`, `check.rs:1972-2628`
+   (`matches_source`, `deploy_options`, `UNDECLARED_*`, `services_undeclared`),
+   `discover.rs:160-408`, `main.rs:960-1646` (`scan`), `serve.rs:514`.
+   Tiếp: `scan/terraform.rs` (đánh giá tĩnh, rút service/cạnh/lối vào), nối
+   vào các chỗ trên, test, bộ đo OpenTofu.
 
 **Đã quyết (2026-10-11): cạnh binding Python ↔ native tự viết.** Đã tìm theo
 skill reuse-best. Không công cụ tĩnh nào phủ cả PyO3, pybind11, nanobind
@@ -723,3 +836,16 @@ không có `link` là vi phạm, có `link` mà cụm chặn là cảnh báo (`-
 - [x] Chốt 4 câu về overlay Kustomize @ban: bạn chốt "làm theo đề xuất" (2026-10-19, trang https://claude.ai/artifact/EYxE6c32ef5iUyyNXHet2b): mọi kustomization gốc (không bị kustomization khác trỏ tới) là một bản dựng, kiểm như bản sao của workload; áp tập con (`resources`, `components`, `patches` strategic merge và JSON 6902, `namePrefix`/`nameSuffix` kèm tham chiếu, `images`, `namespace`, `labels`/`commonLabels` kèm selector, `configMapGenerator`, `replicas`), ngoài tập con thì cả bản dựng "chưa đọc được"; `k8s:<tên gốc>` khớp tên đã thêm tiền tố, `k8s:<thư mục kustomization>/<tên>` chọn một bản dựng; thước đo `kustomize build` bản ghim sha256 (`--require kustomize`). reuse-best: Kustomize chỉ có bản Go (sigs.k8s.io/kustomize), không nhúng được vào CLI Rust không dependency; tự dựng tập con, đo bằng binary chính thức.
 - [x] Dựng overlay Kustomize: bản dựng từ kustomization gốc đi qua bộ đọc manifest; `k8s:` khớp tên gốc; dòng vi phạm trỏ về file gây ra giá trị. (2026-10-19, commit `217b5cb`; biên nhận ALL-OK logs-k10)
 - [x] Thước đo `kustomize build` ghim sha256, bộ mẫu, kiểu phá; tài liệu. (2026-10-19, commit `217b5cb`; biên nhận ALL-OK logs-k10)
+
+### Tầng hạ tầng, đợt 7: Terraform
+
+- [x] Chốt 5 câu @ban: bạn chốt "theo đề xuất" (2026-10-20) (trang https://claude.ai/artifact/CbuM77HWUaHLd2ySvKFTTF, bản 2 có phương án D theo câu hỏi của bạn 2026-10-20): cách đọc (khuyên D: tự đọc tập con HCL trong hook, phần "chưa đọc được" lấy từ plan JSON do `verify tf_plan` tạo, chỉ khi băm `.tf` còn khớp; đợt 7 là phần tự đọc, đợt 8 là phần plan), loại tài nguyên đợt đầu (khuyên ECS, Lambda, Cloud Run, `kubernetes_*`), tên trong luật (khuyên `tf:<loại>.<tên>`), DB khai bằng Terraform là service khi khai trong luật, bộ đo OpenTofu ghim SHA-256 kèm provider. reuse-best (2026-10-20): hcl-edit/hcl-rs kéo theo winnow, serde… (vi phạm 0 dependency); Inframap, terraform-config-inspect không đọc env var; plan JSON (`expressions.references`) là thước đo tốt nhất.
+- [x] Bộ đọc tập con HCL (`scan/hcl.rs`): khối, thuộc tính, chuỗi có `${}`, heredoc, list, object, tham chiếu, gọi hàm; trần bước, độ sâu, byte; ngoài tập con báo kèm dòng.
+- [x] Rút service, cạnh, lối vào từ Terraform (`scan/terraform.rs`): ECS (`jsonencode` của `container_definitions`), Lambda, Cloud Run, `kubernetes_*`; tham chiếu `aws_db_instance.x.address` và tên máy trong chuỗi; `variable` có mặc định, `locals`, module cục bộ; khoá `tf:<loại>.<tên>`; module registry, `count`/`for_each` không hằng, `dynamic` thì "chưa đọc được".
+- [x] Nối vào `check`, hook, `scan`, `init`; tài liệu.
+- [x] Bộ đo: OpenTofu ghim SHA-256 cùng provider ghim, `tofu plan` với khoá giả, so tham chiếu (`--require terraform`); bộ mẫu `fixtures/terraform-*`; kiểu phá; CI. (2026-10-21, chưa commit; biên nhận logs-t5..t7)
+- [ ] `kubernetes_*` khai qua Terraform: dựng thành manifest rồi đi qua bộ đọc Kubernetes.
+
+### Tầng hạ tầng, đợt 8: Terraform qua plan
+
+- [ ] Đọc plan JSON do `verify tf_plan` tạo, chỉ khi băm `.tf` trong biên nhận còn khớp; lấp phần "chưa đọc được" của đợt 7; báo plan cũ, báo lệch giữa hai nguồn.

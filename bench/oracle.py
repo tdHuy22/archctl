@@ -732,6 +732,268 @@ KUSTOMIZE_SHA256 = {
 }
 
 
+# Terraform: OpenTofu (giấy phép MPL) bản ghim, provider ghim, chỉ cài từ thư
+# mục mirror đã kiểm băm (TM-52). Băm của provider lấy từ registry của OpenTofu
+# lúc ghim, bản ra ít nhất hai tuần trước.
+TOFU_VERSION = "1.12.7"
+TOFU_SHA256 = {
+    "darwin_arm64": "e3a30269d64b3b9f49937e835817e2c06871fc4cfb7a08622d3b752074f75fb8",
+    "linux_amd64": "6807f7ae2a33e254c104da54e628b40aa6fc50d4becd78c43574fe250add33e9",
+}
+TOFU_PROVIDERS = {
+    ("aws", "6.67.0"): {
+        "darwin_arm64": "25afdd7ee3235adec8c96ee2b12b9abecc00b56a1b8505acc6f2889798240d04",
+        "linux_amd64": "c7955fa64b43262ab05faccecc09c015a388044d8238358371c381ceaab98282",
+    },
+    ("google", "8.5.0"): {
+        "darwin_arm64": "a0c19552b7e4ffd0f003c035832e38359c005dc8e1e524f5d6d3cbad21305ebf",
+        "linux_amd64": "c39ec87452a328c1329ccdd6a0c71bebf3ef47a90123835fdee5860dfbb24cc6",
+    },
+}
+TF_REQUIREMENTS = HERE / "tf-requirements.txt"
+# Cấu hình provider với khoá giả: plan chỉ tính, không gọi cloud.
+TF_PROVIDER_CONFIG = {
+    "aws": """provider "aws" {
+  region                      = "us-east-1"
+  access_key                  = "mock"
+  secret_key                  = "mock"
+  skip_credentials_validation = true
+  skip_requesting_account_id  = true
+  skip_metadata_api_check     = true
+}
+""",
+    "google": """provider "google" {
+  project      = "mock-project"
+  region       = "us-central1"
+  access_token = "mock"
+}
+""",
+}
+
+
+def platform_name():
+    import platform
+    osname = {"Darwin": "darwin", "Linux": "linux"}.get(platform.system())
+    arch = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "amd64", "AMD64": "amd64"}.get(platform.machine())
+    return f"{osname}_{arch}"
+
+
+def fetch_pinned(url, sha, what):
+    import hashlib
+    import urllib.request
+    try:
+        data = urllib.request.urlopen(url, timeout=600).read()
+    except OSError as e:
+        bench.die(f"tải {what} hỏng: {e}")
+    if hashlib.sha256(data).hexdigest() != sha:
+        bench.die(f"{what} tải về sai sha256: {url}")
+    return data
+
+
+def build_tofu(cache):
+    """`(đường dẫn tofu, thư mục mirror provider)`, tải một lần vào cache."""
+    import io
+    import zipfile
+    plat = platform_name()
+    if plat not in TOFU_SHA256:
+        bench.die(f"không có bản OpenTofu ghim cho {plat}")
+    import hashlib
+    home = Path(cache) / "tf-oracle"
+    mirror = home / "mirror"
+    home.mkdir(parents=True, exist_ok=True)
+    # Giữ file zip đã tải và kiểm lại băm mỗi lần dùng: cache bị sửa thì dừng.
+    def pinned(path, url, sha, what):
+        if not path.exists() or hashlib.sha256(path.read_bytes()).hexdigest() != sha:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(fetch_pinned(url, sha, what))
+        return path.read_bytes()
+    zdata = pinned(home / f"tofu_{TOFU_VERSION}_{plat}.zip",
+                   f"https://github.com/opentofu/opentofu/releases/download/v{TOFU_VERSION}/tofu_{TOFU_VERSION}_{plat}.zip",
+                   TOFU_SHA256[plat], "OpenTofu")
+    exe = home / f"tofu-{TOFU_VERSION}-{plat}"
+    exe.write_bytes(zipfile.ZipFile(io.BytesIO(zdata)).read("tofu"))
+    exe.chmod(0o755)
+    for (name, version), shas in TOFU_PROVIDERS.items():
+        if plat not in shas:
+            bench.die(f"không có provider {name} ghim cho {plat}")
+        zname = f"terraform-provider-{name}_{version}_{plat}.zip"
+        pinned(mirror / "registry.opentofu.org" / "hashicorp" / name / zname,
+               f"https://github.com/opentofu/terraform-provider-{name}/releases/download/v{version}/{zname}",
+               shas[plat], f"provider {name}")
+    return str(exe), str(mirror)
+
+
+def tf_files(root):
+    """File `.tf` của repo (cả file chưa commit, cho bộ mẫu), ngoài thư mục
+    test, ví dụ, ẩn (như archctl)."""
+    p = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                       capture_output=True, text=True)
+    listed = p.stdout.split("\0") if p.returncode == 0 else [str(x.relative_to(root)) for x in Path(root).rglob("*.tf")]
+    aside = {"test", "tests", "testdata", "example", "examples", "docs", "doc", "fixtures", "e2e", "samples", "sample"}
+    out = []
+    for f in listed:
+        if not f.endswith(".tf") or not (Path(root) / f).is_file() or (Path(root) / f).is_symlink():
+            continue
+        dirs = f.split("/")[:-1]
+        if any(d in aside or d.startswith(".") for d in dirs):
+            continue
+        out.append(f)
+    return sorted(out)
+
+
+def tf_plan(tofu, mirror, root, module_root, files, workdir):
+    """Plan JSON của một module gốc, hay lý do không plan được. Chạy trên bản
+    chép các file `.tf` trong thư mục tạm, môi trường sạch, khoá giả."""
+    import hashlib
+    import shutil
+    # Plan chỉ phụ thuộc file `.tf`, module gốc, OpenTofu và provider ghim,
+    # không phụ thuộc archctl: nhớ theo băm để sabotage không plan lại.
+    key = hashlib.sha256(json.dumps([TOFU_VERSION, sorted(TOFU_PROVIDERS), module_root,
+                                     [(f, hashlib.sha256((Path(root) / f).read_bytes()).hexdigest()) for f in files]],
+                                    default=str).encode()).hexdigest()
+    cached = Path(mirror).parent / "plans" / f"{key}.json"
+    if cached.exists():
+        text = cached.read_text()
+        return (str(cached), None) if not text.startswith("SKIP ") else (None, text[5:])
+    plan, why = tf_plan_fresh(tofu, mirror, root, module_root, files, workdir)
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cached.write_text(Path(plan).read_text() if plan else f"SKIP {why}")
+    return (str(cached), None) if plan else (None, why)
+
+
+def tf_plan_fresh(tofu, mirror, root, module_root, files, workdir):
+    import shutil
+    work = Path(tempfile.mkdtemp(prefix="tf-", dir=workdir))
+    repo = work / "repo"
+    for f in files:
+        dst = repo / f
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(Path(root) / f, dst)
+    mdir = repo / module_root if module_root else repo
+    text = "".join((mdir / f).read_text() for f in os.listdir(mdir) if f.endswith(".tf"))
+    # Mọi module tới được từ gốc: chỉ module trong repo; `data "external"`,
+    # provisioner ở bất kỳ module nào thì không chạy (TM-52).
+    seen, todo = set(), [mdir.resolve()]
+    while todo:
+        d = todo.pop()
+        if d in seen:
+            continue
+        seen.add(d)
+        if not d.is_dir() or not str(d).startswith(str(repo.resolve())):
+            return None, "module trỏ ra ngoài repo: không chạy"
+        body = "".join((d / f).read_text() for f in os.listdir(d) if f.endswith(".tf"))
+        if re.search(r'\bdata\s+"?external"?\s|\bprovisioner\s', body):
+            return None, "có `data \"external\"` hay provisioner: không chạy"
+        # `source` trong khối `module` (cả khối một dòng); `source` của
+        # `required_providers` thì không phải module.
+        for src in re.findall(r'\bmodule\s+"[^"]*"\s*\{[^}]*?\bsource\s*=\s*"([^"]*)"', body, re.S):
+            if not src.startswith(("./", "../")):
+                return None, f"module không cục bộ (`{src.split('?')[0][:60]}`): không tải"
+            todo.append((d / src).resolve())
+    for name, conf in TF_PROVIDER_CONFIG.items():
+        # Có sẵn khối provider thì ghi đè cấu hình của nó; không thì thêm mới.
+        has = re.search(rf'^\s*provider\s+"{name}"', text, re.M)
+        (mdir / (f"zz_archctl_{name}_override.tf" if has else f"zz_archctl_{name}.tf")).write_text(conf)
+    (work / "cli.tfrc").write_text(f'provider_installation {{\n  filesystem_mirror {{\n    path = "{mirror}"\n  }}\n}}\n')
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(work), "TF_CLI_CONFIG_FILE": str(work / "cli.tfrc"),
+           "TF_IN_AUTOMATION": "1"}
+    for args in (["init", "-backend=false", "-input=false", "-no-color"],
+                 ["plan", "-refresh=false", "-input=false", "-no-color", "-lock=false", "-out=archctl.plan"]):
+        p = subprocess.run([tofu, *args], cwd=mdir, env=env, capture_output=True, text=True, timeout=600)
+        if p.returncode != 0:
+            lines = [l.strip() for l in (p.stderr + "\n" + p.stdout).splitlines() if l.strip()]
+            err = next((l for l in lines if l.startswith("Error:")), lines[-1] if lines else "")
+            return None, f"tofu {args[0]} hỏng: {err[:160]}"
+    p = subprocess.run([tofu, "show", "-json", "archctl.plan"], cwd=mdir, env=env, capture_output=True, text=True, timeout=600)
+    if p.returncode != 0:
+        return None, "tofu show hỏng"
+    out = work / "plan.json"
+    out.write_text(p.stdout)
+    return str(out), None
+
+
+def archctl_tf(archctl, root):
+    """`{gốc: {địa chỉ: {"edges": [...], "exposed": bool, "image": ...}}}` theo `archctl scan`."""
+    p = subprocess.run([archctl, "scan", "--json", "--verbatim", "--root", str(root)],
+                       capture_output=True, text=True, timeout=600)
+    if p.returncode != 0:
+        bench.die(f"archctl scan hỏng ở {root}: {p.stderr.strip()[-300:]}")
+    split = lambda key: tuple(key[3:].rsplit("/", 1)) if "/" in key[3:] else ("", key[3:])
+    out = collections.defaultdict(dict)
+    for s in json.loads(p.stdout)["deploy"]["services"]:
+        if not s["key"].startswith("tf:"):
+            continue
+        r, addr = split(s["key"])
+        out[r][addr] = {"edges": sorted({split(e["target"])[1] for e in s["edges"]}),
+                        "exposed": bool(s.get("exposed")), "image": s.get("image")}
+    return out
+
+
+def compare_terraform(t, archctl, tofu, mirror, tf_python, root, workdir, refused=False):
+    """`refused`: bộ mẫu mà mọi module gốc phải bị từ chối plan (TM-52)."""
+    files = tf_files(root)
+    if not files:
+        return
+    p = subprocess.run([tf_python, "-I", str(HERE / "tf_truth.py"), "roots", str(root)],
+                       input="".join(f"{f}\n" for f in files), capture_output=True, text=True, timeout=300)
+    if p.returncode != 0:
+        bench.die(f"thước đo Terraform hỏng: {p.stderr.strip()[-400:]}")
+    plans, skipped = {}, []
+    roots = json.loads(p.stdout)
+    # Mỗi module gốc plan trong thư mục tạm riêng: chạy song song.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda r: (r, *tf_plan(tofu, mirror, root, r, files, workdir)), roots))
+    for r, plan, why in results:
+        if plan:
+            plans[r] = plan
+        else:
+            skipped.append(f"{r or '.'}: {why}")
+    if refused:
+        t.files += 1
+        for r in plans:
+            t.note(f"{r or '.'}: phải bị từ chối plan mà OpenTofu đã chạy")
+        # Đúng vì chốt chặn `data "external"`, không phải vì init hỏng.
+        for why in skipped:
+            if "external" not in why:
+                t.note(f"bị từ chối vì lý do khác: {why[:120]}")
+        return
+    if skipped:
+        t.skipped = f"{len(skipped)} module gốc OpenTofu không plan được BỎ QUA ({skipped[0][:120]})"
+        # Plan hỏng quá nửa thì phần đo được không còn đại diện: tính là lệch.
+        # Gốc bị từ chối có chủ ý (`data "external"`, module không cục bộ) thì
+        # không đếm: đó là chốt chặn TM-52.
+        failed = [x for x in skipped if "không chạy" not in x and "không tải" not in x]
+        if len(failed) * 2 > len(roots):
+            t.note(f"{len(failed)}/{len(roots)} module gốc plan hỏng")
+    if not plans:
+        return
+    pj = Path(workdir) / f"tf-plans-{root.name}.json"
+    pj.write_text(json.dumps(plans))
+    p = subprocess.run([tf_python, "-I", str(HERE / "tf_truth.py"), "truth", str(root), str(pj)],
+                       capture_output=True, text=True, timeout=900)
+    if p.returncode != 0:
+        bench.die(f"thước đo Terraform hỏng: {p.stderr.strip()[-400:]}")
+    want_all, have_all = json.loads(p.stdout), archctl_tf(archctl, root)
+    for r in sorted(plans):
+        want, have = want_all.get(r, {}), have_all.get(r, {})
+        t.files += 1
+        for a in sorted(set(want) - set(have)):
+            t.note(f"{r or '.'}: thiếu tài nguyên `{a}`")
+        for a in sorted(set(have) - set(want)):
+            t.note(f"{r or '.'}: thừa tài nguyên `{a}`")
+        for a in sorted(set(want) & set(have)):
+            w, h = want[a], have[a]
+            t.imports += 1 + len(w["edges"])
+            for x in sorted(set(w["edges"]) - set(h["edges"])):
+                t.note(f"{r or '.'}: thiếu cạnh `{a}` → `{x}`")
+            for x in sorted(set(h["edges"]) - set(w["edges"])):
+                t.note(f"{r or '.'}: thừa cạnh `{a}` → `{x}`")
+            if w["exposed"] != h["exposed"]:
+                t.note(f"{r or '.'}: `{a}` lệch lối vào từ Internet: OpenTofu {w['exposed']}, archctl {h['exposed']}")
+            if w["image"] is not None and w["image"] != h["image"]:
+                t.note(f"{r or '.'}: `{a}` lệch image")
+
+
 def build_kustomize(cache):
     import hashlib
     import platform
@@ -1350,7 +1612,7 @@ def main():
     have_go = shutil.which("go") is not None
     strip_ts = have_node and node_can_strip_types()
     required = args.require.split(",")
-    unknown = set(filter(None, required)) - {"clang", "node", "go", "syn", "ipython", "deploy", "proto", "helm", "kustomize"}
+    unknown = set(filter(None, required)) - {"clang", "node", "go", "syn", "ipython", "deploy", "proto", "helm", "kustomize", "terraform"}
     if unknown:
         bench.die(f"`--require` không biết: {', '.join(sorted(unknown))}")
     for tool, ok in [("clang", have_clang), ("node", have_node), ("go", have_go)]:
@@ -1368,14 +1630,17 @@ def main():
     ipy_v = ipython_version() if use_ipython else "BỎ QUA: cần tải gói, bật bằng --require ipython"
     use_helm = "helm" in required
     use_kustomize = "kustomize" in required
+    use_tf = "terraform" in required
     use_deploy = "deploy" in required or use_helm or use_kustomize
     dep_v = deploy_version() if use_deploy else "BỎ QUA: cần tải gói, bật bằng --require deploy"
     use_proto = "proto" in required
     proto_v = proto_version() if use_proto else "BỎ QUA: cần tải gói, bật bằng --require proto"
     helm_v = HELM_VERSION if use_helm else "BỎ QUA: cần tải helm, bật bằng --require helm"
     kust_v = KUSTOMIZE_VERSION if use_kustomize else "BỎ QUA: cần tải kustomize, bật bằng --require kustomize"
+    tf_v = f"OpenTofu {TOFU_VERSION}" if use_tf else "BỎ QUA: cần tải OpenTofu, bật bằng --require terraform"
     print(f"python {sys.version.split()[0]} · clang: {clang_v} · node: {node_v} · go: {go_v} · syn: {syn_v}"
           f" · ipython: {ipy_v} · hạ tầng: {dep_v} · proto: {proto_v} · helm: {helm_v} · kustomize: {kust_v}"
+          f" · terraform: {tf_v}"
           + ("" if strip_ts or not have_node else " (không gỡ được kiểu TS: BỎ QUA .ts)"))
 
     missing_repos = [r for r in repos if not (Path(args.cache) / "repos" / r).is_dir()]
@@ -1392,6 +1657,8 @@ def main():
     proto_python = build_venv(args.cache, "proto-oracle", PROTO_REQUIREMENTS, ".proto") if use_proto else None
     helm = build_helm(args.cache) if use_helm else None
     kustomize = build_kustomize(args.cache) if use_kustomize else None
+    tofu, tf_mirror = build_tofu(args.cache) if use_tf else (None, None)
+    tf_python = build_venv(args.cache, "tf-oracle", TF_REQUIREMENTS, "Terraform") if use_tf else None
 
     bad = 0
     for repo in repos:
@@ -1688,6 +1955,10 @@ def main():
             if skipped:
                 pt.skipped = f"{skipped} file protoc không dựng được (import ngoài repo) BỎ QUA"
             tallies.append(pt)
+        if tofu:
+            tt = Tally("Terraform")
+            compare_terraform(tt, archctl, tofu, tf_mirror, tf_python, root, workdir.name)
+            tallies.append(tt)
         for t in tallies:
             sane(t, repo)
             if t.files or t.unparsed or t.skipped:
@@ -1751,6 +2022,18 @@ def main():
             for e in kt3.examples:
                 print(f"      {e}")
             bad += kt3.bad
+
+    # Mẫu Terraform trong `bench/fixtures/terraform-*`: module trong repo có
+    # đối số, output; ECS qua `jsonencode` và heredoc; cạnh qua `locals`, bộ cân
+    # bằng tải, cơ sở dữ liệu, hàng đợi; các dạng lối vào.
+    if tofu and not args.only:
+        for fx in sorted(HERE.glob("fixtures/terraform-*")):
+            tt = Tally("Terraform")
+            compare_terraform(tt, archctl, tofu, tf_mirror, tf_python, fx, workdir.name, fx.name.endswith("-refused"))
+            print(tt.line(fx.name))
+            for e in tt.examples:
+                print(f"      {e}")
+            bad += tt.bad
 
     # Mẫu hàng đợi trong `bench/fixtures/queues`: các dạng mà repo thật của bộ
     # đo không có (env, hằng số, khai queue rồi dùng qua biến, Celery, Redis).

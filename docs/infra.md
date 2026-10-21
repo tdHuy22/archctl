@@ -39,11 +39,13 @@ Nguồn cấu hình:
 | `dockerfile:svc/Dockerfile` | service dựng từ Dockerfile này, không qua compose; build context là thư mục chứa nó |
 | `k8s:api` | workload `api` (Deployment, StatefulSet, DaemonSet, ReplicaSet, Job, CronJob, Pod) trong manifest Kubernetes, ở mọi thư mục: bản phát hành trong `release/`, base của kustomize là bản sao của cùng ứng dụng và được kiểm hết |
 | `k8s:shop/k8s/api` | chỉ workload `api` trong thư mục `shop/k8s`, khi hai ứng dụng khác nhau cùng có workload tên đó |
+| `tf:aws_ecs_service.api` | tài nguyên Terraform theo địa chỉ trong module gốc (`module.app.aws_lambda_function.worker` khi nằm trong module), ở mọi module gốc: `envs/prod`, `envs/staging` là bản sao và được kiểm hết. Cơ sở dữ liệu, hàng đợi (`tf:aws_db_instance.main`) cũng khai được, để `link` tới chúng |
+| `tf:envs/prod/aws_ecs_service.api` | chỉ tài nguyên đó trong module gốc `envs/prod` |
 
 Một service có thể có nhiều nguồn, khi cùng một ứng dụng chạy bằng compose ở
 máy dev và bằng Kubernetes ở cụm thật: `service Vote from compose:vote,
 k8s:vote runs Vote`. Mỗi nguồn được kiểm riêng theo cùng `runs` và `link`.
-`dockerfile:` đi cùng `k8s:` nghĩa là image của container chính trong workload
+`dockerfile:` đi cùng `k8s:` hay `tf:` nghĩa là image của container chính trong workload
 dựng từ Dockerfile đó (xem [Manifest Kubernetes](#manifest-kubernetes)); đi
 cùng `compose:` thì thừa, vì compose đã nói service dựng từ đâu.
 
@@ -499,6 +501,69 @@ thư mục, và ghi chú lại. Service compose và workload cùng tên dựng t
 chỗ thành một service hai nguồn; không cùng thì là hai service (`Vote` và
 `VoteK8s`).
 
+## Terraform
+
+archctl đọc file `.tf` của repo, không chạy `terraform`, không gọi mạng. Mỗi
+thư mục có file `.tf` là một module; module không bị module khác trong repo
+gọi tới (`source = "./…"`) là một module gốc. Tài nguyên được gọi theo địa
+chỉ Terraform trong module gốc của nó.
+
+```hcl
+resource "aws_ecs_task_definition" "api" {
+  container_definitions = jsonencode([{
+    name  = "api"
+    image = "acme/api:${var.tag}"
+    environment = [{ name = "DB_HOST", value = aws_db_instance.main.address }]
+  }])
+}
+resource "aws_ecs_service" "api" {
+  task_definition = aws_ecs_task_definition.api.arn
+}
+```
+
+Ở đây `tf:aws_ecs_service.api` chạy image `acme/api:<tag>` và có cạnh tới
+`tf:aws_db_instance.main` ở dòng của `value`: luật cần `link Api -> Db` khi
+đã khai `service Db from tf:aws_db_instance.main`, và báo "tài nguyên
+Terraform chưa khai" khi chưa.
+
+- **Service chạy mã:** `aws_ecs_service` (cùng task definition của nó; task
+  definition không service nào dùng thì đứng riêng), `aws_lambda_function`,
+  `google_cloud_run_v2_service`, `google_cloud_run_service`. Container của ECS
+  đọc từ `container_definitions` viết bằng `jsonencode(…)` hay heredoc JSON;
+  `entryPoint` thay `ENTRYPOINT`, `command` thay `CMD` của image, như
+  Kubernetes. Image lần về Dockerfile như workload Kubernetes: compose có cả
+  `image:` và `build:`, hay `dockerfile:` khai cùng `tf:` trong luật. Lambda
+  chạy gói zip thì báo không biết mã nào chạy.
+- **Cạnh:** biến môi trường tham chiếu một tài nguyên. Tới service chạy mã,
+  mọi tham chiếu đều tính (`.arn`, `.function_name` của Lambda là gọi nó);
+  tới bộ cân bằng tải (`aws_lb.x.dns_name`), target group, Cloud Map, Lambda
+  function URL thì là cạnh tới service phía sau. Tới tài nguyên khác, chỉ
+  thuộc tính mang địa chỉ mạng (`address`, `endpoint`, `dns_name`, `uri`,
+  `url`, `host`, `port`…), và mọi tham chiếu tới hàng đợi, topic (SQS, SNS,
+  Kinesis, Pub/Sub, MQ): ARN của bucket hay khoá KMS không phải cạnh mạng.
+  Khoá mang dấu hiệu bí mật (`…_PASSWORD`, `…_TOKEN`) không bao giờ thành cạnh.
+- **Lối vào Internet:** ECS sau `aws_lb` không `internal` (qua listener hay
+  listener rule và target group); ECS có `assign_public_ip = true` cùng nhóm
+  bảo mật mở `0.0.0.0/0`; `aws_lambda_function_url` với
+  `authorization_type = "NONE"`; Lambda gắn vào API Gateway; Cloud Run cho
+  `allUsers` qua `*_iam_member`/`*_iam_binding` hay `invoker_iam_disabled`.
+- **Đánh giá tĩnh:** `variable` lấy giá trị mặc định hay đối số của module;
+  biến không có giá trị là đầu vào lúc triển khai (như biến môi trường chưa
+  đặt), giá trị đó coi như không biết và không báo. `locals` (phát hiện vòng),
+  `module.x.<output>` của module trong repo, `path.module`, các hàm
+  `jsonencode`, `merge`, `concat`, `lookup`, `format`, `join`, `coalesce`,
+  `try`, `lower`, `upper`, `element`, `tostring`, `tolist`.
+- **Chưa đọc được, cả bản dựng hay giá trị báo kèm dòng** (`--strict` tính):
+  module từ registry hay URL, `count`/`for_each` không hằng (số bản chưa
+  biết), khối `dynamic` ở chỗ khai container, env, biến môi trường; biểu thức
+  `for`, chỉ dẫn `%{…}`, hàm `file`/`templatefile` và hàm lạ khi giá trị đó
+  cần cho env hay image; file `.tf.json`, file `*_override.tf`.
+  `kubernetes_*` khai qua Terraform chưa đọc (đợt sau).
+- **Trần** (TM-48 tới TM-51): độ lồng HCL 64, độ sâu đánh giá 96, module lồng
+  16 tầng và 500 module cho cả repo, 2 000 000 bước, cỡ giá trị 1 000 000 đơn
+  vị, một chuỗi 64 KB. Module chỉ theo đường dẫn trong repo, không qua symlink.
+  Không in giá trị nào, chỉ tên tài nguyên, thuộc tính, tham chiếu.
+
 ## NetworkPolicy
 
 Luật mạng trong cụm thường đã có sẵn ở dạng NetworkPolicy. archctl so nó với
@@ -661,9 +726,9 @@ trong các ngôn ngữ archctl chưa đọc (Java, C#, Ruby); đối số đầu
 
 ## Không đọc
 
-- Terraform: không render; Kustomize và template Helm ngoài tập con ở trên. Ai
-  cần thì khai `verify` gọi `kustomize build`, `helm template`, `terraform
-  graph`, kube-linter, checkov.
+- Terraform, Kustomize, template Helm ngoài tập con ở trên. Ai cần thì khai
+  `verify` gọi `terraform plan`, `kustomize build`, `helm template`,
+  kube-linter, checkov.
 - Hàng đợi: hàm bọc tự viết quanh producer (`publish_event("orders")`), tên
   topic từ module khác, kombu,
   aio-pika, Faust, NATS, SQS, Pub/Sub của Google; Kafka subscribe theo regex

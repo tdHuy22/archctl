@@ -79,6 +79,11 @@ QUEUE = {
 # `link` và `runs` cho nó, và gỡ đi thì `check` phải báo. Tên là tên mà `init`
 # đặt: service theo tên trong compose, component theo thư mục.
 DEPLOY = {
+    # Repo chỉ có Terraform (không file mã): service, link sinh từ `.tf`.
+    "terraform-docs-samples": {
+        # `count = length(…)` phụ thuộc biến: số bản chưa biết, báo là đúng.
+        "unread": ["run/multiple_regions/main.tf:151"],
+    },
     # `depends_on` của compose, và tên service trong biến môi trường.
     "example-voting-app": {
         # `ports: ["8080:80"]` của vote, result: lộ ra Internet.
@@ -180,7 +185,10 @@ def analyse(archctl: str, name: str, src: Path, work: Path, expected: int,
 
     # 0 vi phạm trên 0 file thì chẳng chứng minh được gì. Không quét được gì
     # là phép thử vô nghĩa, và nó phải đổ chứ không được trông như đạt.
-    if out["scanned"] == 0 or out["files"] == 0:
+    # Repo chỉ có hạ tầng (Terraform): không có file mã, cái để kiểm là
+    # `service`, `link` sinh ra.
+    infra_only = out["scanned"] == 0 and out["files"] == 0 and re.search(r"^service\s", text, re.M)
+    if (out["scanned"] == 0 or out["files"] == 0) and not infra_only:
         out["problems"].append(
             f"không có gì để kiểm: archctl quét {out['scanned']} file, đếm độc lập ra {out['files']}"
         )
@@ -193,7 +201,7 @@ def analyse(archctl: str, name: str, src: Path, work: Path, expected: int,
         )
     # Repo mà các phần không import lẫn nhau (voting app: ba ứng dụng riêng)
     # vẫn có cái để kiểm ở tầng triển khai: `runs` và `link`.
-    deploy_rules = re.search(r"^service\s+\w+\s+from\s+[^\n]*?\s+runs\s", text, re.M)
+    deploy_rules = re.search(r"^service\s+\w+\s+from\s+[^\n]*?\s+runs\s", text, re.M) or (infra_only and re.search(r"^link\s", text, re.M))
     if out["checked"] == 0 and not deploy_rules:
         out["problems"].append("không component nào vào diện kiểm, 0 vi phạm là vô nghĩa")
     if "lawWarnings" not in rep:
@@ -263,7 +271,9 @@ def deploy(archctl: str, name: str, law: Path, root: list, rep: dict, out: dict)
         ("linksBlocked", "link sinh ra mà NetworkPolicy chặn", lambda x: f"{x['from']} -> {x['to']}"),
         ("servicesUndeclared", "service hay workload không được sinh", lambda x: f"{x['name']} ({x['file']}:{x['line']})"),
     ]:
-        for item in rep.get(key, [])[:4]:
+        known = DEPLOY.get(name, {}).get("unread", []) if key == "deployUnread" else []
+        items = [x for x in rep.get(key, []) if not any(x.get("file", "").startswith(k) for k in known)]
+        for item in items[:4]:
             out["problems"].append(f"{what}: {shown(item)}")
     for m in rep.get("missing", []):
         if m["source"].startswith("service "):

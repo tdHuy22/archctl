@@ -4,7 +4,7 @@
 python3 bench/bench.py
 ```
 
-Một lệnh: dựng archctl bản release, tải ba mươi mốt repo ở đúng commit đã ghim
+Một lệnh: dựng archctl bản release, tải ba mươi hai repo ở đúng commit đã ghim
 trong [repos.tsv](repos.tsv), rồi chạy hai phép thử trên từng repo. Chỉ cần
 Python 3 và git, không gói Python nào ngoài thư viện chuẩn.
 
@@ -293,7 +293,7 @@ rabbitmq-tutorials `Python -> Go`, `Go -> JavascriptNodejs`, `JavascriptNodejs
 dòng, thêm giả), đối chiếu bằng `queue_truth.py` (`ast` cho Python, `go/ast`
 cho Go). CI chạy bước này sau bộ đo, với `--rust-repo ripgrep
 --notebook-repo matplotlib --deploy-repo example-voting-app --k8s-repo
-microservices-demo --proto-repo vllm`: năm mươi sáu kiểu phá.
+microservices-demo --proto-repo vllm --tf-repo terraform-docs-samples`: sáu mươi kiểu phá.
 
 Nó có mặt vì bộ đo này từng nằm ngoài git, và lúc đưa vào, đọc lại thì bốn
 phép kiểm không kiểm gì: một cái chỉ xét file có tồn tại vì vế sau của `or`

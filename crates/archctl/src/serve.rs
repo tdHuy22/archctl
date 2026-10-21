@@ -511,7 +511,7 @@ fn model_json(root: &Path) -> String {
             card(format!("link {from} -> {to} bị chặn"), format!("system.arch:{line} — NetworkPolicy chặn mọi đường giữa hai service"))
         }))
         .chain(report.services_undeclared.iter().map(|(file, line, name)| {
-            card(format!("service {name} chưa khai"), format!("{file}:{line} — thêm `service ... from compose:{name}` hay `from k8s:{name}`"))
+            card(format!("service {name} chưa khai"), format!("{file}:{line} — thêm `service ... from compose:{name}`, `from k8s:{name}` hay `from tf:{name}`"))
         }))
         .collect();
 

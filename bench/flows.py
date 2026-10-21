@@ -87,7 +87,7 @@ def run_flows(archctl: str, name: str, src: Path, work: Path) -> Flows:
     text = law.read_text()
     decls = [
         l for l in text.splitlines()
-        if l.startswith(("component ", "allow ", "deny ", "store ", "external "))
+        if l.startswith(("component ", "allow ", "deny ", "store ", "external ", "service ", "link "))
     ]
     f.check(
         "mọi thứ bắt đầu ở #draft",
@@ -147,8 +147,10 @@ def run_flows(archctl: str, name: str, src: Path, work: Path) -> Flows:
     else:
         f.notes.append(f"bỏ qua giao thức agent: chỉ có {len(names)} component")
 
-    rep2 = json.loads(f.run("check", "--json", *R).stdout)
-    f.check("hash đổi sau khi luật đổi", rep2["archHash"] != first_hash)
+    # Luật chỉ đổi khi giao thức agent chạy (`accept` ghi vào luật).
+    if len(names) >= 2:
+        rep2 = json.loads(f.run("check", "--json", *R).stdout)
+        f.check("hash đổi sau khi luật đổi", rep2["archHash"] != first_hash)
 
     # --- diff ---
     _git(work, "init", "-q", ".")

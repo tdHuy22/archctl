@@ -109,9 +109,9 @@ pub fn cmd_init(args: &[String]) -> ExitCode {
     let law = if from_code {
         let ignores = arch_core::read_ignores(&root);
         let found = discover::discover(&root, &ignores);
-        if found.files == 0 {
+        if found.files == 0 && found.services.is_empty() {
             return fail(
-                "không tìm thấy file mã nguồn nào thuộc ngôn ngữ đã hỗ trợ.\n\
+                "không tìm thấy file mã nguồn nào thuộc ngôn ngữ đã hỗ trợ, cũng không có cấu hình triển khai nào.\n\
                  → chạy trong thư mục dự án, hoặc dùng `--root <dir>`",
                 exit::USAGE,
             );

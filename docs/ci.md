@@ -89,7 +89,7 @@ khi mã dùng let-chain của 1.88, suốt nhiều tháng, vì không có gì ki
 
 ## Repo thật, ở mỗi pull request
 
-Job `repo thật` chạy [bench/bench.py](../bench/bench.py): tải ba mươi mốt repo ở
+Job `repo thật` chạy [bench/bench.py](../bench/bench.py): tải ba mươi hai repo ở
 đúng commit ghim trong `bench/repos.tsv`, rồi đòi hai điều. Luật do `init
 --from-code` sinh ra, nâng lên `#accepted`, kiểm lại chính mã đó thì phải ra 0
 vi phạm. Và mọi lệnh phải chạy được trên mã người khác viết, chứ không chỉ trên
@@ -121,15 +121,15 @@ mở lại mạng cho cargo (`CARGO_NET_OFFLINE: "false"`); archctl đã dựng 
 bước trước khi còn offline, và crate tải về chỉ vào trình đọc của bộ đo, ghim
 cứng bằng `=`. IPython, PyYAML và dockerfile-parse cài bằng pip vào venv riêng,
 mọi gói ghim `==` kèm sha256; grpcio-tools (`protoc`) cũng vậy. `helm` bản ghim
-tải từ get.helm.sh, `kustomize` bản ghim tải từ bản phát hành trên GitHub, đều
-kiểm sha256 của tarball. `--require
-clang,node,go,syn,ipython,deploy,proto,helm,kustomize` để ngày thiếu một cái thì bước này
-đỏ chứ không lặng lẽ bỏ qua. Ba mươi bốn trong năm mươi sáu kiểu phá của
+tải từ get.helm.sh, `kustomize` bản ghim tải từ bản phát hành trên GitHub, OpenTofu và provider
+aws, google bản ghim, đều kiểm sha256. `--require
+clang,node,go,syn,ipython,deploy,proto,helm,kustomize,terraform` để ngày thiếu một cái thì bước này
+đỏ chứ không lặng lẽ bỏ qua. Ba mươi tám trong sáu mươi kiểu phá của
 `sabotage.py` nhắm vào bước này: ba ở import Python, hai ở tên máy trong chuỗi
 của mã Python, ba ở import Rust, hai ở
 notebook, bốn ở cạnh Python ↔ native, bốn ở compose và Dockerfile, bảy ở
 manifest Kubernetes, cạnh qua Service, NetworkPolicy và lối vào từ Internet,
-một ở manifest dựng từ chart Helm, ba ở bản dựng Kustomize, hai ở `.proto`,
+một ở manifest dựng từ chart Helm, ba ở bản dựng Kustomize, bốn ở service Terraform, hai ở `.proto`,
 ba ở chỗ gửi, nhận qua hàng đợi. Mười hai kiểu khác nhắm vào
 phần hạ tầng của chính bộ đo (năm trên compose gồm một ở tên máy viết trong mã,
 bảy trên manifest Kubernetes gồm hai ở NetworkPolicy, một ở lối vào, một ở

@@ -516,7 +516,8 @@ fn parse_service(rest: &str, meta: Meta, no: usize, doc: &mut Document, diags: &
             Err(why) => {
                 diags.push(Diag::error(no, format!("`from {text}`: {why}")).with_hint(
                     "dạng đúng: from compose:<service>, compose:<thư mục>/<service>, \
-                     k8s:<workload>, k8s:<thư mục>/<workload>, dockerfile:<đường dẫn>, values:<đường dẫn>",
+                     k8s:<workload>, k8s:<thư mục>/<workload>, tf:<loại>.<tên>, tf:<thư mục>/<loại>.<tên>, \
+                     dockerfile:<đường dẫn>, values:<đường dẫn>",
                 ));
                 return;
             }
@@ -570,6 +571,26 @@ fn parse_source(text: &str) -> Result<Source, String> {
         let (dir, name) = scoped(rest, "workload")?;
         return Ok(Source::K8s { dir, name });
     }
+    if let Some(rest) = text.strip_prefix("tf:") {
+        // Địa chỉ có dấu `.`, thư mục module gốc đứng trước `/` cuối.
+        let (dir, addr) = match rest.rsplit_once('/') {
+            Some((".", a)) => (Some(String::new()), a),
+            Some((d, a)) if relative(d) => (Some(d.to_string()), a),
+            Some((d, _)) => {
+                return Err(format!(
+                    "thư mục `{d}` phải là đường dẫn tương đối nằm trong dự án"
+                ));
+            }
+            None => (None, rest),
+        };
+        if !is_tf_addr(addr) {
+            return Err(format!(
+                "địa chỉ Terraform không hợp lệ: `{addr}` (dạng `<loại>.<tên>` hay \
+                 `data.<loại>.<tên>`, trong module thì `module.<tên>.<loại>.<tên>`)"
+            ));
+        }
+        return Ok(Source::Tf { dir, addr: addr.to_string() });
+    }
     if let Some(path) = text.strip_prefix("dockerfile:") {
         if !relative(path) {
             return Err(format!(
@@ -587,6 +608,24 @@ fn parse_source(text: &str) -> Result<Source, String> {
         return Ok(Source::Values(path.to_string()));
     }
     Err("không nhận ra nguồn cấu hình".into())
+}
+
+/// Địa chỉ tài nguyên Terraform: `(module.<tên>.)*<loại>.<tên>`.
+fn is_tf_addr(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    let ok = |p: &str| {
+        !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+    };
+    if parts.len() < 2 || !parts.iter().all(|p| ok(p)) {
+        return false;
+    }
+    // Đuôi là `<loại>.<tên>`, hay `data.<loại>.<tên>` cho data source.
+    let tail = if parts.len() >= 3 && parts[parts.len() - 3] == "data" { 3 } else { 2 };
+    let head = &parts[..parts.len() - tail];
+    head.len().is_multiple_of(2)
+        && head.chunks(2).all(|c| c[0] == "module")
+        && parts[parts.len() - 2] != "module"
+        && (tail == 3 || parts[parts.len() - 2] != "data")
 }
 
 /// Tên service mà compose chấp nhận.

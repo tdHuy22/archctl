@@ -434,14 +434,25 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
                     ),
                     // Đích chưa khai: `link` tới nó không hợp lệ cho tới khi có
                     // dòng `service`.
-                    Reason::NotLinked if arch_core::check::to_undeclared(v) => crate::say!(
-                        "    archctl propose 'service {} from {}:{}' --reason \"...\"   (rồi `link {} -> {}`)",
-                        arch_core::discover::pascal_case(&v.to),
-                        if v.rule.starts_with("workload") { "k8s" } else { "compose" },
-                        v.to,
-                        v.from,
-                        arch_core::discover::pascal_case(&v.to)
-                    ),
+                    Reason::NotLinked if arch_core::check::to_undeclared(v) => {
+                        let tf = v.rule.starts_with("tài nguyên Terraform");
+                        // Địa chỉ Terraform: tên service lấy từ đoạn cuối.
+                        let short = arch_core::discover::pascal_case(if tf { v.to.rsplit('.').next().unwrap_or(&v.to) } else { &v.to });
+                        crate::say!(
+                            "    archctl propose 'service {} from {}:{}' --reason \"...\"   (rồi `link {} -> {}`)",
+                            short,
+                            if v.rule.starts_with("workload") {
+                                "k8s"
+                            } else if tf {
+                                "tf"
+                            } else {
+                                "compose"
+                            },
+                            v.to,
+                            v.from,
+                            short
+                        )
+                    }
                     Reason::NotLinked => crate::say!(
                         "    archctl propose 'link {} -> {}' --reason \"...\"",
                         v.from, v.to
@@ -978,6 +989,7 @@ fn cmd_scan(args: &[String]) -> ExitCode {
                     || scan::deploy::is_dockerfile(name)
                     || scan::deploy::is_manifest_file(name)
                     || scan::k8s::is_kustomization(name)
+                    || scan::deploy::is_tf_file(name)
             })
             .cloned()
             .collect()
@@ -1355,6 +1367,11 @@ fn scan_deploy(
     let mut file_json: Vec<String> = Vec::new();
     for file in files {
         let name = file.rsplit('/').next().unwrap_or(file);
+        // File Terraform: dữ kiện của nó là service, cạnh, lối vào trong
+        // mục `services` (khoá `tf:`), không có dữ kiện theo file.
+        if deploy::is_tf_file(name) {
+            continue;
+        }
         // File YAML khác compose: chỉ in khi có dáng manifest hay là
         // `skaffold.yaml`; repo có hàng nghìn file YAML không liên quan.
         let other = !deploy::is_compose(name) && !deploy::is_dockerfile(name);
@@ -1498,7 +1515,7 @@ fn scan_deploy(
         }
     }
 
-    let loaded = deploy::load(root, files, &deploy::Options { k8s: true, keep_rendered: true, ..Default::default() });
+    let loaded = deploy::load(root, files, &deploy::Options { k8s: true, tf: true, keep_rendered: true, ..Default::default() });
     // Manifest dựng từ chart Helm: dữ kiện như file manifest, dòng là dòng của
     // template.
     for (_, r) in &loaded.rendered {
@@ -1608,11 +1625,13 @@ fn scan_deploy(
             .map(|e| format!(r#"{{"file":{},"line":{},"shown":{}}}"#, json::string(&e.file), e.line, json::string(&e.shown)))
             .collect();
         services.push(format!(
-            r#"{{"key":{},"file":{},"line":{},"code":{},"edges":[{}],"starts":[{}],"unknown":{},"patched":[{}],"ingress":{},"egress":{},"exposed":[{}]}}"#,
+            r#"{{"key":{},"file":{},"line":{},"code":{},"image":{},"edges":[{}],"starts":[{}],"unknown":{},"patched":[{}],"ingress":{},"egress":{},"exposed":[{}]}}"#,
             json::string(&key),
             json::string(&svc.file),
             svc.line,
             svc.code,
+            // Image chỉ in với `--verbatim`: tên registry có thể mang tài khoản.
+            opt(svc.image.as_deref().filter(|_| verbatim)),
             edges.join(","),
             starts_json.join(","),
             opt(svc.unknown.as_deref()),

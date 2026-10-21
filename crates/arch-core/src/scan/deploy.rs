@@ -12,6 +12,7 @@ use super::compose;
 use super::dockerfile::{self, Command, Dockerfile, join_container};
 use super::helm;
 use super::kustomize;
+use super::terraform;
 use super::k8s;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -137,8 +138,14 @@ pub fn is_deploy_file(path: &str) -> bool {
         || is_dockerfile(name)
         || is_manifest_file(name)
         || k8s::is_kustomization(name)
+        || is_tf_file(name)
         || tpl)
         && !aside(path)
+}
+
+/// File Terraform: `.tf`, và `.tf.json` (chưa đọc, nhưng phải báo).
+pub fn is_tf_file(name: &str) -> bool {
+    name.ends_with(".tf") || name.ends_with(".tf.json")
 }
 
 /// Một service lấy từ cấu hình.
@@ -150,6 +157,8 @@ pub enum Key {
     Dockerfile(String),
     /// Workload Kubernetes tên `name` trong manifest ở thư mục `dir`.
     K8s { dir: String, name: String },
+    /// Tài nguyên Terraform `addr` trong module gốc ở thư mục `dir`.
+    Tf { dir: String, addr: String },
 }
 
 impl Key {
@@ -165,6 +174,7 @@ impl Key {
         match self {
             Key::Compose { dir, name } => format!("compose:{}{name}", scoped(dir)),
             Key::K8s { dir, name } => format!("k8s:{}{name}", scoped(dir)),
+            Key::Tf { dir, addr } => format!("tf:{}{addr}", scoped(dir)),
             Key::Dockerfile(p) => format!("dockerfile:{p}"),
         }
     }
@@ -196,7 +206,9 @@ pub struct Options {
     /// Đọc manifest Kubernetes: chỉ khi luật có nguồn `k8s:`, hay khi `init`,
     /// `scan` (TM-18).
     pub k8s: bool,
-    /// `dockerfile:` khai cùng `k8s:` trong luật: image của container chính.
+    /// Đọc file Terraform: chỉ khi luật có nguồn `tf:`, hay khi `init`, `scan`.
+    pub tf: bool,
+    /// `dockerfile:` khai cùng `k8s:`, `tf:` trong luật: image của container chính.
     pub pins: Vec<Pin>,
     /// Tên máy viết thẳng trong mã (đã viết thường), cần biết trỏ tới đâu.
     pub hosts: Vec<String>,
@@ -830,6 +842,9 @@ pub fn load(root: &Path, files: &[String], opts: &Options) -> Deploy {
     }
     if opts.k8s {
         load_k8s(&shared, files, opts, &builds, &mut out);
+    }
+    if opts.tf {
+        load_terraform(&shared, files, opts, &builds, &mut out);
     }
     // Cùng một file hỏng được nhắc từ nhiều service: báo một lần.
     let mut seen: HashSet<(String, String)> = HashSet::new();
@@ -1986,6 +2001,7 @@ pub fn same_network(from: &[&Key], to: &Key) -> bool {
         match (k, to) {
             (Key::Compose { dir: a, .. }, Key::Compose { dir: b, .. }) if a == b => return true,
             (Key::K8s { .. }, Key::K8s { .. }) => return true,
+            (Key::Tf { dir: a, .. }, Key::Tf { dir: b, .. }) if a == b => return true,
             (Key::Dockerfile(_), _) => {}
             _ => placed = true,
         }
@@ -2915,6 +2931,90 @@ fn apply_patches(kz: &Kz, cluster: &Cluster, steps: &Cell<usize>) -> HashMap<usi
 
 /// Lệnh khởi chạy của từng container dựng từ repo. Container chính dùng
 /// `dockerfile:` của luật nếu có; còn lại lần image về skaffold, compose.
+/// Nạp Terraform: service chạy mã (ECS, Lambda, Cloud Run) và đích của cạnh
+/// thành [`Svc`] với khoá [`Key::Tf`]. Image lần về nơi dựng như workload
+/// Kubernetes (`dockerfile:` trong luật, hay compose có `image:` và `build:`).
+fn load_terraform(shared: &Shared<'_>, files: &[String], opts: &Options, builds: &[BuildRef], out: &mut Deploy) {
+    let tf: Vec<String> = files
+        .iter()
+        .filter(|f| is_tf_file(f.rsplit('/').next().unwrap_or(f)) && !aside(f))
+        .cloned()
+        .collect();
+    if tf.is_empty() {
+        return;
+    }
+    let read = |p: &str| shared.read(p).map(|t| t.to_string());
+    let is_dir = |p: &str| matches!(kind_in(shared.root, p), Some(Kind::Dir));
+    let res = terraform::load(&tf, &terraform::Fs { read: &read, is_dir: &is_dir, env_words: &shared.env_words });
+    out.unread.extend(res.unread.into_iter().map(|(file, why)| Unread { file, why }));
+    let mut by_image: HashMap<String, Vec<&BuildRef>> = HashMap::new();
+    for b in builds {
+        by_image.entry(k8s::image_name(&b.image).1.to_string()).or_default().push(b);
+    }
+    for u in res.units {
+        let key = |addr: &str| Key::Tf { dir: u.root.clone(), addr: addr.to_string() };
+        let mut svc = Svc {
+            key: key(&u.addr),
+            file: u.file.clone(),
+            line: u.line,
+            image: u.containers.first().and_then(|c| c.image.clone()),
+            code: false,
+            edges: u
+                .edges
+                .iter()
+                .map(|e| Edge { to: e.target.clone(), target: key(&e.target), file: e.file.clone(), line: e.line, shown: e.shown.clone() })
+                .collect(),
+            starts: Vec::new(),
+            unknown: None,
+            patched: Vec::new(),
+            built: None,
+            ingress: Guard::default(),
+            egress: Guard::default(),
+            exposed: u.exposed.iter().map(|(file, line, shown)| Exposure { file: file.clone(), line: *line, shown: shown.clone() }).collect(),
+            words: Vec::new(),
+        };
+        if u.compute {
+            let mut kept = Vec::new();
+            for c in &u.containers {
+                for e in &c.env {
+                    if let Some(v) = &e.value {
+                        kept.push((e.key.clone(), v.clone()));
+                    }
+                    if let Some(w) = &e.word {
+                        svc.words.push((e.key.clone(), w.clone()));
+                    }
+                    if e.cut {
+                        out.unread.push(cut_value(&u.file, e.line, &e.key));
+                    }
+                }
+            }
+            if u.containers.iter().all(|c| c.image.is_none()) {
+                // Lambda chạy gói zip, image không đọc được: không biết mã nào.
+                svc.unknown = Some(format!("`{}` không có image đọc được (gói zip, hay image ghép từ giá trị chưa biết); khai `dockerfile:` trong luật nếu image dựng từ repo", u.addr));
+            } else {
+                let placed = Placed {
+                    file: u.file.clone(),
+                    dir: u.root.clone(),
+                    build: None,
+                    attached: None,
+                    item: k8s::Workload {
+                        kind: u.ty.clone(),
+                        name: u.addr.clone(),
+                        namespace: None,
+                        line: u.line,
+                        labels: Vec::new(),
+                        containers: u.containers.clone(),
+                        default_container: None,
+                        host: None,
+                    },
+                };
+                k8s_starts(shared, opts, &by_image, &placed, &kept, &mut svc, &mut out.unread);
+            }
+        }
+        out.services.push(svc);
+    }
+}
+
 fn k8s_starts(
     shared: &Shared<'_>,
     opts: &Options,
@@ -3689,6 +3789,7 @@ pub fn entry_files(root: &Path, entry: &Entry) -> Result<Vec<String>, String> {
 pub fn touches_deploy(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
     is_compose(name)
+        || is_tf_file(name)
         || is_dockerfile(name)
         || is_manifest_file(name)
         || k8s::is_kustomization(name)

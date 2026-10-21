@@ -44,7 +44,7 @@ kiến trúc c8bd3bd9 · 15 file quét (5 Rust, 4 C/C++, 4 Python, 2 Go) · 7/8 
 | `boundary ... contain` — lỗi không được lọt ra ngoài vùng | dò định danh ngoài vùng |
 | `flow`, `contract`, `invariant state` | mọi tên khai báo phải tồn tại trong mã |
 | `verify ... runs "..."` | lệnh phải chạy xong và đạt, trên đúng bản mã này |
-| `service ... runs`, `link` — triển khai và mạng | đọc docker-compose, Dockerfile và manifest Kubernetes: lệnh khởi chạy dẫn tới mã nào, `depends_on`, tên service hay Service Kubernetes trong biến môi trường hay viết thẳng trong mã (`"http://payment:80"`, `host="redis"`) |
+| `service ... runs`, `link` — triển khai và mạng | đọc docker-compose, Dockerfile, manifest Kubernetes và Terraform: lệnh khởi chạy dẫn tới mã nào, `depends_on`, tên service hay Service Kubernetes trong biến môi trường hay viết thẳng trong mã (`"http://payment:80"`, `host="redis"`), tham chiếu Terraform trong biến môi trường (`aws_db_instance.main.address`) |
 | cạnh gRPC (`allow`, và `link` khi đã khai service) | chỗ gọi stub (`XStub`, `NewXClient`) ghép với chỗ đăng ký server theo `package.Service` của `.proto`; Python và Go |
 | cạnh qua hàng đợi (`allow`, và `link` khi đã khai service) | chỗ gửi ghép với chỗ nhận cùng topic Kafka, queue hay exchange RabbitMQ, kênh Redis, task Celery; tên từ env lần qua compose, manifest; Python, Go, Node |
 | trạng thái `#draft`…`#locked` | quyết định luật nào đang có hiệu lực |
@@ -175,8 +175,9 @@ https://claude.ai/code/artifact/2b26df5d-d6b0-40d0-a398-7e574c7d1387
   compose) cần `link Internet -> …`; tên máy viết thẳng trong mã cũng cần
   `link`.**
   Chart Helm được tự dựng từ `values.yaml`, overlay Kustomize được tự dựng
-  như `kustomize build` (tập con; ngoài tập con thì báo chưa đọc). Terraform
-  và gRPC của Java, C# thì chưa; cạnh mạng chỉ có lúc chạy (tên máy ghép trong mã,
+  như `kustomize build` (tập con; ngoài tập con thì báo chưa đọc); Terraform
+  được đọc tĩnh (ECS, Lambda, Cloud Run; module registry, `for_each` không
+  hằng thì báo chưa đọc). gRPC của Java, C# thì chưa; cạnh mạng chỉ có lúc chạy (tên máy ghép trong mã,
   service discovery) thì không thấy — xem [docs/infra.md](docs/infra.md).
 - **File trên 4 MB không được dò**, và được báo ra. Bộ dò giữ cả dãy token
   trong bộ nhớ, nên một bundle đã minify 32 MB ngốn hơn một gigabyte.

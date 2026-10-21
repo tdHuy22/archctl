@@ -229,6 +229,10 @@ pub enum Source {
     /// Kubernetes. `dir` là thư mục chứa manifest, khi nhiều thư mục cùng có
     /// workload tên đó.
     K8s { dir: Option<String>, name: String },
+    /// Tài nguyên Terraform theo địa chỉ trong module gốc
+    /// (`aws_ecs_service.api`, `module.app.aws_lambda_function.worker`). `dir`
+    /// là thư mục module gốc, khi nhiều module gốc cùng có địa chỉ đó.
+    Tf { dir: Option<String>, addr: String },
     /// File values của Helm khai thêm, gộp vào `values.yaml` của chart ở thư
     /// mục của các nguồn `k8s:` cùng service: `values:deploy/prod.yaml`.
     Values(String),
@@ -256,6 +260,15 @@ impl Source {
                 name,
             } => format!("k8s:{dir}/{name}"),
             Source::K8s { dir: None, name } => format!("k8s:{name}"),
+            Source::Tf {
+                dir: Some(dir),
+                addr,
+            } if dir.is_empty() => format!("tf:./{addr}"),
+            Source::Tf {
+                dir: Some(dir),
+                addr,
+            } => format!("tf:{dir}/{addr}"),
+            Source::Tf { dir: None, addr } => format!("tf:{addr}"),
             Source::Values(path) => format!("values:{path}"),
         }
     }
@@ -278,6 +291,11 @@ impl Service {
     /// phải một service riêng.
     pub fn on_k8s(&self) -> bool {
         self.sources.iter().any(|s| matches!(s, Source::K8s { .. }))
+    }
+
+    /// Có tài nguyên Terraform: `dockerfile:` đi cùng là image của nó.
+    pub fn on_tf(&self) -> bool {
+        self.sources.iter().any(|s| matches!(s, Source::Tf { .. }))
     }
 }
 

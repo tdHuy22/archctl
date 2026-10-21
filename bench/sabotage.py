@@ -47,6 +47,10 @@ cạnh), cộng hai kiểu ở NetworkPolicy (mất một peer, đổi một wor
 lập thành không), đối chiếu bằng `k8s_truth.py` trên PyYAML; cần mạng như
 `--deploy-repo`.
 
+`--tf-repo terraform-docs-samples` phá bốn kiểu ở service Terraform của `scan
+--json` (mất một cạnh, thêm cạnh giả, đảo lối vào, đổi image), đối chiếu bằng
+`tf_truth.py` trên plan của OpenTofu; cần mạng (tải OpenTofu, provider).
+
 `--proto-repo vllm` phá thêm hai kiểu ở dữ kiện `.proto` (mất một `rpc`, lệch
 dòng một `service`), đối chiếu bằng `protoc` của grpcio-tools cài vào venv nên
 cần mạng; CI bật nó. Kiểu `rpc` chạy trên `--rpc-repo` (mặc định etcd): xoá cạnh
@@ -171,11 +175,38 @@ K8S_ORACLE_MODES = {
     "kustomize-unread": "archctl không dựng mà kustomize dựng được",
 }
 
+# phá service Terraform trong `scan --json` → dòng `oracle.py` phải in ra
+TF_ORACLE_MODES = {
+    "tf-edge": "thiếu cạnh",
+    "tf-extra": "thừa cạnh",
+    "tf-exposed": "lệch lối vào từ Internet",
+    "tf-image": "lệch image",
+}
+
 # phá dữ kiện `.proto` trong `scan --json` → dòng `oracle.py` phải in ra
 PROTO_ORACLE_MODES = {
     "proto-drop": "thiếu:",
     "proto-line": "lệch dòng:",
 }
+
+
+def sabotage_tf(rep: dict, mode: str):
+    """Làm hỏng **mọi** service Terraform: mất một cạnh, thêm cạnh giả, đảo
+    lối vào, đổi image. Module gốc nào OpenTofu không plan được thì không được
+    đo, nên phá một service có thể rơi đúng vào chỗ đó."""
+    tf = [s for s in rep.get("deploy", {}).get("services", []) if s["key"].startswith("tf:")]
+    for s in tf:
+        if mode == "tf-edge" and s["edges"]:
+            s["edges"].pop(0)
+        if mode == "tf-extra" and s.get("image"):
+            other = next((x for x in tf if x is not s and x["key"] not in {e["target"] for e in s["edges"]}), None)
+            if other:
+                s["edges"].append({**(s["edges"][0] if s["edges"] else {"file": s["file"], "line": s["line"], "shown": "X"}),
+                                   "target": other["key"]})
+        if mode == "tf-exposed" and s.get("image"):
+            s["exposed"] = [] if s.get("exposed") else [{"file": s["file"], "line": s["line"], "shown": "phá thử"}]
+        if mode == "tf-image" and s.get("image"):
+            s["image"] = "khong-co-that"
 
 
 def sabotage_protos(rep: dict, mode: str):
@@ -452,6 +483,10 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
         rep = json.loads(out)
         sabotage_queues(rep, mode)
         out = json.dumps(rep)
+    elif mode in TF_ORACLE_MODES and args[:1] == ["scan"] and "--json" in args:
+        rep = json.loads(out)
+        sabotage_tf(rep, mode)
+        out = json.dumps(rep)
     elif mode in PROTO_ORACLE_MODES and args[:1] == ["scan"] and "--json" in args:
         rep = json.loads(out)
         sabotage_protos(rep, mode)
@@ -484,6 +519,8 @@ def main():
                     help="repo có manifest Kubernetes và `runs`, `link` bắt buộc, cho kiểu phá `deploy-*` lần hai")
     ap.add_argument("--k8s-repo",
                     help="phá cả phần manifest Kubernetes của oracle.py trên repo này (cài PyYAML vào venv)")
+    ap.add_argument("--tf-repo",
+                    help="phá cả phần Terraform của oracle.py trên repo này (tải OpenTofu và provider ghim)")
     ap.add_argument("--proto-repo",
                     help="phá cả phần `.proto` của oracle.py trên repo này (cài grpcio-tools vào venv)")
     ap.add_argument("--deploy-repo",
@@ -522,6 +559,9 @@ def main():
         if args.proto_repo:
             runs += [("oracle.py", args.proto_repo, m, e)
                      for m, e in [("", None), *PROTO_ORACLE_MODES.items()]]
+        if args.tf_repo:
+            runs += [("oracle.py", args.tf_repo, m, e)
+                     for m, e in [("", None), *TF_ORACLE_MODES.items()]]
         if args.rust_repo:
             runs += [("oracle.py", args.rust_repo, m, e)
                      for m, e in [("", None), *RUST_ORACLE_MODES.items()]]
@@ -554,6 +594,8 @@ def main():
             # repo của phần Binding.
             if mode in PROTO_ORACLE_MODES or (script == "oracle.py" and repo == args.proto_repo and not mode):
                 need = [*need, "proto"]
+            if mode in TF_ORACLE_MODES or (script == "oracle.py" and repo == args.tf_repo and not mode):
+                need = [*need, "terraform"]
             if need:
                 extra = ["--require", ",".join(need)]
             p = subprocess.run(

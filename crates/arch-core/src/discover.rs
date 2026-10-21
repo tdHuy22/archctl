@@ -80,6 +80,12 @@ pub fn discover(root: &Path, ignores: &[String]) -> Discovery {
     let files = check::source_files(root, ignores);
     let mut out = Discovery { files: files.len(), ..Discovery::default() };
     if files.is_empty() {
+        // Repo chỉ có hạ tầng (Terraform, manifest): vẫn sinh service và link.
+        let deploy_files = check::deploy_files(root, ignores);
+        if !deploy_files.is_empty() {
+            let owners = Owners { prefix: "", inside: BTreeMap::new(), beside: Vec::new() };
+            discover_services(root, &deploy_files, &owners, &[], &mut out);
+        }
         return out;
     }
 
@@ -173,6 +179,7 @@ fn discover_services(root: &Path, deploy_files: &[String], owners: &Owners, scan
         .collect();
     let opts = deploy::Options {
         k8s: true,
+        tf: true,
         hosts: hosts.into_iter().map(str::to_string).collect(),
         env_words,
         ..Default::default()
@@ -194,7 +201,7 @@ fn discover_services(root: &Path, deploy_files: &[String], owners: &Owners, scan
                 list.push(s);
             }
             Key::Compose { name, .. } => *compose_count.entry(name).or_default() += 1,
-            Key::Dockerfile(_) => {}
+            Key::Dockerfile(_) | Key::Tf { .. } => {}
         }
     }
 
@@ -281,9 +288,39 @@ fn discover_services(root: &Path, deploy_files: &[String], owners: &Owners, scan
             }
         }
     }
+    // Tài nguyên Terraform: cùng địa chỉ ở nhiều module gốc (`envs/prod`,
+    // `envs/staging`) là bản sao của cùng một service, như workload cùng tên.
+    let mut tf_order: Vec<&str> = Vec::new();
+    let mut tf_by_addr: HashMap<&str, Vec<&deploy::Svc>> = HashMap::new();
+    for s in &dep.services {
+        if let Key::Tf { addr, .. } = &s.key {
+            let list = tf_by_addr.entry(addr).or_default();
+            if list.is_empty() {
+                tf_order.push(addr);
+            }
+            list.push(s);
+        }
+    }
+    let tf_start = units.len();
+    for addr in tf_order {
+        let name = addr.rsplit('.').next().unwrap_or(addr);
+        units.push(Unit { base: pascal_case(name), sources: vec![format!("tf:{addr}")], svcs: tf_by_addr[addr].clone(), k8s: false });
+    }
     let mut taken: HashSet<String> = HashSet::new();
     let mut names: Vec<String> = Vec::new();
-    for u in &units {
+    for (ui, u) in units.iter().enumerate() {
+        // Tài nguyên trùng tên ngắn với service khác: `ApiTf`.
+        if ui >= tf_start {
+            let base = if taken.contains(&u.base) { format!("{}Tf", u.base) } else { u.base.clone() };
+            let dsl = if taken.contains(&base) {
+                (2..).map(|n| format!("{base}{n}")).find(|c| !taken.contains(c)).unwrap_or_default()
+            } else {
+                base
+            };
+            taken.insert(dsl.clone());
+            names.push(dsl);
+            continue;
+        }
         // Workload không gộp được với service compose cùng tên: `VoteK8s`.
         let only_k8s = u.k8s && u.svcs.iter().all(|v| matches!(v.key, Key::K8s { .. }));
         let base = if only_k8s && taken.contains(&u.base) { format!("{}K8s", u.base) } else { u.base.clone() };

@@ -40,9 +40,9 @@ fn check_services(doc: &Document, diags: &mut Vec<Diag>) {
             ));
         }
         for source in &s.sources {
-            // `dockerfile:` đi cùng `k8s:` là image của workload, nên nhiều
+            // `dockerfile:` đi cùng `k8s:`, `tf:` là image của workload, nên nhiều
             // workload được phép dựng từ cùng một Dockerfile.
-            if s.on_k8s() && matches!(source, Source::Dockerfile(_)) {
+            if (s.on_k8s() || s.on_tf()) && matches!(source, Source::Dockerfile(_)) {
                 continue;
             }
             // `values:` của Helm: mọi workload của một chart hay dùng chung một file.
@@ -55,7 +55,7 @@ fn check_services(doc: &Document, diags: &mut Vec<Diag>) {
                         s.meta.line,
                         format!("`from {}` đã dùng cho service khai báo ở dòng {first}", source.text()),
                     )
-                    .with_hint("mỗi service trong compose hay workload Kubernetes ứng với đúng một `service`"),
+                    .with_hint("mỗi service trong compose, workload Kubernetes hay tài nguyên Terraform ứng với đúng một `service`"),
                 );
             }
         }
@@ -68,7 +68,7 @@ fn check_services(doc: &Document, diags: &mut Vec<Diag>) {
             .sources
             .iter()
             .any(|x| matches!(x, Source::Compose { .. }));
-        if dockerfiles > 1 || (dockerfiles == 1 && compose && !s.on_k8s()) {
+        if dockerfiles > 1 || (dockerfiles == 1 && compose && !s.on_k8s() && !s.on_tf()) {
             diags.push(
                 Diag::error(
                     s.meta.line,
@@ -76,7 +76,7 @@ fn check_services(doc: &Document, diags: &mut Vec<Diag>) {
                 )
                 .with_hint(
                     "compose đã nói service dựng từ đâu; `dockerfile:` chỉ đi một mình, \
-                     hay cùng `k8s:` để nói image của workload dựng từ đâu",
+                     hay cùng `k8s:`, `tf:` để nói image của workload dựng từ đâu",
                 ),
             );
         }

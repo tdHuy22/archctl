@@ -149,7 +149,9 @@ jobs:
     # Bước đối chiếu với clang chạy qua ~4 000 file C/C++ trên hai lõi, và
     # thước đo tên máy trong chuỗi parse đầy đủ mọi file Python, Go; sabotage
     # chạy lại cả bước đối chiếu cho từng kiểu phá. Trần này để bắt treo.
-    timeout-minutes: 40
+    # 60 phút: thước đo Terraform tải OpenTofu, provider (khoảng 200 MB) và plan
+    # khoảng 48 module gốc một lần (sau đó dùng lại plan đã nhớ theo băm).
+    timeout-minutes: 60
     steps:
       - name: lấy mã
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -171,7 +173,7 @@ jobs:
         run: python3 bench/bench.py --archctl target/release/archctl --rounds 1
 
       # Bộ đo bắt được lỗi chỉ khi từng phép kiểm của nó đổ được. Bước này phá
-      # archctl năm mươi sáu kiểu và đòi bộ đo bắt đúng từng kiểu — nếu một lần sửa sau
+      # archctl sáu mươi kiểu và đòi bộ đo bắt đúng từng kiểu — nếu một lần sửa sau
       # này vô tình làm một phép kiểm luôn đạt, nó đỏ ở đây.
       #
       # `--rust-repo` phá thêm phần Rust của bước đối chiếu bên dưới, phần dùng
@@ -187,7 +189,7 @@ jobs:
       - name: bộ đo đổ được
         env:
           CARGO_NET_OFFLINE: "false"
-        run: python3 bench/sabotage.py --archctl target/release/archctl --rust-repo ripgrep --notebook-repo matplotlib --deploy-repo example-voting-app --k8s-repo microservices-demo --proto-repo vllm
+        run: python3 bench/sabotage.py --archctl target/release/archctl --rust-repo ripgrep --notebook-repo matplotlib --deploy-repo example-voting-app --k8s-repo microservices-demo --proto-repo vllm --tf-repo terraform-docs-samples
 
       # Phép tự nhất quán ở trên so archctl với chính nó: bộ khám phá và bộ
       # kiểm dùng chung bộ trích, nên một lỗi trong bộ trích làm cả hai sai
@@ -213,11 +215,14 @@ jobs:
       # vậy từ `bench/deploy-requirements.txt`. File `.proto` đối chiếu với
       # `protoc` (grpcio-tools), từ `bench/proto-requirements.txt`. Chart Helm đối
       # chiếu với `helm template` bản ghim (tải từ get.helm.sh, kiểm sha256 của
-      # tarball, xem `HELM_SHA256` trong `bench/oracle.py`).
+      # tarball, xem `HELM_SHA256` trong `bench/oracle.py`). Terraform đối chiếu với
+      # plan của OpenTofu bản ghim, provider chỉ cài từ mirror đã kiểm sha256
+      # (`TOFU_SHA256`, `TOFU_PROVIDERS`), khoá giả, môi trường sạch; `locals` đọc
+      # bằng python-hcl2 từ `bench/tf-requirements.txt`.
       - name: đối chiếu với parser chuẩn
         env:
           CARGO_NET_OFFLINE: "false"
-        run: python3 bench/oracle.py --archctl target/release/archctl --require clang,node,go,syn,ipython,deploy,proto,helm,kustomize
+        run: python3 bench/oracle.py --archctl target/release/archctl --require clang,node,go,syn,ipython,deploy,proto,helm,kustomize,terraform
 
   mo-hinh:
     name: kiến trúc mô hình

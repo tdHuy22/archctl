@@ -1975,6 +1975,9 @@ fn matches_source(source: &Source, key: &Key) -> bool {
         | (Source::K8s { dir, name }, Key::K8s { dir: d, name: n }) => {
             n == name && dir.as_ref().is_none_or(|x| x == d)
         }
+        (Source::Tf { dir, addr }, Key::Tf { dir: d, addr: a }) => {
+            a == addr && dir.as_ref().is_none_or(|x| x == d)
+        }
         (Source::Dockerfile(p), Key::Dockerfile(q)) => p == q,
         _ => false,
     }
@@ -1983,9 +1986,9 @@ fn matches_source(source: &Source, key: &Key) -> bool {
 /// Nguồn mà một `service` được đối chiếu: `dockerfile:` đi cùng `k8s:` là
 /// image của workload, không phải một cấu hình riêng.
 fn own_sources(s: &Service) -> impl Iterator<Item = &Source> {
-    let k8s = s.on_k8s();
+    let pinned = s.on_k8s() || s.on_tf();
     s.sources.iter().filter(move |x| {
-        !(k8s && matches!(x, Source::Dockerfile(_))) && !matches!(x, Source::Values(_))
+        !(pinned && matches!(x, Source::Dockerfile(_))) && !matches!(x, Source::Values(_))
     })
 }
 
@@ -1995,6 +1998,7 @@ fn own_sources(s: &Service) -> impl Iterator<Item = &Source> {
 pub fn deploy_options(doc: &Document) -> deploy::Options {
     let mut opts = deploy::Options {
         k8s: doc.services.iter().any(Service::on_k8s),
+        tf: doc.services.iter().any(Service::on_tf),
         ..Default::default()
     };
     // `values:` của Helm: gộp vào chart ở thư mục các nguồn `k8s:` cùng service.
@@ -2014,7 +2018,7 @@ pub fn deploy_options(doc: &Document) -> deploy::Options {
             }
         }
     }
-    for s in doc.services.iter().filter(|s| s.on_k8s()) {
+    for s in doc.services.iter().filter(|s| s.on_k8s() || s.on_tf()) {
         let Some(dockerfile) = s.sources.iter().find_map(|x| match x {
             Source::Dockerfile(p) => Some(p),
             _ => None,
@@ -2022,13 +2026,16 @@ pub fn deploy_options(doc: &Document) -> deploy::Options {
             continue;
         };
         for x in &s.sources {
-            if let Source::K8s { dir, name } = x {
-                opts.pins.push(deploy::Pin {
-                    dir: dir.clone(),
-                    name: name.clone(),
-                    dockerfile: dockerfile.clone(),
-                });
-            }
+            let (dir, name) = match x {
+                Source::K8s { dir, name } => (dir, name),
+                Source::Tf { dir, addr } => (dir, addr),
+                _ => continue,
+            };
+            opts.pins.push(deploy::Pin {
+                dir: dir.clone(),
+                name: name.clone(),
+                dockerfile: dockerfile.clone(),
+            });
         }
     }
     opts
@@ -2042,13 +2049,15 @@ const MAX_GRANT_STEPS: usize = 2_000_000;
 const UNDECLARED: &str = "service compose ";
 /// Như [`UNDECLARED`], cho workload Kubernetes.
 const UNDECLARED_K8S: &str = "workload Kubernetes ";
+/// Như [`UNDECLARED`], cho tài nguyên Terraform.
+const UNDECLARED_TF: &str = "tài nguyên Terraform ";
 
 /// Cạnh mạng tới một service compose hay workload chưa khai trong file luật:
 /// `to` là tên trong cấu hình, và phải khai `service` cho nó trước khi có
 /// `link` được.
 pub fn to_undeclared(v: &Violation) -> bool {
     v.reason == Reason::NotLinked
-        && (v.rule.starts_with(UNDECLARED) || v.rule.starts_with(UNDECLARED_K8S))
+        && (v.rule.starts_with(UNDECLARED) || v.rule.starts_with(UNDECLARED_K8S) || v.rule.starts_with(UNDECLARED_TF))
 }
 
 /// Tên máy viết thẳng trong mã của một component là cạnh mạng từ mọi service
@@ -2138,6 +2147,16 @@ fn judge_code_hosts(
                             s.name
                         ),
                     ),
+                    (None, Key::Tf { addr, .. }) => (
+                        format!(
+                            "{UNDECLARED_TF}`{addr}` chưa khai, nên không có link nào cho {} tới nó",
+                            s.name
+                        ),
+                        format!(
+                            "khai `service ... from tf:{addr}` rồi thêm `link {} -> ...`",
+                            s.name
+                        ),
+                    ),
                     (None, Key::Compose { name, .. } | Key::Dockerfile(name)) => (
                         format!(
                             "{UNDECLARED}`{name}` chưa khai, nên không có link nào cho {} tới nó",
@@ -2178,7 +2197,7 @@ fn judge_deploy(
 ) {
     let mut svcs: Vec<Svc> = dep.services.clone();
     report.deploy_unread.extend(dep.unread.iter().cloned());
-    for s in doc.services.iter().filter(|s| !s.on_k8s()) {
+    for s in doc.services.iter().filter(|s| !s.on_k8s() && !s.on_tf()) {
         for source in &s.sources {
             if let Source::Dockerfile(path) = source
                 && !svcs.iter().any(|v| v.key == Key::Dockerfile(path.clone()))
@@ -2204,7 +2223,7 @@ fn judge_deploy(
             let dirs: std::collections::BTreeSet<&str> = found
                 .iter()
                 .filter_map(|v| match &v.key {
-                    Key::Compose { dir, .. } | Key::K8s { dir, .. } => Some(dir.as_str()),
+                    Key::Compose { dir, .. } | Key::K8s { dir, .. } | Key::Tf { dir, .. } => Some(dir.as_str()),
                     Key::Dockerfile(_) => None,
                 })
                 .collect();
@@ -2220,6 +2239,9 @@ fn judge_deploy(
                             }
                             Source::K8s { name, .. } => format!(
                                 "không có workload `{name}` trong manifest Kubernetes nào đọc được"
+                            ),
+                            Source::Tf { addr, .. } => format!(
+                                "không có tài nguyên `{addr}` mà archctl đọc được trong file Terraform nào (service chạy mã, hay đích của một cạnh)"
                             ),
                             Source::Dockerfile(p) => format!("không có Dockerfile `{p}`"),
                             Source::Values(p) => format!("không có file values `{p}`"),
@@ -2374,6 +2396,7 @@ fn judge_deploy(
                 let Some(t) = declared(&e.target) else {
                     let (what, form) = match &e.target {
                         Key::K8s { .. } => (UNDECLARED_K8S, "k8s"),
+                        Key::Tf { .. } => (UNDECLARED_TF, "tf"),
                         _ => (UNDECLARED, "compose"),
                     };
                     report.violations.push(Violation {
@@ -2469,7 +2492,7 @@ fn judge_deploy(
             }
             // Workload có container lần được (sidecar) mà container chính thì
             // không: vẫn là chỗ không biết mã nào chạy.
-            if let (Key::K8s { .. }, Some(why)) = (&v.key, &v.unknown) {
+            if let (Key::K8s { .. } | Key::Tf { .. }, Some(why)) = (&v.key, &v.unknown) {
                 report.entry_unknown.push((s.name.clone(), why.clone()));
             }
             // Từng thứ lệnh chạy phải lần ra được mã: một cái không ra thì có
@@ -2611,6 +2634,7 @@ fn judge_deploy(
     let uses = |f: fn(&Source) -> bool| doc.services.iter().any(|s| s.sources.iter().any(f));
     let compose = uses(|x| matches!(x, Source::Compose { .. }));
     let k8s = uses(|x| matches!(x, Source::K8s { .. }));
+    let tf = uses(|x| matches!(x, Source::Tf { .. }));
     for v in &svcs {
         match &v.key {
             Key::Compose { name, .. } if compose && declared(&v.key).is_none() => {
@@ -2622,6 +2646,15 @@ fn judge_deploy(
                 report
                     .services_undeclared
                     .push((v.file.clone(), v.line, name.clone()));
+            }
+            // Chỉ tài nguyên chạy mã (có image, hay biết là không đọc được
+            // image): đích của cạnh như cơ sở dữ liệu đã được đòi qua cạnh.
+            Key::Tf { addr, .. }
+                if tf && (v.image.is_some() || v.unknown.is_some()) && declared(&v.key).is_none() =>
+            {
+                report
+                    .services_undeclared
+                    .push((v.file.clone(), v.line, addr.clone()));
             }
             _ => {}
         }
