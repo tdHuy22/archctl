@@ -855,15 +855,21 @@ def tf_plan(tofu, mirror, root, module_root, files, workdir):
     if cached.exists():
         text = cached.read_text()
         return (str(cached), None) if not text.startswith("SKIP ") else (None, text[5:])
-    plan, why = tf_plan_fresh(tofu, mirror, root, module_root, files, workdir)
-    cached.parent.mkdir(parents=True, exist_ok=True)
-    cached.write_text(Path(plan).read_text() if plan else f"SKIP {why}")
+    # Mỗi lần `tofu init` chép provider (vài trăm MB) vào `.terraform` của thư
+    # mục làm việc: xoá ngay sau khi chép plan vào cache, không thì hàng chục
+    # module gốc nhân số vòng sabotage làm đầy đĩa runner CI.
+    work = Path(tempfile.mkdtemp(prefix="tf-", dir=workdir))
+    try:
+        plan, why = tf_plan_fresh(tofu, mirror, root, module_root, files, work)
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        cached.write_text(Path(plan).read_text() if plan else f"SKIP {why}")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
     return (str(cached), None) if plan else (None, why)
 
 
-def tf_plan_fresh(tofu, mirror, root, module_root, files, workdir):
+def tf_plan_fresh(tofu, mirror, root, module_root, files, work):
     import shutil
-    work = Path(tempfile.mkdtemp(prefix="tf-", dir=workdir))
     repo = work / "repo"
     for f in files:
         dst = repo / f
