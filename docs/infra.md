@@ -585,6 +585,76 @@ Terraform chưa khai" khi chưa.
   vị, một chuỗi 64 KB. Module chỉ theo đường dẫn trong repo, không qua symlink.
   Không in giá trị nào, chỉ tên tài nguyên, thuộc tính, tham chiếu.
 
+### Lấp phần chưa đọc được bằng plan
+
+Module từ registry, `count`/`for_each` không hằng, hàm lạ: bộ đọc HCL chỉ báo
+"chưa đọc được". Plan của Terraform đã tính hết những thứ đó. `archctl check`
+không bao giờ chạy plan (plan chạy mã của provider, và `data "external"` chạy
+chương trình bất kỳ); bạn khai một lệnh kiểm tạo plan JSON:
+
+```
+verify tf_plan runs "cd infra && tofu init -input=false && tofu plan -input=false -lock=false -out=p && tofu show -json p > ../.arch/tf-plan.json"
+```
+
+Plan của module gốc ở thư mục `infra` nằm ở `.arch/tf-plan/infra.json`; repo
+chỉ có một module gốc thì dùng được `.arch/tf-plan.json`. Lệnh mà luật viết có
+chữ `.arch/tf-plan` là lệnh ghi plan. `archctl verify tf_plan` (do bạn gõ, hay
+CI) ghi vào biên nhận của nó:
+
+- băm nội dung mọi file `.tf`, lấy **trước** khi lệnh chạy;
+- từng file plan mà **chính lệnh này** ghi ra, kèm băm nội dung lấy sau khi
+  chạy xong. Lệnh phải nêu nguyên văn đường dẫn file (`.arch/tf-plan.json`,
+  `.arch/tf-plan/infra.json`); trước khi chạy, `verify` xoá các file plan mà
+  lệnh nêu, nên file có mặt sau đó là do lệnh ghi;
+- băm mã module tải về (`.terraform/modules`), lấy sau khi chạy xong.
+
+`check` và hook chỉ dùng một file plan khi có biên nhận đạt của một lệnh ghi
+plan chứng nhận đúng file đó với nội dung hiện tại, và hai băm kia còn trùng.
+Nhờ vậy:
+
+- sửa `.tf` hay mã module tải về sau lần chạy verify thì plan cũ;
+- plan commit sẵn hay viết tay mà lệnh không nêu thì không được chứng nhận,
+  kể cả plan của gốc khác chỉ bị chạm (`touch`) trong lúc chạy;
+- plan bị một lệnh khác ghi đè sau đó (một bộ test chạy trong cùng `archctl
+  verify`) không còn khớp băm.
+
+File plan có mà không được chứng nhận thì báo `plan Terraform cũ hay chưa
+chứng nhận … chạy lại lệnh verify tạo nó`, không lùi về file plan khác, và phần
+"chưa đọc được" của bộ đọc HCL vẫn còn. Viết lệnh ghi plan chỉ chạy `tofu` (hay
+`terraform`) và ghi plan ở bước cuối: mã chạy sau bước ghi plan trong cùng lệnh
+được tin như chính lệnh. Mã chạy trong lúc plan (`data "external"`, provider)
+có thể ghi đè chính file plan của gốc đó trước khi `verify` lấy băm: cùng loại
+với việc ghi đè `.arch/.verified` sau `archctl verify`, chỉ CI chặn được. `archctl scan` không dùng
+plan: nó in đúng những gì bộ đọc HCL thấy.
+
+Khi plan dùng được, cho module gốc đó:
+
+- service, cạnh, lối vào rút từ plan theo cùng luật như trên (tham chiếu trong
+  `configuration`, qua biến, output của module, kể cả module registry; giá trị
+  đã biết trong `planned_values`). Plan không giữ `locals`: archctl đọc chúng
+  từ file HCL của module, module tải về lấy ở `.terraform/modules` theo
+  `modules.json` (cần `init` trong lệnh verify).
+- plan chỉ **thêm**: cạnh, lối vào mà bộ đọc HCL thấy luôn được giữ. Cạnh chỉ
+  plan thấy trỏ về dòng khai tài nguyên, hay dòng gọi module, hiện là
+  `plan: container_definitions → aws_db_instance.main.address`.
+- chỉ những mục "chưa đọc được" mà plan phủ về cấu trúc được bỏ: module
+  registry, `count`/`for_each`, hàm lạ, file `.tf.json` hay override, file HCL
+  không đọc được. Khối `dynamic`, biểu thức `for` và `%{…}` (plan không giữ
+  tham chiếu bên trong), hàm đọc file, IAM policy, giá trị quyết lối vào thì vẫn
+  báo. Module dùng chung giữa nhiều gốc chỉ được bỏ mục khi mọi gốc dùng nó đều
+  có plan dùng được. Phần plan không đọc được (`local` không lần được, IAM
+  policy) báo kèm tiền tố `plan:`.
+- hai nguồn khác nhau thì báo `plan và bộ đọc HCL khác nhau: …` (`--strict`
+  tính): bộ đọc thấy cạnh mà plan không có, hay ngược lại khi bộ đọc đã đọc hết
+  gốc đó. Đây cũng là cách bắt lỗi của chính bộ đọc HCL trên repo thật.
+
+Plan chứa giá trị đã tính, có thể có mật khẩu: `init` thêm `**/.arch/tf-plan*`
+vào `.gitignore`. archctl chỉ đọc địa chỉ, loại, tham chiếu, vài giá trị quyết
+lối vào và image. Trần (TM-56 tới TM-60): file plan 32 MB, JSON lồng 256 tầng,
+2 000 000 bước giải tham chiếu, 2 000 module; thư mục module chỉ trong repo,
+không qua symlink. Lệnh plan chạy mã của provider và module: trong CI chỉ chạy
+nó với khoá chỉ đọc, như mọi lệnh kiểm.
+
 ## NetworkPolicy
 
 Luật mạng trong cụm thường đã có sẵn ở dạng NetworkPolicy. archctl so nó với

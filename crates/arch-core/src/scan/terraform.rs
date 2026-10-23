@@ -67,6 +67,40 @@ const NETWORK_ATTRS: &[&str] = &[
     "port",
 ];
 
+/// Mục "chưa đọc được" mà plan JSON phủ được về cấu trúc: module registry,
+/// `count`/`for_each`, hàm lạ (tham chiếu vẫn nằm trong `references`), file
+/// bộ đọc HCL không đọc. Không phủ: khối `dynamic`, biểu thức `for` và `%{}`
+/// (plan không giữ tham chiếu bên trong), hàm đọc file, IAM policy, giá trị
+/// quyết lối vào (TM-57). Danh sách cho phép, không phải danh sách cấm: câu
+/// báo mới không tự động bị bỏ.
+pub fn plan_covers(why: &str) -> bool {
+    if why.contains("dynamic") || why.contains("`for`") || why.contains("%{") || why.contains("(đọc file)") {
+        return false;
+    }
+    const COVERED: &[&str] = &[
+        "từ registry hay URL",
+        "dùng `count`/`for_each`",
+        "không hằng: số bản",
+        "trên tham chiếu tài nguyên",
+        "`module` cần tên và output",
+        "Terraform dạng JSON",
+        "file override của Terraform",
+        "HCL: ",
+        "`container_definitions` không phải JSON",
+    ];
+    COVERED.iter().any(|c| why.contains(c)) || (why.contains("hàm `") && why.contains("` chưa được đọc"))
+}
+
+/// Thuộc tính mang địa chỉ mạng: tham chiếu tới nó là cạnh.
+pub fn is_network_attr(attr: &str) -> bool {
+    NETWORK_ATTRS.contains(&attr)
+}
+
+/// Hàng đợi, topic: mọi tham chiếu tới nó là cạnh.
+pub fn is_messaging(ty: &str) -> bool {
+    MESSAGING.contains(&ty)
+}
+
 /// Loại tài nguyên mà mọi tham chiếu tới nó là cạnh (gửi vào hàng đợi, topic
 /// theo URL, ARN, tên).
 const MESSAGING: &[&str] = &["aws_sqs_queue", "aws_sns_topic", "aws_kinesis_stream", "google_pubsub_topic", "aws_mq_broker"];
@@ -134,6 +168,13 @@ pub struct Out {
     /// ConfigMap dựng từ Terraform có khoá tham chiếu tài nguyên Terraform
     /// khác: workload viết bằng YAML hay Helm lấy khoá đó cũng có cạnh `tf:`.
     pub config_maps: Vec<TfConfigMap>,
+    /// Vị trí khai của từng tài nguyên: gốc, địa chỉ, file, dòng. Plan dùng nó
+    /// để trỏ cạnh về đúng dòng trong `.tf`.
+    pub decls: Vec<(String, String, String, usize)>,
+    /// Lời gọi module: gốc, tiền tố địa chỉ (`module.ecs.`), file, dòng.
+    pub calls: Vec<(String, String, String, usize)>,
+    /// Thư mục module đã đọc của mỗi gốc (kể cả chính gốc).
+    pub dirs: Vec<(String, String)>,
 }
 
 /// ConfigMap `kubernetes_*` mà giá trị tham chiếu tài nguyên Terraform không
@@ -1004,6 +1045,16 @@ impl Cx<'_> {
             k += 1;
         }
         let root = self.insts[root_inst].root.clone();
+        for &i in &all {
+            let inst = &self.insts[i];
+            self.out.dirs.push((root.clone(), inst.module.dir.clone()));
+            for d in &inst.module.resources {
+                self.out.decls.push((root.clone(), format!("{}{}.{}", inst.prefix, d.ty, d.name), inst.module.files[d.file].clone(), d.line));
+            }
+            for (name, fid, line, _) in &inst.module.calls {
+                self.out.calls.push((root.clone(), format!("{}module.{name}.", inst.prefix), inst.module.files[*fid].clone(), *line));
+            }
+        }
         // Mọi tài nguyên của mọi module trong cây, với thân đã có.
         let mut decls: Vec<(usize, usize)> = Vec::new();
         for &i in &all {

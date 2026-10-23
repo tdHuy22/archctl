@@ -27,6 +27,16 @@ pub struct Receipt {
     pub at: u64,
     /// Dấu vân tay của luật lúc chạy.
     pub arch_hash: String,
+    /// Băm nội dung mọi file Terraform lúc bắt đầu chạy (`None` khi repo không
+    /// có). Plan JSON do lệnh này ghi chỉ được dùng khi băm còn khớp.
+    pub tf: Option<String>,
+    /// File plan Terraform mà chính lệnh này ghi (tạo mới hay ghi lại trong
+    /// lúc chạy, đường dẫn nêu trong lệnh), kèm băm nội dung lấy sau khi chạy
+    /// xong. File có sẵn mà lệnh không đụng tới thì không có ở đây (TM-57).
+    pub plans: Vec<(String, String)>,
+    /// Băm mã module tải về (`.terraform/modules`) lấy sau khi lệnh ghi plan
+    /// chạy xong.
+    pub mods: Option<String>,
 }
 
 /// Vì sao một biên nhận không còn chứng minh được gì.
@@ -65,6 +75,23 @@ pub fn parse(src: &str) -> Vec<Receipt> {
                 passed: parts.next()? == "đạt",
                 at: parts.next()?.parse().ok()?,
                 arch_hash: parts.next()?.to_string(),
+                tf: None,
+                plans: Vec::new(),
+                mods: None,
+            })
+            .map(|mut r: Receipt| {
+                for p in line.split_whitespace().skip(4) {
+                    if let Some(v) = p.strip_prefix("tf=") {
+                        r.tf = Some(v.to_string());
+                    } else if let Some(v) = p.strip_prefix("plan=") {
+                        if let Some((path, hash)) = v.rsplit_once('#') {
+                            r.plans.push((path.to_string(), hash.to_string()));
+                        }
+                    } else if let Some(v) = p.strip_prefix("mods=") {
+                        r.mods = Some(v.to_string());
+                    }
+                }
+                r
             })
         })
         .collect()
@@ -73,13 +100,23 @@ pub fn parse(src: &str) -> Vec<Receipt> {
 pub fn render(receipts: &[Receipt]) -> String {
     let mut out = String::from(
         "# archctl sinh tự động. Không cần đưa vào git.\n\
-         # <tên> <đạt|hỏng> <mili giây unix> <dấu vân tay luật>\n",
+         # <tên> <đạt|hỏng> <mili giây unix> <dấu vân tay luật> [tf=<băm .tf>] [plan=<file>#<băm>]… [mods=<băm>]\n",
     );
     let mut sorted: Vec<&Receipt> = receipts.iter().collect();
     sorted.sort_by(|a, b| a.name.cmp(&b.name));
     for r in sorted {
         let verdict = if r.passed { "đạt" } else { "hỏng" };
-        out.push_str(&format!("{} {verdict} {} {}\n", r.name, r.at, r.arch_hash));
+        out.push_str(&format!("{} {verdict} {} {}", r.name, r.at, r.arch_hash));
+        if let Some(tf) = &r.tf {
+            out.push_str(&format!(" tf={tf}"));
+        }
+        for (path, hash) in &r.plans {
+            out.push_str(&format!(" plan={path}#{hash}"));
+        }
+        if let Some(mods) = &r.mods {
+            out.push_str(&format!(" mods={mods}"));
+        }
+        out.push('\n');
     }
     out
 }
@@ -133,7 +170,7 @@ mod tests {
     use super::*;
 
     fn receipt(name: &str, passed: bool, at: u64, hash: &str) -> Receipt {
-        Receipt { name: name.into(), passed, at, arch_hash: hash.into() }
+        Receipt { name: name.into(), passed, at, arch_hash: hash.into(), tf: None, plans: Vec::new(), mods: None }
     }
 
     #[test]
@@ -142,6 +179,10 @@ mod tests {
         let back = parse(&render(&rs));
         assert_eq!(back.len(), 2);
         assert_eq!(back[0], receipt("a", false, 7, "bbbb"));
+        // Băm Terraform đi kèm khi có; biên nhận cũ không có cột đó vẫn đọc được.
+        let with_tf = Receipt { tf: Some("0123abcd".into()), plans: vec![(".arch/tf-plan.json".into(), "ffee".into())], mods: Some("aa".into()), ..receipt("p", true, 9, "cccc") };
+        assert_eq!(parse(&render(std::slice::from_ref(&with_tf))), vec![with_tf]);
+        assert_eq!(parse("x đạt 1 aaaa\n")[0].tf, None);
     }
 
     #[test]

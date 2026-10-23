@@ -223,6 +223,19 @@ fn init_dung_khung_arch_va_tro_cho_agent() {
         assert!(p.read(f).contains(".arch/ARCHITECTURE.md"), "{f} không trỏ về hướng dẫn");
     }
     assert!(p.read(".gitignore").contains("**/.arch/.state"), "{}", p.read(".gitignore"));
+    assert!(p.read(".gitignore").contains("**/.arch/tf-plan*"), "{}", p.read(".gitignore"));
+}
+
+#[test]
+fn init_lai_them_dong_plan_cho_repo_cu() {
+    let p = Project::new("init-gitignore-cu");
+    std::fs::remove_dir_all(p.0.join(".arch")).unwrap();
+    // Repo init bằng bản trước: đã có hai dòng, chưa có dòng plan Terraform.
+    std::fs::write(p.0.join(".gitignore"), "target\n**/.arch/.state\n**/.arch/.verified\n").unwrap();
+    assert_eq!(code(&p.run(&["init"])), 0);
+    let g = p.read(".gitignore");
+    assert_eq!(g.matches("**/.arch/.state").count(), 1, "{g}");
+    assert!(g.contains("**/.arch/tf-plan*"), "{g}");
 }
 
 #[test]

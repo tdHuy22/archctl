@@ -240,15 +240,24 @@ fn append_pointer(root: &Path, name: &str) -> Result<bool, String> {
 fn append_gitignore(root: &Path) -> Result<bool, String> {
     let path = root.join(".gitignore");
     let mut body = std::fs::read_to_string(&path).unwrap_or_default();
-    if body.contains("/.arch/.state") {
+    // `**/` chứ không neo vào gốc: monorepo có thể có nhiều `.arch/` lồng
+    // trong các dự án con, và mẫu neo gốc bỏ sót hết chúng. Plan Terraform
+    // chứa giá trị đã tính, có thể là mật khẩu (TM-58). Từng dòng thêm riêng:
+    // repo init từ bản cũ đã có hai dòng đầu mà chưa có dòng plan.
+    let missing: Vec<&str> = ["**/.arch/.state", "**/.arch/.verified", "**/.arch/tf-plan*"]
+        .into_iter()
+        .filter(|line| !body.lines().any(|l| l.trim() == *line))
+        .collect();
+    if missing.is_empty() {
         return Ok(false);
     }
     if !body.is_empty() && !body.ends_with('\n') {
         body.push('\n');
     }
-    // `**/` chứ không neo vào gốc: monorepo có thể có nhiều `.arch/` lồng
-    // trong các dự án con, và mẫu neo gốc bỏ sót hết chúng.
-    body.push_str("**/.arch/.state\n**/.arch/.verified\n");
+    for line in missing {
+        body.push_str(line);
+        body.push('\n');
+    }
     arch_core::write_atomic(&path, &body).map_err(|e| e.to_string())?;
     Ok(true)
 }
@@ -431,6 +440,19 @@ pub fn cmd_verify(args: &[String]) -> ExitCode {
         // vừa sửa, và lần chạy đó im lặng được coi là chứng minh cho mã nó
         // chưa từng thấy.
         let at = arch_core::verify::now();
+        // Băm file Terraform cũng lấy trước khi chạy: plan mà lệnh này ghi chỉ
+        // chứng minh cho đúng các file đó (TM-57).
+        let tf = arch_core::scan::deploy::tf_hash(&root, &arch_core::check::deploy_files(&root, &arch_core::read_ignores(&root)));
+        // Lệnh ghi plan: xoá trước các file plan mà lệnh nêu, nên file nào có
+        // mặt sau khi chạy là do chính lệnh ghi (TM-57). Plan là thứ sinh ra,
+        // ghi lại được; lệnh hỏng thì không còn plan cũ nào bị tưởng là mới.
+        let writes_plan = v.command.contains(".arch/tf-plan");
+        let named = |p: &String| arch_core::scan::deploy::names_plan(&v.command, p) && !p.contains(char::is_whitespace) && !p.contains('#');
+        if writes_plan {
+            for p in arch_core::scan::deploy::plan_files(&root).into_iter().filter(named) {
+                let _ = std::fs::remove_file(root.join(&p));
+            }
+        }
         let began = std::time::Instant::now();
         let status = std::process::Command::new("sh")
             .arg("-c")
@@ -448,12 +470,31 @@ pub fn cmd_verify(args: &[String]) -> ExitCode {
             if passed { "đạt" } else { "HỎNG" },
             began.elapsed().as_secs_f64()
         );
+        // Lệnh khai là ghi plan Terraform: băm plan và mã module tải về lấy
+        // sau khi chạy xong, gắn plan với đúng lệnh này (TM-57).
+        let (plans, mods) = if passed && writes_plan {
+            let plans: Vec<(String, String)> = arch_core::scan::deploy::plan_files(&root)
+                .into_iter()
+                .filter(named)
+                .map(|p| {
+                    let h = arch_core::scan::deploy::file_hash(&root, &p);
+                    (p, h)
+                })
+                .collect();
+            let files = arch_core::check::deploy_files(&root, &arch_core::read_ignores(&root));
+            (plans, Some(arch_core::scan::deploy::modules_hash(&root, &files)))
+        } else {
+            (Vec::new(), None)
+        };
         receipts.retain(|r| r.name != v.name);
         receipts.push(arch_core::verify::Receipt {
             name: v.name.clone(),
             passed,
             at,
             arch_hash: hash.clone(),
+            tf,
+            plans,
+            mods,
         });
     }
 

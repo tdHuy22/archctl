@@ -23,6 +23,7 @@ mod notebook;
 mod python;
 pub mod queue;
 pub mod terraform;
+pub mod tfplan;
 mod rustlang;
 mod ts;
 pub mod yaml;

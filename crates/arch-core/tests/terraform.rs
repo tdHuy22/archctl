@@ -853,3 +853,249 @@ resource "kubernetes_config_map_v1" "other" {
     let v = violations(&r.report());
     assert!(v.contains(&"NotLinked Api -> A k8s/api.yaml:12".to_string()), "{v:?}");
 }
+
+// Đợt 8: plan JSON do lệnh `verify` tạo lấp chỗ bộ đọc HCL không đọc được,
+// chỉ khi biên nhận còn khớp file `.tf` (TM-57).
+const REGISTRY_TF: &str = "resource \"aws_db_instance\" \"main\" {}\nmodule \"ecs\" {\n  source  = \"terraform-aws-modules/ecs/aws\"\n  db_host = aws_db_instance.main.address\n}\n";
+
+fn registry_plan(with_edge: bool) -> String {
+    let td_refs = if with_edge { r#"["var.db_host"]"# } else { "[]" };
+    format!(
+        r#"{{"format_version":"1.2","configuration":{{"root_module":{{
+  "resources":[{{"address":"aws_db_instance.main","mode":"managed","type":"aws_db_instance","name":"main","expressions":{{}}}}],
+  "module_calls":{{"ecs":{{"source":"terraform-aws-modules/ecs/aws",
+    "expressions":{{"db_host":{{"references":["aws_db_instance.main.address","aws_db_instance.main"]}}}},
+    "module":{{"resources":[
+      {{"address":"aws_ecs_task_definition.api","mode":"managed","type":"aws_ecs_task_definition","name":"api",
+        "expressions":{{"container_definitions":{{"references":{td_refs}}}}}}},
+      {{"address":"aws_ecs_service.svc","mode":"managed","type":"aws_ecs_service","name":"svc",
+        "expressions":{{"task_definition":{{"references":["aws_ecs_task_definition.api.arn","aws_ecs_task_definition.api"]}}}}}}
+    ]}}}}}}}}}},
+ "planned_values":{{"root_module":{{
+  "resources":[{{"address":"aws_db_instance.main","values":{{"password":"hunter2-plan"}}}}],
+  "child_modules":[{{"address":"module.ecs","resources":[
+    {{"address":"module.ecs.aws_ecs_service.svc","values":{{}}}},
+    {{"address":"module.ecs.aws_ecs_task_definition.api","values":{{"container_definitions":"[{{\"image\":\"acme/api:1\"}}]"}}}}]}}]}}}}}}"#
+    )
+}
+
+impl Repo {
+    /// Biên nhận `verify tf_plan` đạt, mang băm `.tf`, chứng nhận mọi file plan
+    /// hiện có và băm mã module, như `archctl verify` ghi sau khi lệnh tạo plan
+    /// chạy xong (lệnh đã ghi mọi file đó).
+    fn receipt(&self, at: u64) -> &Self {
+        let files = arch_core::check::deploy_files(&self.0, &[]);
+        let r = arch_core::verify::Receipt {
+            name: "tf_plan".into(),
+            passed: true,
+            at,
+            arch_hash: "x".into(),
+            tf: deploy::tf_hash(&self.0, &files),
+            plans: deploy::plan_files(&self.0).into_iter().map(|p| { let h = deploy::file_hash(&self.0, &p); (p, h) }).collect(),
+            mods: Some(deploy::modules_hash(&self.0, &files)),
+        };
+        self.write(arch_core::verify::RECEIPTS_FILE, &arch_core::verify::render(&[r]))
+    }
+
+    /// Ghi plan rồi biên nhận của lệnh tạo nó.
+    fn plan(&self, json: &str) -> &Self {
+        self.write(".arch/tf-plan.json", json).receipt(1)
+    }
+}
+
+const PLAN_VERIFY: &str = "verify tf_plan runs \"tofu show -json p > .arch/tf-plan.json\"\n";
+const REGISTRY_RULES: &str = "service Api from tf:module.ecs.aws_ecs_service.svc\nservice Db from tf:aws_db_instance.main\nverify tf_plan runs \"tofu show -json p > .arch/tf-plan.json\"\n";
+
+#[test]
+fn plan_lap_module_registry_khi_khop() {
+    let r = Repo::new("plan-registry");
+    r.write("main.tf", REGISTRY_TF).rules(REGISTRY_RULES);
+    // Chưa có plan: module registry chưa đọc được.
+    let u: Vec<String> = r.report().deploy_unread.iter().map(|u| u.why.clone()).collect();
+    assert!(u.iter().any(|x| x.contains("registry")), "{u:?}");
+    r.plan(&registry_plan(true));
+    let rep = r.report();
+    assert!(rep.deploy_unread.is_empty(), "{:?}", rep.deploy_unread);
+    let v = violations(&rep);
+    // Service trong module registry, cạnh tới cơ sở dữ liệu qua biến của module;
+    // dòng là dòng gọi module.
+    assert!(v.iter().any(|x| x.starts_with("NotLinked Api -> Db main.tf:2")), "{v:?}");
+    let all = format!("{rep:?}{:?}", r.load().services);
+    assert!(!all.contains("hunter2-plan"), "lọt mật khẩu trong plan");
+    r.rules(&format!("{REGISTRY_RULES}link Api -> Db\n"));
+    assert!(violations(&r.report()).is_empty());
+}
+
+#[test]
+fn plan_cu_hay_ghi_truoc_bien_nhan_thi_khong_dung() {
+    let r = Repo::new("plan-cu");
+    r.write("main.tf", REGISTRY_TF).rules(REGISTRY_RULES);
+    r.plan(&registry_plan(true));
+    assert!(r.report().deploy_unread.is_empty());
+    // Agent sửa `.tf` sau lần chạy verify: plan cũ, không dùng, báo.
+    r.write("main.tf", &format!("{REGISTRY_TF}resource \"aws_sqs_queue\" \"q\" {{}}\n"));
+    let u: Vec<String> = r.report().deploy_unread.iter().map(|u| format!("{} {}", u.file, u.why)).collect();
+    assert!(u.iter().any(|x| x.starts_with(".arch/tf-plan.json ") && x.contains("plan Terraform cũ")), "{u:?}");
+    assert!(u.iter().any(|x| x.contains("registry")), "{u:?}");
+    // Một lệnh khác (bộ test agent viết được) ghi đè plan sau lệnh tạo plan:
+    // băm plan không còn trùng biên nhận, không dùng.
+    r.write("main.tf", REGISTRY_TF).plan(&registry_plan(true));
+    assert!(r.report().deploy_unread.is_empty());
+    r.write(".arch/tf-plan.json", &registry_plan(false));
+    let u: Vec<String> = r.report().deploy_unread.iter().map(|u| u.why.clone()).collect();
+    assert!(u.iter().any(|x| x.contains("plan Terraform cũ")), "{u:?}");
+    // Mã module tải về đổi sau lần chạy: cũng là cũ.
+    r.plan(&registry_plan(true)).write(".terraform/modules/ecs/main.tf", "locals {}\n");
+    let u: Vec<String> = r.report().deploy_unread.iter().map(|u| u.why.clone()).collect();
+    assert!(u.iter().any(|x| x.contains("plan Terraform cũ")), "{u:?}");
+    // Biên nhận của lệnh không khai là ghi plan: không dùng.
+    r.plan(&registry_plan(true)).rules("service Api from tf:module.ecs.aws_ecs_service.svc\nservice Db from tf:aws_db_instance.main\nverify tf_plan runs \"sh test.sh\"\n");
+    let u: Vec<String> = r.report().deploy_unread.iter().map(|u| u.why.clone()).collect();
+    assert!(u.iter().any(|x| x.contains("registry")), "{u:?}");
+    // Biên nhận không đạt: không dùng.
+    r.rules(REGISTRY_RULES);
+    let files = arch_core::check::deploy_files(&r.0, &[]);
+    let failed = arch_core::verify::Receipt {
+        name: "tf_plan".into(),
+        passed: false,
+        at: 1,
+        arch_hash: "x".into(),
+        tf: deploy::tf_hash(&r.0, &files),
+        plans: deploy::plan_files(&r.0).into_iter().map(|p| { let h = deploy::file_hash(&r.0, &p); (p, h) }).collect(),
+        mods: Some(deploy::modules_hash(&r.0, &files)),
+    };
+    r.write(arch_core::verify::RECEIPTS_FILE, &arch_core::verify::render(&[failed]));
+    let u: Vec<String> = r.report().deploy_unread.iter().map(|u| u.why.clone()).collect();
+    assert!(u.iter().any(|x| x.contains("plan Terraform cũ")), "{u:?}");
+}
+
+#[test]
+fn plan_khong_bo_canh_hcl_thay_va_bao_lech() {
+    let r = Repo::new("plan-lech");
+    // Bộ đọc HCL thấy cạnh Api -> Db; plan (giả) không có cạnh nào.
+    r.write("main.tf", ECS).rules(&format!("service Api from tf:aws_ecs_service.api\nservice Db from tf:aws_db_instance.main\nlink Internet -> Api\n{PLAN_VERIFY}"));
+    let plan = r#"{"configuration":{"root_module":{"resources":[
+      {"address":"aws_ecs_task_definition.api","mode":"managed","type":"aws_ecs_task_definition","name":"api","expressions":{"container_definitions":{}}},
+      {"address":"aws_ecs_service.api","mode":"managed","type":"aws_ecs_service","name":"api","expressions":{"task_definition":{"references":["aws_ecs_task_definition.api"]}}}]}},
+     "planned_values":{"root_module":{"resources":[{"address":"aws_ecs_service.api","values":{}},{"address":"aws_ecs_task_definition.api","values":{}}]}}}"#;
+    r.plan(plan);
+    let rep = r.report();
+    assert!(violations(&rep).contains(&"NotLinked Api -> Db main.tf:13".to_string()), "{:?}", violations(&rep));
+    let u: Vec<String> = rep.deploy_unread.iter().map(|u| u.why.clone()).collect();
+    assert!(u.iter().any(|x| x.contains("bộ đọc thấy cạnh") && x.contains("aws_db_instance.main")), "{u:?}");
+    assert!(u.iter().any(|x| x.contains("lộ ra Internet")), "{u:?}");
+}
+
+#[test]
+fn plan_doi_khang_khong_lam_treo_va_khong_ra_ngoai_repo() {
+    let r = Repo::new("plan-doi-khang");
+    r.write("main.tf", REGISTRY_TF).rules(REGISTRY_RULES);
+    r.plan(&"[".repeat(300_000));
+    let u: Vec<String> = r.report().deploy_unread.iter().map(|u| u.why.clone()).collect();
+    assert!(u.iter().any(|x| x.contains("không phải JSON đọc được")), "{u:?}");
+    // `modules.json` trỏ ra ngoài repo: không đọc mã ở đó, `local` báo không lần được.
+    let plan = registry_plan(true).replace(r#""references":["var.db_host"]"#, r#""references":["local.h"]"#);
+    r.write(".terraform/modules/modules.json", r#"{"Modules":[{"Key":"ecs","Dir":"../../../../etc"}]}"#).plan(&plan);
+    let u: Vec<String> = r.report().deploy_unread.iter().map(|u| u.why.clone()).collect();
+    assert!(u.iter().any(|x| x.contains("`local.h` không lần được")), "{u:?}");
+    // Mã module tải về nằm trong repo: `locals` đọc được, cạnh lần qua nó.
+    r.write(".terraform/modules/modules.json", r#"{"Modules":[{"Key":"ecs","Dir":".terraform/modules/ecs"}]}"#)
+        .write(".terraform/modules/ecs/main.tf", "locals {\n  h = \"${var.db_host}:5432\"\n}\n")
+        .plan(&plan);
+    let rep = r.report();
+    assert!(rep.deploy_unread.is_empty(), "{:?}", rep.deploy_unread);
+    assert!(violations(&rep).iter().any(|x| x.starts_with("NotLinked Api -> Db main.tf:2")), "{:?}", violations(&rep));
+}
+
+#[test]
+fn review_plan_chi_so_for_iam_va_module_dung_chung() {
+    // Tham chiếu có chỉ số (`count` trên module): plan ghi `module.db[0].endpoint`.
+    let r = Repo::new("plan-chi-so");
+    r.write(
+        "main.tf",
+        "module \"db\" {\n  source = \"./db\"\n  count  = var.n\n}\nvariable \"n\" {}\nresource \"aws_lambda_function\" \"fn\" {\n  image_uri = \"x\"\n  environment {\n    variables = { DB = module.db[0].endpoint }\n  }\n}\n",
+    )
+    .write("db/main.tf", "resource \"aws_db_instance\" \"this\" {}\noutput \"endpoint\" {\n  value = aws_db_instance.this.address\n}\n")
+    .rules(&format!("service Fn from tf:aws_lambda_function.fn\nservice Db from tf:module.db.aws_db_instance.this\n{PLAN_VERIFY}"));
+    r.plan(
+        r#"{"configuration":{"root_module":{
+      "resources":[{"address":"aws_lambda_function.fn","mode":"managed","type":"aws_lambda_function","name":"fn",
+        "expressions":{"environment":[{"variables":{"references":["module.db[0].endpoint","module.db[0]","module.db"]}}]}}],
+      "module_calls":{"db":{"source":"./db","module":{
+        "resources":[{"address":"aws_db_instance.this","mode":"managed","type":"aws_db_instance","name":"this","expressions":{}}],
+        "outputs":{"endpoint":{"expression":{"references":["aws_db_instance.this.address","aws_db_instance.this"]}}}}}}}},
+     "planned_values":{"root_module":{"resources":[{"address":"aws_lambda_function.fn","values":{}}],
+       "child_modules":[{"resources":[{"address":"module.db[0].aws_db_instance.this","values":{}}]}]}}}"#,
+    );
+    let rep = r.report();
+    assert!(violations(&rep).iter().any(|x| x.starts_with("NotLinked Fn -> Db main.tf:")), "{:?} {:?}", violations(&rep), rep.deploy_unread);
+
+    // `for` trong `locals`: plan không giữ tham chiếu bên trong, mục vẫn báo.
+    let r = Repo::new("plan-for");
+    r.write(
+        "main.tf",
+        "resource \"aws_db_instance\" \"main\" {}\nlocals {\n  hosts = { for k, v in { main = aws_db_instance.main } : k => v.address }\n}\nresource \"aws_lambda_function\" \"fn\" {\n  image_uri = \"x\"\n  environment {\n    variables = { DB = local.hosts[\"main\"] }\n  }\n}\n",
+    )
+    .rules(&format!("service Fn from tf:aws_lambda_function.fn\n{PLAN_VERIFY}"));
+    r.plan(
+        r#"{"configuration":{"root_module":{"resources":[{"address":"aws_lambda_function.fn","mode":"managed","type":"aws_lambda_function","name":"fn",
+        "expressions":{"environment":[{"variables":{"references":["local.hosts"]}}]}}]}},
+      "planned_values":{"root_module":{"resources":[{"address":"aws_lambda_function.fn","values":{}}]}}}"#,
+    );
+    let u: Vec<String> = r.report().deploy_unread.iter().map(|u| u.why.clone()).collect();
+    assert!(u.iter().any(|x| x.contains("`for`") && !x.starts_with("plan:")), "{u:?}");
+    assert!(u.iter().any(|x| x.starts_with("plan:") && x.contains("local.hosts")), "{u:?}");
+
+    // IAM policy của Cloud Run: plan không đọc `policy_data`, mục vẫn báo.
+    let r = Repo::new("plan-iam");
+    r.write(
+        "main.tf",
+        "resource \"google_cloud_run_v2_service\" \"s\" {\n  template {\n    containers {\n      image = \"x\"\n    }\n  }\n}\nresource \"google_cloud_run_v2_service_iam_policy\" \"p\" {\n  name        = google_cloud_run_v2_service.s.name\n  policy_data = data.google_iam_policy.all.policy_data\n}\ndata \"google_iam_policy\" \"all\" {}\n",
+    )
+    .rules(&format!("service S from tf:google_cloud_run_v2_service.s\n{PLAN_VERIFY}"));
+    r.plan(
+        r#"{"configuration":{"root_module":{"resources":[
+        {"address":"google_cloud_run_v2_service.s","mode":"managed","type":"google_cloud_run_v2_service","name":"s","expressions":{}},
+        {"address":"google_cloud_run_v2_service_iam_policy.p","mode":"managed","type":"google_cloud_run_v2_service_iam_policy","name":"p",
+         "expressions":{"name":{"references":["google_cloud_run_v2_service.s.name","google_cloud_run_v2_service.s"]}}}]}},
+      "planned_values":{"root_module":{"resources":[{"address":"google_cloud_run_v2_service.s","values":{}},{"address":"google_cloud_run_v2_service_iam_policy.p","values":{}}]}}}"#,
+    );
+    let u: Vec<String> = r.report().deploy_unread.iter().map(|u| u.why.clone()).collect();
+    assert!(u.iter().any(|x| x.contains("IAM policy")), "{u:?}");
+
+    // Module dùng chung giữa hai gốc, chỉ một gốc có plan: mục của module vẫn báo.
+    let r = Repo::new("plan-dung-chung");
+    let call = "module \"svc\" {\n  source = \"../../modules/svc\"\n}\n";
+    r.write("envs/prod/main.tf", call)
+        .write("envs/staging/main.tf", call)
+        .write("modules/svc/main.tf", "resource \"aws_lambda_function\" \"f\" {\n  image_uri = \"x\"\n  environment {\n    variables = { A = trimsuffix(\"a\", \"b\") }\n  }\n}\n")
+        .rules("service F from tf:envs/prod/module.svc.aws_lambda_function.f\nverify tf_plan runs \"x > .arch/tf-plan/envs/prod.json\"\n");
+    r.write(".arch/tf-plan/envs/prod.json", r#"{"configuration":{"root_module":{}}}"#).receipt(1);
+    let u: Vec<String> = r.report().deploy_unread.iter().map(|u| format!("{} {}", u.file, u.why)).collect();
+    assert!(u.iter().any(|x| x.starts_with("modules/svc/main.tf:4 ") && x.contains("trimsuffix")), "{u:?}");
+}
+
+#[test]
+fn plan_nhieu_lambda_va_url_khong_bac_hai() {
+    let r = Repo::new("plan-lon");
+    r.write("main.tf", "resource \"aws_lambda_function\" \"f0\" {\n  image_uri = \"x\"\n}\n")
+        .rules(&format!("service F from tf:aws_lambda_function.f0\n{PLAN_VERIFY}"));
+    let mut res = Vec::new();
+    let mut vals = Vec::new();
+    for i in 0..5000 {
+        res.push(format!(r#"{{"address":"aws_lambda_function.f{i}","mode":"managed","type":"aws_lambda_function","name":"f{i}","expressions":{{}}}}"#));
+        res.push(format!(r#"{{"address":"aws_lambda_function_url.u{i}","mode":"managed","type":"aws_lambda_function_url","name":"u{i}","expressions":{{"function_name":{{"references":["aws_lambda_function.f{i}.function_name","aws_lambda_function.f{i}"]}}}}}}"#));
+        vals.push(format!(r#"{{"address":"aws_lambda_function.f{i}","values":{{}}}}"#));
+        vals.push(format!(r#"{{"address":"aws_lambda_function_url.u{i}","values":{{"authorization_type":"NONE"}}}}"#));
+    }
+    let plan = format!(
+        r#"{{"configuration":{{"root_module":{{"resources":[{}]}}}},"planned_values":{{"root_module":{{"resources":[{}]}}}}}}"#,
+        res.join(","),
+        vals.join(",")
+    );
+    r.plan(&plan);
+    let t = std::time::Instant::now();
+    let rep = r.report();
+    assert!(t.elapsed().as_secs_f64() < 10.0, "{:?}", t.elapsed());
+    assert!(violations(&rep).iter().any(|x| x.starts_with("NotLinked Internet -> F")), "{:?}", violations(&rep));
+}

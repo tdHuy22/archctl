@@ -1999,6 +1999,13 @@ pub fn deploy_options(doc: &Document) -> deploy::Options {
     let mut opts = deploy::Options {
         k8s: doc.services.iter().any(Service::on_k8s),
         tf: doc.services.iter().any(Service::on_tf),
+        // Lệnh kiểm do người viết trong luật mà ghi plan Terraform (TM-57).
+        plan_verifies: doc
+            .verifies
+            .iter()
+            .filter(|v| v.meta.status.is_enforced() && v.command.contains(".arch/tf-plan"))
+            .map(|v| v.name.clone())
+            .collect(),
         ..Default::default()
     };
     // `values:` của Helm: gộp vào chart ở thư mục các nguồn `k8s:` cùng service.

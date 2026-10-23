@@ -56,16 +56,22 @@ impl Value {
 /// chỉ cần biết có dùng được cấu hình này hay không.
 pub fn parse(src: &str) -> Option<Value> {
     let chars: Vec<char> = crate::strip_bom(src).chars().collect();
-    let mut p = Parser { cs: &chars, i: 0 };
+    let mut p = Parser { cs: &chars, i: 0, depth: 0 };
     p.skip_trivia();
     let value = p.value()?;
     p.skip_trivia();
     (p.i >= p.cs.len()).then_some(value)
 }
 
+/// Độ lồng tối đa. File JSON trong repo do người khác viết được (tsconfig,
+/// plan Terraform): `[[[[…` sâu vài chục nghìn tầng làm tràn stack nếu đệ quy
+/// không có trần.
+pub const MAX_DEPTH: usize = 256;
+
 struct Parser<'a> {
     cs: &'a [char],
     i: usize,
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -109,8 +115,15 @@ impl Parser<'_> {
 
     fn value(&mut self) -> Option<Value> {
         match self.peek()? {
-            '{' => self.object(),
-            '[' => self.array(),
+            '{' | '[' => {
+                if self.depth >= MAX_DEPTH {
+                    return None;
+                }
+                self.depth += 1;
+                let v = if self.peek() == Some('{') { self.object() } else { self.array() };
+                self.depth -= 1;
+                v
+            }
             '"' => self.string().map(Value::Str),
             _ => self.literal(),
         }
@@ -269,5 +282,15 @@ mod tests {
         let v = parse(r#"{"a": [], "b": [[1, 2], []]}"#).unwrap();
         assert_eq!(v.get("a").and_then(Value::as_array).map(<[Value]>::len), Some(0));
         assert_eq!(v.get("b").and_then(Value::as_array).map(<[Value]>::len), Some(2));
+    }
+
+    #[test]
+    fn long_qua_sau_khong_tran_stack() {
+        assert!(parse(&"[".repeat(200_000)).is_none());
+        assert!(parse(&"{\"a\":".repeat(100_000)).is_none());
+        let ok = format!("{}1{}", "[".repeat(MAX_DEPTH), "]".repeat(MAX_DEPTH));
+        assert!(parse(&ok).is_some());
+        let over = format!("{}1{}", "[".repeat(MAX_DEPTH + 1), "]".repeat(MAX_DEPTH + 1));
+        assert!(parse(&over).is_none());
     }
 }

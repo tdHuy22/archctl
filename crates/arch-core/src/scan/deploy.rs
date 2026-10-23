@@ -13,6 +13,7 @@ use super::dockerfile::{self, Command, Dockerfile, join_container};
 use super::helm;
 use super::kustomize;
 use super::terraform;
+use super::tfplan;
 use super::k8s;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -148,6 +149,39 @@ pub fn is_tf_file(name: &str) -> bool {
     name.ends_with(".tf") || name.ends_with(".tf.json")
 }
 
+/// Băm đường dẫn và nội dung mọi file Terraform trong `files` (đường dẫn
+/// trong repo). `archctl verify` ghi nó vào biên nhận lúc bắt đầu chạy; plan
+/// JSON chỉ được dùng khi băm hiện tại còn trùng (TM-57). `None` khi repo
+/// không có file Terraform nào.
+pub fn tf_hash(root: &Path, files: &[String]) -> Option<String> {
+    // Cùng tập file mà `read_terraform` đọc: không gồm `.terraform/` (module
+    // tải về lúc `init`, ngay trong lệnh verify).
+    let mut tf: Vec<&String> = files.iter().filter(|f| is_tf_file(f.rsplit('/').next().unwrap_or(f)) && !aside(f)).collect();
+    if tf.is_empty() {
+        return None;
+    }
+    tf.sort();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for &b in bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    for f in tf {
+        feed(f.as_bytes());
+        feed(b"\0");
+        // File không đọc được (quá lớn, symlink) vẫn góp vào băm theo lý do,
+        // để sửa nó vẫn làm băm đổi khi đọc lại được.
+        match read_in(root, f, MAX_DEPLOY_BYTES) {
+            Ok(text) => feed(text.as_bytes()),
+            Err(why) => feed(why.as_bytes()),
+        }
+        feed(b"\0");
+    }
+    Some(format!("{h:016x}"))
+}
+
 /// Một service lấy từ cấu hình.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Key {
@@ -208,6 +242,9 @@ pub struct Options {
     pub k8s: bool,
     /// Đọc file Terraform: chỉ khi luật có nguồn `tf:`, hay khi `init`, `scan`.
     pub tf: bool,
+    /// Tên các cách kiểm mà lệnh trong luật ghi `.arch/tf-plan`: chỉ biên nhận
+    /// của chúng chứng minh được cho một plan (TM-57). Rỗng thì không dùng plan.
+    pub plan_verifies: Vec<String>,
     /// `dockerfile:` khai cùng `k8s:`, `tf:` trong luật: image của container chính.
     pub pins: Vec<Pin>,
     /// Tên máy viết thẳng trong mã (đã viết thường), cần biết trỏ tới đâu.
@@ -843,6 +880,12 @@ pub fn load(root: &Path, files: &[String], opts: &Options) -> Deploy {
     // Terraform đọc trước: tài nguyên `kubernetes_*` thành manifest cho bộ
     // đọc Kubernetes.
     let mut tf = if opts.tf || opts.k8s { read_terraform(&shared, files) } else { None };
+    if opts.tf
+        && !opts.plan_verifies.is_empty()
+        && let Some(t) = tf.as_mut()
+    {
+        apply_plans(&shared, files, &opts.plan_verifies, t);
+    }
     let manifests = tf.as_mut().map(|t| std::mem::take(&mut t.manifests)).unwrap_or_default();
     if opts.k8s {
         let cms = tf.as_ref().map_or(&[][..], |t| t.config_maps.as_slice());
@@ -2969,6 +3012,282 @@ fn read_terraform(shared: &Shared<'_>, files: &[String]) -> Option<terraform::Ou
     let read = |p: &str| shared.read(p).map(|t| t.to_string());
     let is_dir = |p: &str| matches!(kind_in(shared.root, p), Some(Kind::Dir));
     Some(terraform::load(&tf, &terraform::Fs { read: &read, is_dir: &is_dir, env_words: &shared.env_words }))
+}
+
+/// Plan JSON của module gốc `root` có thể nằm ở đâu: riêng cho gốc đó, hay
+/// chung khi repo có một gốc.
+fn plan_paths(root: &str, single: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    if !root.is_empty() {
+        out.push(format!(".arch/tf-plan/{root}.json"));
+    }
+    if root.is_empty() || single {
+        out.push(".arch/tf-plan.json".into());
+    }
+    out
+}
+
+/// Lấp phần bộ đọc HCL không đọc được bằng plan JSON do lệnh `verify` tạo,
+/// chỉ khi plan còn khớp file `.tf` hiện tại (TM-57): có biên nhận đạt mang
+/// băm `.tf` trùng băm hiện tại, và plan ghi không sớm hơn lúc lệnh đó bắt
+/// đầu chạy. Plan chỉ thêm cạnh, lối vào, service; không bỏ cái bộ đọc HCL
+/// thấy. Hai nguồn khác nhau thì báo lệch.
+fn apply_plans(shared: &Shared<'_>, files: &[String], names: &[String], t: &mut terraform::Out) {
+    let roots = t.roots.clone();
+    let single = roots.len() == 1;
+    let receipts = read_in(shared.root, crate::verify::RECEIPTS_FILE, 1 << 20)
+        .map(|s| crate::verify::parse(&s))
+        .unwrap_or_default();
+    // Biên nhận đạt của một lệnh khai là ghi plan, mang băm `.tf` hiện tại và
+    // băm plan cùng mã module tải về hiện tại. Lệnh khác ghi đè plan sau đó
+    // (một bộ test agent viết được chạy trong cùng `archctl verify`) thì băm
+    // plan không còn trùng.
+    let mut now: Option<(Option<String>, Option<String>)> = None;
+    let mut is_fresh = |path: &str| {
+        let (tf, mods) = now.get_or_insert_with(|| (tf_hash(shared.root, files), Some(modules_hash(shared.root, files)))).clone();
+        let hash = file_hash(shared.root, path);
+        receipts.iter().any(|x| {
+            x.passed
+                && names.contains(&x.name)
+                && x.tf.is_some()
+                && x.tf == tf
+                && x.mods == mods
+                && x.plans.iter().any(|(p, h)| p == path && *h == hash)
+        })
+    };
+    let mut used: HashSet<String> = HashSet::new();
+    for r in &roots {
+        let Some(path) = plan_paths(r, single).into_iter().find(|p| kind_in(shared.root, p).is_some()) else { continue };
+        if !matches!(kind_in(shared.root, &path), Some(Kind::File)) {
+            t.unread.push((path, "plan Terraform không phải file thường (symlink?): không đọc".into()));
+            continue;
+        }
+        // File có mà không được chứng nhận thì báo, không lùi về file khác.
+        if !is_fresh(&path) {
+            t.unread.push((
+                path,
+                "plan Terraform cũ hay chưa chứng nhận: không có biên nhận `archctl verify` đạt nào của lệnh ghi đúng file này, khớp file `.tf` và nội dung plan hiện tại; chạy lại lệnh verify tạo nó".into(),
+            ));
+            continue;
+        }
+        let plan = match read_in(shared.root, &path, tfplan::MAX_PLAN_BYTES) {
+            Ok(text) => crate::jsonc::parse(&text),
+            Err(why) => {
+                t.unread.push((path, format!("plan Terraform không đọc được: {why}")));
+                continue;
+            }
+        };
+        let Some(plan) = plan else {
+            t.unread.push((path, "plan Terraform không phải JSON đọc được (hay lồng quá sâu)".into()));
+            continue;
+        };
+        let mjson = if r.is_empty() { ".terraform/modules/modules.json".to_string() } else { format!("{r}/.terraform/modules/modules.json") };
+        let modules = read_in(shared.root, &mjson, 4 << 20).ok().and_then(|s| crate::jsonc::parse(&s));
+        let read = |p: &str| read_in(shared.root, p, MAX_DEPLOY_BYTES);
+        let list = |d: &str| -> (Vec<String>, bool) {
+            if !matches!(kind_in(shared.root, d), Some(Kind::Dir)) {
+                return (Vec::new(), false);
+            }
+            let mut out: Vec<String> = std::fs::read_dir(shared.root.join(d))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|n| is_tf_file(n))
+                .map(|n| if d.is_empty() { n } else { format!("{d}/{n}") })
+                .collect();
+            out.sort();
+            let more = out.len() > 500;
+            out.truncate(500);
+            (out, more)
+        };
+        let got = tfplan::read(r, &plan, modules.as_ref(), &tfplan::Fs { read: &read, list: &list });
+        merge_plan(t, r, &path, got);
+        used.insert(r.clone());
+    }
+    // Mục "chưa đọc được" mà plan phủ thì bỏ, chỉ khi mọi gốc dùng thư mục đó
+    // đều có plan dùng được: module dùng chung của gốc chưa có plan vẫn báo.
+    let mut owners: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (r, d) in &t.dirs {
+        owners.entry(d.as_str()).or_default().push(r.as_str());
+    }
+    let covered = |f: &str| {
+        let file = f.rsplit_once(':').filter(|(_, l)| l.chars().all(|c| c.is_ascii_digit())).map_or(f, |(f, _)| f);
+        owners.get(dir_of(file)).is_some_and(|rs| rs.iter().all(|r| used.contains(*r)))
+    };
+    t.unread.retain(|(f, why)| !(covered(f) && terraform::plan_covers(why)));
+}
+
+/// File dưới `start` (đường dẫn trong repo) mà `want` nhận, không theo symlink,
+/// có trần số file.
+fn walk_files(root: &Path, start: &str, want: &dyn Fn(&str) -> bool, out: &mut Vec<String>) {
+    let mut todo = vec![start.to_string()];
+    while let Some(d) = todo.pop() {
+        if out.len() > 20_000 || !matches!(kind_in(root, &d), Some(Kind::Dir)) {
+            continue;
+        }
+        for e in std::fs::read_dir(root.join(&d)).into_iter().flatten().flatten() {
+            let (Ok(ty), Ok(name)) = (e.file_type(), e.file_name().into_string()) else { continue };
+            let p = format!("{d}/{name}");
+            if ty.is_dir() {
+                todo.push(p);
+            } else if ty.is_file() && want(&name) {
+                out.push(p);
+            }
+        }
+    }
+}
+
+fn fnv(parts: &[&[u8]]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for bytes in parts {
+        for &b in *bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h ^= 0xff;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// Mọi file plan Terraform: `.arch/tf-plan.json` và `.arch/tf-plan/**/*.json`.
+pub fn plan_files(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if matches!(kind_in(root, ".arch/tf-plan.json"), Some(Kind::File)) {
+        out.push(".arch/tf-plan.json".to_string());
+    }
+    walk_files(root, ".arch/tf-plan", &|n| n.ends_with(".json"), &mut out);
+    out.sort();
+    out
+}
+
+/// Băm nội dung một file trong repo (lý do không đọc được nếu không đọc được).
+pub fn file_hash(root: &Path, path: &str) -> String {
+    match read_in(root, path, tfplan::MAX_PLAN_BYTES) {
+        Ok(text) => fnv(&[text.as_bytes()]),
+        Err(why) => fnv(&[b"!", why.as_bytes()]),
+    }
+}
+
+/// Lệnh trong luật ghi file plan `path`: nêu nguyên văn đường dẫn đó (TM-57).
+/// Không nhận theo thư mục: lệnh plan của một gốc không được chứng nhận plan
+/// của gốc khác.
+pub fn names_plan(command: &str, path: &str) -> bool {
+    command.contains(path)
+}
+
+/// Băm mã module tải về (`<thư mục>/.terraform/modules`) của mọi thư mục có
+/// file Terraform. `archctl verify` lấy nó sau khi lệnh ghi plan chạy xong;
+/// sửa mã đó sau lần chạy thì plan cũ (TM-57). Không theo symlink.
+pub fn modules_hash(root: &Path, files: &[String]) -> String {
+    let mut dirs: Vec<String> = files
+        .iter()
+        .filter(|f| is_tf_file(f.rsplit('/').next().unwrap_or(f)) && !aside(f))
+        .map(|f| dir_of(f).to_string())
+        .collect();
+    dirs.push(String::new());
+    dirs.sort();
+    dirs.dedup();
+    let mut inputs: Vec<String> = Vec::new();
+    for d in dirs {
+        let m = if d.is_empty() { ".terraform/modules".to_string() } else { format!("{d}/.terraform/modules") };
+        walk_files(root, &m, &|n| is_tf_file(n) || n == "modules.json", &mut inputs);
+    }
+    inputs.sort();
+    inputs.dedup();
+    let hashes: Vec<String> = inputs.iter().map(|f| format!("{f}\0{}", file_hash(root, f))).collect();
+    let parts: Vec<&[u8]> = hashes.iter().map(|x| x.as_bytes()).collect();
+    format!("{}:{}", fnv(&parts), inputs.len())
+}
+
+/// Ghép kết quả plan của gốc `r` vào kết quả bộ đọc HCL.
+fn merge_plan(t: &mut terraform::Out, r: &str, path: &str, got: tfplan::Out) {
+    let dirs: HashSet<String> = t.dirs.iter().filter(|(x, _)| x == r).map(|(_, d)| d.clone()).collect();
+    let mine = |f: &str| {
+        let file = f.rsplit_once(':').filter(|(_, l)| l.chars().all(|c| c.is_ascii_digit())).map_or(f, |(f, _)| f);
+        dirs.contains(dir_of(file))
+    };
+    // Bộ đọc HCL đọc hết gốc này: thứ plan có mà nó không có là lỗi của nó.
+    let clean = !t.unread.iter().any(|(f, _)| mine(f));
+    t.unread.extend(got.unread.into_iter().map(|why| (path.to_string(), format!("plan: {why}"))));
+    let loc = |t: &terraform::Out, addr: &str| -> (String, usize) {
+        if let Some((_, _, f, l)) = t.decls.iter().find(|(x, a, _, _)| x == r && a == addr) {
+            return (f.clone(), *l);
+        }
+        t.calls
+            .iter()
+            .filter(|(x, p, _, _)| x == r && addr.starts_with(p.as_str()))
+            .max_by_key(|(_, p, _, _)| p.len())
+            .map_or((path.to_string(), 1), |(_, _, f, l)| (f.clone(), *l))
+    };
+    let mut lech: Vec<(String, String)> = Vec::new();
+    let plan_addrs: HashSet<String> = got.units.iter().map(|u| u.addr.clone()).collect();
+    for u in t.units.iter().filter(|u| u.root == r && u.compute && !plan_addrs.contains(&u.addr)) {
+        lech.push((format!("{}:{}", u.file, u.line), format!("plan và bộ đọc HCL khác nhau: `{}` là service theo bộ đọc mà plan không có", u.addr)));
+    }
+    for pu in got.units {
+        let edge = |file: &str, line: usize, target: &str, shown: &str| terraform::RefEdge {
+            key: "plan".into(),
+            file: file.to_string(),
+            line,
+            target: target.to_string(),
+            shown: format!("plan: {shown}"),
+        };
+        if let Some(u) = t.units.iter_mut().find(|u| u.root == r && u.addr == pu.addr) {
+            let at = format!("{}:{}", u.file, u.line);
+            for (tgt, shown) in &pu.edges {
+                if !u.edges.iter().any(|e| &e.target == tgt) {
+                    if clean {
+                        lech.push((at.clone(), format!("plan và bộ đọc HCL khác nhau: plan có cạnh `{}` → `{tgt}` mà bộ đọc không thấy", u.addr)));
+                    }
+                    let e = edge(&u.file, u.line, tgt, shown);
+                    u.edges.push(e);
+                }
+            }
+            for e in &u.edges {
+                if e.key != "plan" && !pu.edges.iter().any(|(x, _)| *x == e.target) {
+                    lech.push((format!("{}:{}", e.file, e.line), format!("plan và bộ đọc HCL khác nhau: bộ đọc thấy cạnh `{}` → `{}` mà plan không có", u.addr, e.target)));
+                }
+            }
+            if pu.exposed && u.exposed.is_empty() {
+                if clean {
+                    lech.push((at.clone(), format!("plan và bộ đọc HCL khác nhau: plan cho `{}` lộ ra Internet mà bộ đọc không thấy", u.addr)));
+                }
+                u.exposed.push((u.file.clone(), u.line, "plan: lộ ra Internet".into()));
+            } else if !pu.exposed && !u.exposed.is_empty() {
+                lech.push((at.clone(), format!("plan và bộ đọc HCL khác nhau: bộ đọc thấy `{}` lộ ra Internet mà plan không", u.addr)));
+            }
+            if u.compute && u.containers.iter().all(|c| c.image.is_none()) && pu.image.is_some() {
+                match u.containers.first_mut() {
+                    Some(c) => c.image = pu.image.clone(),
+                    None => u.containers.push(k8s::Container { name: u.addr.clone(), line: u.line, image: pu.image.clone(), ..Default::default() }),
+                }
+            }
+            continue;
+        }
+        let (file, line) = loc(t, &pu.addr);
+        if clean && pu.compute {
+            lech.push((format!("{file}:{line}"), format!("plan và bộ đọc HCL khác nhau: plan có service `{}` mà bộ đọc không thấy", pu.addr)));
+        }
+        t.units.push(terraform::Unit {
+            root: r.to_string(),
+            addr: pu.addr.clone(),
+            ty: pu.ty.clone(),
+            file: file.clone(),
+            line,
+            compute: pu.compute,
+            containers: if pu.compute {
+                vec![k8s::Container { name: pu.addr.clone(), line, image: pu.image.clone(), ..Default::default() }]
+            } else {
+                Vec::new()
+            },
+            edges: pu.edges.iter().map(|(tgt, shown)| edge(&file, line, tgt, shown)).collect(),
+            exposed: if pu.exposed { vec![(file.clone(), line, "plan: lộ ra Internet".into())] } else { Vec::new() },
+        });
+    }
+    t.unread.extend(lech);
 }
 
 /// Cạnh `tf:` của workload viết bằng YAML hay Helm lấy khoá từ ConfigMap mà

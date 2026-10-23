@@ -562,7 +562,7 @@ git, `cargo clean` dọn.
    37 gốc, bộ mẫu shop 14, refused bị từ chối đúng); logs-t7 sabotage 79
    kiểu 0 trượt (60 kiểu khai trong CI cộng các lượt "không phá"), `verify`
    3/3, `check --strict` 0. Còn lại đợt 7: `kubernetes_*` qua Terraform.
-   Đã commit và push lên main đợt 7 (fe195de, 34d8021, e449f56). 11.1 `kubernetes_*` qua Terraform XONG, CHƯA COMMIT (chờ bạn bảo): `terraform.rs` (`k8s_manifests` dựng YAML, `resolve_v` có trần, `env_refs`/`from_cm`, `Scope`/`k8s_unread`, `Out.config_maps`), `deploy.rs` (`read_terraform`, `tf_k8s_edges`, `tf_config_map_edges`, `load_k8s(…, tf, tf_cms)`), `tests/terraform.rs` 22 test, TM-53..55, docs/infra.md. Biên nhận 2026-10-21: cargo test workspace, clippy, MSRV 1.88, release, bench 32 repo 0 bất nhất, oracle khớp hết, sabotage đạt, verify, check --strict. Việc tiếp: commit 11.1 khi bạn bảo (git add đúng 6 file, không add bench/__pycache__); đẩy nhánh thử, CI xanh thì lên main; rồi đợt 8 (12.1 đọc plan JSON qua `verify tf_plan`).
+   11.1 đã lên main (e9694b3). 12.1 XONG, CHƯA COMMIT (chờ bạn bảo): `scan/tfplan.rs` (mới), `deploy.rs` (`apply_plans`, `merge_plan`, `tf_hash`, `plan_files`, `file_hash`, `modules_hash`, `names_plan`), `verify.rs` (biên nhận `tf=`, `plan=<file>#<băm>`, `mods=`), `setup.rs` (cmd_verify xoá trước file plan lệnh nêu rồi chứng nhận; .gitignore `**/.arch/tf-plan*`), `check.rs` (`plan_verifies`), `terraform.rs` (`plan_covers`, decls/calls/dirs), `jsonc.rs` (trần độ sâu 256, sửa tràn stack đã tái hiện), test `tests/terraform.rs` (plan_*), `archctl/tests/verify.rs`, `cli.rs`; TM-56..60 đã có; docs/infra.md, docs/verify.md. Review opus 4 vòng, lượt cuối không phát hiện. Biên nhận 2026-10-22 (logs-p4): test workspace, clippy, MSRV, release, bench 32 repo 0 bất nhất, oracle khớp hết, sabotage, verify, check --strict. Việc tiếp: commit khi bạn bảo (git add đúng file, không add bench/__pycache__), đẩy nhánh thử, CI xanh thì lên main. Còn để ngỏ: oracle/sabotage chưa có kiểu đo riêng cho đường plan (test tích hợp phủ); `scan` không dùng plan.
    d. Chạy lần lượt, mỗi lệnh qua `receipt.py run --`, dừng ở lệnh trượt:
       `cargo test --workspace`; `cargo clippy --workspace --all-targets --
       -D warnings`; `cargo +1.88 check --workspace --tests`; `cargo build
@@ -848,4 +848,4 @@ không có `link` là vi phạm, có `link` mà cụm chặn là cảnh báo (`-
 
 ### Tầng hạ tầng, đợt 8: Terraform qua plan
 
-- [ ] Đọc plan JSON do `verify tf_plan` tạo, chỉ khi băm `.tf` trong biên nhận còn khớp; lấp phần "chưa đọc được" của đợt 7; báo plan cũ, báo lệch giữa hai nguồn.
+- [x] Đọc plan JSON do `verify tf_plan` tạo, chỉ khi băm `.tf` trong biên nhận còn khớp; lấp phần "chưa đọc được" của đợt 7; báo plan cũ, báo lệch giữa hai nguồn (2026-10-22, chưa commit; review opus 4 vòng, 7 phát hiện đã sửa; biên nhận đủ).

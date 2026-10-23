@@ -336,3 +336,72 @@ fn json_co_du_moi_loai_canh_bao() {
         assert!(out.contains(&format!("\"{field}\"")), "thiếu `{field}`: {out}");
     }
 }
+
+// Plan Terraform: biên nhận chỉ chứng nhận file mà chính lệnh ghi plan ghi ra
+// (TM-57). Một file plan giả commit sẵn, lệnh không đụng tới, không được dùng.
+const TF_ARCH: &str = "\
+service Worker from tf:infra/module.ecs.aws_lambda_function.worker @human #accepted
+service Db from tf:infra/aws_db_instance.main @human #accepted
+verify tf_plan runs \"cp infra/real.json .arch/tf-plan.json\" @human #accepted
+";
+
+const TF_MAIN: &str = "resource \"aws_db_instance\" \"main\" {}\nmodule \"ecs\" {\n  source  = \"terraform-aws-modules/ecs/aws\"\n  db_host = aws_db_instance.main.address\n}\n";
+
+fn tf_plan(edge: bool) -> String {
+    let refs = if edge { r#"["var.db_host"]"# } else { "[]" };
+    format!(
+        r#"{{"configuration":{{"root_module":{{"resources":[{{"address":"aws_db_instance.main","mode":"managed","type":"aws_db_instance","name":"main","expressions":{{}}}}],
+  "module_calls":{{"ecs":{{"source":"terraform-aws-modules/ecs/aws","expressions":{{"db_host":{{"references":["aws_db_instance.main.address"]}}}},
+    "module":{{"resources":[{{"address":"aws_lambda_function.worker","mode":"managed","type":"aws_lambda_function","name":"worker",
+      "expressions":{{"environment":[{{"variables":{{"references":{refs}}}}}]}}}}]}}}}}}}}}},
+ "planned_values":{{"root_module":{{"resources":[{{"address":"aws_db_instance.main","values":{{}}}}],
+   "child_modules":[{{"resources":[{{"address":"module.ecs.aws_lambda_function.worker","values":{{}}}}]}}]}}}}}}"#
+    )
+}
+
+#[test]
+fn plan_chi_duoc_chung_nhan_khi_chinh_lenh_ghi_ra() {
+    let p = Project::new("tf-plan", TF_ARCH);
+    p.write("infra/main.tf", TF_MAIN);
+    p.write("infra/real.json", &tf_plan(true));
+    // Chưa có plan: module registry chưa đọc được.
+    assert!(p.out(&["check", "--strict"]).contains("registry"));
+    assert!(p.out(&["verify", "tf_plan"]).contains("1/1 đạt"));
+    let out = p.out(&["check", "--strict"]);
+    assert!(out.contains("Worker -> Db"), "plan thật phải cho cạnh: {out}");
+    assert!(!out.contains("registry"), "{out}");
+    // Chạy lại với cùng nội dung plan: vẫn được chứng nhận (lệnh ghi lại file).
+    p.tick();
+    p.out(&["verify", "tf_plan"]);
+    assert!(p.out(&["check", "--strict"]).contains("Worker -> Db"));
+    // Agent commit sẵn một plan giả ở chỗ riêng của gốc `infra`, bỏ cạnh. Lệnh
+    // ghi plan không đụng tới nó: không chứng nhận, báo, không lùi về file khác.
+    p.write(".arch/tf-plan/infra.json", &tf_plan(false));
+    p.out(&["verify", "tf_plan"]);
+    let out = p.out(&["check", "--strict"]);
+    assert!(out.contains("chưa chứng nhận"), "{out}");
+    assert!(out.contains("registry"), "{out}");
+    assert!(!p.run(&["check", "--strict"]).status.success());
+}
+
+#[test]
+fn lenh_plan_cua_goc_nay_khong_chung_nhan_plan_goc_khac() {
+    // Gốc `a` và gốc `b` (có module registry). Mã chạy trong lúc plan gốc `a`
+    // (`data "external"`) chỉ `touch` một plan giả của gốc `b` commit sẵn.
+    let arch = "\
+service Worker from tf:b/module.ecs.aws_lambda_function.worker @human #accepted
+service Db from tf:b/aws_db_instance.main @human #accepted
+verify plan_a runs \"sh a/ext.sh && cp a/real.json .arch/tf-plan/a.json\" @human #accepted
+";
+    let p = Project::new("tf-plan-goc-khac", arch);
+    p.write("a/main.tf", "resource \"aws_sqs_queue\" \"q\" {}\n");
+    p.write("a/real.json", r#"{"configuration":{"root_module":{}}}"#);
+    // Đóng vai chương trình `data "external"` mà plan của gốc `a` chạy.
+    p.write("a/ext.sh", "touch .arch/tf-plan/b.json\n");
+    p.write("b/main.tf", TF_MAIN);
+    p.write(".arch/tf-plan/b.json", &tf_plan(false));
+    p.out(&["verify", "plan_a"]);
+    let out = p.out(&["check", "--strict"]);
+    assert!(out.contains("tf-plan/b.json") && out.contains("chưa chứng nhận"), "{out}");
+    assert!(out.contains("registry"), "{out}");
+}

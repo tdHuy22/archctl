@@ -101,6 +101,11 @@ ghi xong đã bị coi là cũ.
 
 Biên nhận nằm ở `.arch/.verified` và không vào git.
 
+Repo có file Terraform thì biên nhận ghi thêm băm nội dung mọi file `.tf`, cũng
+lấy trước khi lệnh chạy; lệnh có chữ `.arch/tf-plan` còn được ghi băm plan nó
+tạo ra, lấy sau khi chạy xong. Plan JSON chỉ được `check` dùng khi cả hai băm
+còn trùng: xem [infra.md](infra.md#lấp-phần-chưa-đọc-được-bằng-plan).
+
 ## Ai được chạy lệnh shell
 
 Đây là chỗ duy nhất trong archctl thực thi một lệnh, nên ranh giới phải rõ.
