@@ -20,6 +20,9 @@ PY_LIBS = {
     "rabbit": ("pika",),
     "redis": ("redis", "aioredis", "coredis"),
     "celery": ("celery",),
+    "nats": ("nats",),
+    "aio": ("aio_pika",),
+    "kombu": ("kombu",),
 }
 
 
@@ -109,11 +112,29 @@ class Py:
             if value.lineno != target.lineno or value.end_lineno != target.lineno:
                 self.record(name, None)
                 continue
-            # `r = ch.queue_declare(queue="jobs")` rồi `r.method.queue`.
-            if isinstance(value, ast.Call) and (dotted(value.func) or "").split(".")[-1] == "queue_declare":
-                q = Py.pick(value, "queue", 0)
+            # `r = ch.queue_declare(queue="jobs")` rồi `r.method.queue`; aio-pika
+            # `q = await ch.declare_queue("q")`, `x = await ch.declare_exchange("x")`;
+            # kombu `q = Queue("q")`, `x = Exchange("x")`.
+            call = value.value if isinstance(value, ast.Await) else value
+            field = {"queue_declare": "method.queue", "declare_queue": "@aioq", "declare_exchange": "@aiox",
+                     "Queue": "@kq", "Exchange": "@kx"}.get((dotted(call.func) or "").split(".")[-1]) \
+                if isinstance(call, ast.Call) else None
+            if field:
+                q = Py.pick(call, "queue", None)
+                q = q if q is not None else Py.pick(call, "name", 0)
                 qv = self.one(q, consts=False) if q is not None else None
-                self.record(f"{name}.method.queue", qv if qv and qv[0] == "fixed" and qv[1] else None)
+                self.record(f"{name}.{field}", qv if qv and qv[0] == "fixed" and qv[1] else None)
+                # kombu: exchange gắn với queue khai qua biến.
+                x = Py.pick(call, "exchange", 1) if field == "@kq" else None
+                if x is not None:
+                    if isinstance(x, ast.Call) and (dotted(x.func) or "").split(".")[-1] == "Exchange":
+                        a = Py.pick(x, "name", 0)
+                        ex = self.one(a, consts=False) if a is not None else None
+                    else:
+                        ex = self.one(x, consts=False)
+                        if ex[0] == "dynamic":
+                            ex = self.consts.get(f"{dotted(x)}.@kx") if dotted(x) else None
+                    self.record(f"{name}.@kqx", ex if ex and ex[0] == "fixed" and ex[1] else None)
             v = self.one(value, consts=False)
             self.record(name, v if v[0] in ("fixed", "env") else None)
         for name in bound:
@@ -137,6 +158,59 @@ class Py:
                     role = makers.get((dotted(v.func) or "").split(".")[-1])
                     if role:
                         self.clients[name.split(".")[-1]] = role
+        # Biến chắc là client NATS: gán từ `nats.connect(…)`, `nc.jetstream()`.
+        self.nats = set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Assign):
+                v = n.value.value if isinstance(n.value, ast.Await) else n.value
+                if not isinstance(v, ast.Call):
+                    continue
+                d = dotted(v.func) or ""
+                last = d.split(".")[-1]
+                if (last == "connect" and d in ("connect", "nats.connect")) or last == "jetstream":
+                    for t in n.targets:
+                        if dotted(t):
+                            self.nats.add(dotted(t).split(".")[-1])
+        # Chú thích kiểu: `bus: NATS`, `nc: nats.aio.client.Client` (tham số, gán).
+        for n in ast.walk(tree):
+            target, ann = None, None
+            if isinstance(n, ast.arg) and n.annotation is not None:
+                target, ann = n.arg, n.annotation
+            elif isinstance(n, ast.AnnAssign):
+                target, ann = dotted(n.target), n.annotation
+            t = dotted(ann) if ann is not None else None
+            if target and t and (t == "NATS" or t.endswith(".NATS") or t.startswith("nats.")):
+                self.nats.add(target.split(".")[-1])
+        # Biến chắc là client Redis (file import cả NATS lẫn Redis).
+        self.redis = set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Assign):
+                v = n.value.value if isinstance(n.value, ast.Await) else n.value
+                if isinstance(v, ast.Call) and (dotted(v.func) or "").split(".")[-1] in ("Redis", "StrictRedis", "from_url", "pubsub"):
+                    for t in n.targets:
+                        if dotted(t):
+                            self.redis.add(dotted(t).split(".")[-1])
+
+    def nats_call(self, f, m):
+        """Phương thức của client NATS: biến chắc là client, hay file không import
+        thư viện hàng đợi nào khác; `request` thì luôn phải chắc."""
+        shared = any(self.libs[k] for k in ("kafka", "rabbit", "redis", "aio", "kombu"))
+        return self.nats_sure(f) or (not shared and m != "request")
+
+    def nats_sure(self, f):
+        r = (dotted(f.value) or "").split(".")[-1] if isinstance(f, ast.Attribute) else ""
+        return r in ("nc", "js") or "nats" in r.lower() or r in self.nats
+
+    def other_sure(self, f, m):
+        """Lời gọi chắc là của hệ khác cùng tên phương thức với NATS."""
+        r = (dotted(f.value) or "").split(".")[-1] if isinstance(f, ast.Attribute) else ""
+        redis = self.libs["redis"] and (r in ("r", "rdb") or r.lower().startswith("redis") or r in self.redis)
+        kafka = self.libs["kafka"] and (self.kafka_client(f, "send") or self.kafka_client(f, "receive"))
+        head = dotted(f.value) or ""
+        aio = ("fixed", "") if head.endswith("default_exchange") else self.consts.get(f"{head}.@aiox")
+        rabbit = m == "publish" and (self.libs["aio"] or self.libs["kombu"]) and (
+            (self.libs["aio"] and aio) or (self.libs["kombu"] and self.kafka_client(f, "send")) or not self.libs["redis"])
+        return bool(redis or kafka or rabbit)
 
     def kafka_client(self, attr, role):
         """Biến trước phương thức chắc là client Kafka vai `role`."""
@@ -202,6 +276,32 @@ def exchange_name(v):
     return ("fixed", f"x:{v[1]}") if v[0] == "fixed" else (("env", f"x:{v[1]}") if v[0] == "env" else v)
 
 
+def subject_like(py, call):
+    """Đối số đầu là chuỗi cố định dạng subject NATS (không phải URL, động từ HTTP)."""
+    a = Py.pick(call, "subject", 0)
+    v = py.one(a) if a is not None else ("dynamic", "")
+    return v[0] == "fixed" and "." in v[1] and not any(c in v[1] for c in "/: ") \
+        and v[1] not in ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
+
+
+def nats_name(v):
+    """Subject của bên nhận NATS có đoạn `*`, `>` là mẫu."""
+    if v[0] == "fixed" and any(t in ("*", ">") for t in v[1].split(".")):
+        return ("pattern", v[1])
+    return v
+
+
+def kombu_ref(py, x, ctor, field):
+    """`Queue("q")`/`Exchange("x")` viết tại chỗ, biến gán từ nó, hay chuỗi."""
+    if isinstance(x, ast.Call) and (dotted(x.func) or "").split(".")[-1] == ctor:
+        a = Py.pick(x, "name", 0)
+        return py.one(a) if a is not None else ("dynamic", "")
+    v = py.one(x)
+    if v[0] == "dynamic" and dotted(x):
+        return py.consts.get(f"{dotted(x)}.{field}") or v
+    return v
+
+
 def rabbit_target(ex, key):
     if ex == ("fixed", ""):
         return queue_name(key) if key is not None else ("dynamic", "")
@@ -211,6 +311,10 @@ def rabbit_target(ex, key):
 def queue_method(libs, m):
     """Phương thức hàng đợi theo tên khi thư viện được import (tham chiếu không
     gọi, `getattr`)."""
+    if m in ("publish", "request") and libs["nats"]:
+        return ("nats", "send")
+    if m in ("subscribe", "pull_subscribe") and libs["nats"]:
+        return ("nats", "receive")
     if m in ("produce", "send", "send_and_wait") and libs["kafka"]:
         return ("kafka", "send")
     if m == "subscribe" and libs["kafka"]:
@@ -295,7 +399,62 @@ def python_sites(src):
             continue
         libs = py.libs
         args_n = len(n.args) + len(n.keywords)
-        if m == "send_task" and method:
+        if m in ("publish", "request") and method and libs["nats"] and py.nats_call(f, m):
+            a = Py.pick(n, "subject", 0)
+            if a is not None:
+                push(line, "nats", "send", [py.one(a)], True)
+        elif m in ("subscribe", "pull_subscribe") and method and libs["nats"] and py.nats_call(f, m):
+            a = Py.pick(n, "subject", 0)
+            if a is not None:
+                push(line, "nats", "receive", [nats_name(py.one(a))], True)
+        elif m in ("publish", "subscribe") and method and libs["nats"] and not py.other_sure(f, m):
+            push(line, "nats", "send" if m == "publish" else "receive", [("dynamic", "")], True)
+        elif m == "request" and method and libs["nats"] and subject_like(py, n):
+            push(line, "nats", "send", [("dynamic", "")], True)
+        elif m == "publish" and method and (libs["aio"] or libs["kombu"]) and (
+                (libs["aio"] and ((dotted(f.value) or "").endswith("default_exchange")
+                                  or py.consts.get(f"{dotted(f.value) or ''}.@aiox")))
+                or (libs["kombu"] and py.kafka_client(f, "send")) or not libs["redis"]):
+            key = Py.pick(n, "routing_key", 1)
+            keyv = py.one(key) if key is not None else None
+            head = dotted(f.value) or ""
+            aio = ("fixed", "") if head.endswith("default_exchange") else py.consts.get(f"{head}.@aiox")
+            if aio and libs["aio"]:
+                ex = aio
+            elif libs["kombu"]:
+                x = Py.pick(n, "exchange", None)
+                ex = ("fixed", "") if x is None else kombu_ref(py, x, "Exchange", "@kx")
+            else:
+                ex = ("dynamic", "")
+            push(line, "rabbitmq", "send", [rabbit_target(ex, keyv)], True)
+        elif m in ("consume", "iterator", "get") and method and libs["aio"]:
+            head = dotted(f.value) or ""
+            q = py.consts.get(f"{head}.@aioq")
+            if q:
+                push(line, "rabbitmq", "receive", [queue_name(q)], True)
+            elif m == "consume":
+                push(line, "rabbitmq", "receive", [("dynamic", "")], True)
+        elif m == "bind" and method and libs["aio"]:
+            x = Py.pick(n, "exchange", 0)
+            if x is not None:
+                v = py.one(x)
+                if v[0] == "dynamic":
+                    v = py.consts.get(f"{dotted(x)}.@aiox") or v
+                push(line, "rabbitmq", "receive", [exchange_name(v)], True)
+        elif m == "Consumer" and libs["kombu"]:
+            a = Py.pick(n, "queues", 0 if method else 1)
+            if a is not None:
+                for q in (a.elts if isinstance(a, (ast.List, ast.Tuple)) else [a]):
+                    push(line, "rabbitmq", "receive", [queue_name(kombu_ref(py, q, "Queue", "@kq"))], True)
+                    if not isinstance(q, ast.Call) and dotted(q) and py.consts.get(f"{dotted(q)}.@kqx"):
+                        push(line, "rabbitmq", "receive", [exchange_name(py.consts[f"{dotted(q)}.@kqx"])], True)
+                    if isinstance(q, ast.Call) and (dotted(q.func) or "").split(".")[-1] == "Queue":
+                        x = Py.pick(q, "exchange", 1)
+                        if x is not None:
+                            ex = kombu_ref(py, x, "Exchange", "@kx")
+                            if ex != ("fixed", ""):
+                                push(line, "rabbitmq", "receive", [exchange_name(ex)], True)
+        elif m == "send_task" and method:
             a = Py.pick(n, "name", 0)
             if a is not None:
                 push(line, "celery", "send", [py.one(a)], libs["celery"])
@@ -393,7 +552,8 @@ func has(specs []string, prefixes ...string) bool {
 
 type file struct {
 	fs                         *token.FileSet
-	kafka, rabbit, redis       bool
+	kafka, rabbit, redis, nats bool
+	natsVars, redisVars        map[string]bool
 	consts                     map[string]*val
 	out                        []site
 }
@@ -532,6 +692,22 @@ func field(cl *ast.CompositeLit, key string, deep bool) ast.Expr {
 	return nil
 }
 
+// Biểu thức là context: `ctx`, `context.Background()`, `r.Context()`.
+func isCtx(e ast.Expr) bool {
+	switch x := e.(type) {
+	case *ast.Ident:
+		return x.Name == "ctx"
+	case *ast.CallExpr:
+		if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
+			if id, ok := sel.X.(*ast.Ident); ok && id.Name == "context" {
+				return true
+			}
+			return sel.Sel.Name == "Context"
+		}
+	}
+	return false
+}
+
 func scan(root, rel string) ([]site, error) {
 	fs := token.NewFileSet()
 	af, err := parser.ParseFile(fs, root+"/"+rel, nil, 0)
@@ -548,6 +724,77 @@ func scan(root, rel string) ([]site, error) {
 	f.kafka = has(specs, "github.com/IBM/sarama", "github.com/Shopify/sarama", "github.com/segmentio/kafka-go", "github.com/confluentinc/confluent-kafka-go")
 	f.rabbit = has(specs, "github.com/rabbitmq/amqp091-go", "github.com/streadway/amqp")
 	f.redis = has(specs, "github.com/redis/go-redis", "github.com/go-redis/redis")
+	f.nats = has(specs, "github.com/nats-io/nats.go")
+	f.natsVars = map[string]bool{}
+	f.redisVars = map[string]bool{}
+	redisType := func(e ast.Expr) bool {
+		if st, ok := e.(*ast.StarExpr); ok {
+			e = st.X
+		}
+		se, ok := e.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		id, ok := se.X.(*ast.Ident)
+		return ok && id.Name == "redis" && (se.Sel.Name == "Client" || se.Sel.Name == "ClusterClient" || se.Sel.Name == "UniversalClient" || se.Sel.Name == "Ring")
+	}
+	natsType := func(e ast.Expr) bool {
+		if st, ok := e.(*ast.StarExpr); ok {
+			e = st.X
+		}
+		se, ok := e.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		id, ok := se.X.(*ast.Ident)
+		if !ok {
+			return false
+		}
+		return (id.Name == "nats" && (se.Sel.Name == "Conn" || se.Sel.Name == "EncodedConn" || se.Sel.Name == "JetStreamContext")) ||
+			(id.Name == "jetstream" && se.Sel.Name == "JetStream")
+	}
+	ast.Inspect(af, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.Field:
+			if natsType(x.Type) {
+				for _, nm := range x.Names {
+					f.natsVars[nm.Name] = true
+				}
+			}
+			if redisType(x.Type) && len(x.Names) > 0 {
+				f.redisVars[x.Names[len(x.Names)-1].Name] = true
+			}
+		case *ast.ValueSpec:
+			if x.Type != nil && natsType(x.Type) {
+				for _, nm := range x.Names {
+					f.natsVars[nm.Name] = true
+				}
+			}
+		case *ast.AssignStmt:
+			if len(x.Lhs) > 0 && len(x.Rhs) == 1 {
+				if c, ok := x.Rhs[0].(*ast.CallExpr); ok {
+					if se, ok := c.Fun.(*ast.SelectorExpr); ok {
+						q, _ := se.X.(*ast.Ident)
+						qn := ""
+						if q != nil {
+							qn = q.Name
+						}
+						if (qn == "nats" && se.Sel.Name == "Connect") || se.Sel.Name == "JetStream" || (qn == "jetstream" && se.Sel.Name == "New") {
+							if id, ok := x.Lhs[0].(*ast.Ident); ok {
+								f.natsVars[id.Name] = true
+							}
+						}
+						if se.Sel.Name == "NewClient" || se.Sel.Name == "NewClusterClient" || se.Sel.Name == "NewUniversalClient" {
+							if id, ok := x.Lhs[len(x.Lhs)-1].(*ast.Ident); ok && len(x.Lhs) == 1 {
+								f.redisVars[id.Name] = true
+							}
+						}
+					}
+				}
+			}
+		}
+		return true
+	})
 	record := func(name string, e ast.Expr) {
 		v := f.one(e, false)
 		var p *val
@@ -715,6 +962,56 @@ func scan(root, rel string) ([]site, error) {
 			}
 			a := v.Args
 			at := sel.Sel.Pos()
+			natsRecv := ""
+			if id, ok := sel.X.(*ast.Ident); ok {
+				natsRecv = id.Name
+			} else if s2, ok := sel.X.(*ast.SelectorExpr); ok {
+				natsRecv = s2.Sel.Name
+			}
+			natsSure := natsRecv == "nc" || natsRecv == "js" || strings.Contains(strings.ToLower(natsRecv), "nats") || f.natsVars[natsRecv]
+			natsOK := natsSure || !(f.kafka || f.rabbit || f.redis)
+			otherSure := (f.redis && (natsRecv == "r" || natsRecv == "rdb" || strings.HasPrefix(strings.ToLower(natsRecv), "redis") || f.redisVars[natsRecv])) ||
+				(f.kafka && (strings.Contains(strings.ToLower(natsRecv), "produc") || strings.Contains(strings.ToLower(natsRecv), "consum"))) ||
+				(f.rabbit && sel.Sel.Name == "Publish" && len(a) == 5)
+			if f.nats && !natsOK && !otherSure && (sel.Sel.Name == "Publish" || sel.Sel.Name == "Subscribe" || sel.Sel.Name == "Request" || sel.Sel.Name == "RequestWithContext") {
+				role := "send"
+				if sel.Sel.Name == "Subscribe" {
+					role = "receive"
+				}
+				f.push(at, "nats", role, []val{{kind: "dynamic"}}, true)
+				return true
+			}
+			if f.nats && natsOK {
+				// Subject: đối số đầu, hay đối số thứ hai khi đầu là ctx (JetStream mới).
+				subj := func() (val, bool) {
+					if len(a) == 0 {
+						return val{}, false
+					}
+					if len(a) >= 3 && isCtx(a[0]) {
+						return f.one(a[1], true), true
+					}
+					return f.one(a[0], true), true
+				}
+				switch sel.Sel.Name {
+				case "Publish", "Request", "PublishMsg", "RequestWithContext", "PublishAsync":
+					if s, ok := subj(); ok {
+						f.push(at, "nats", "send", []val{s}, true)
+					}
+					return true
+				case "Subscribe", "QueueSubscribe", "ChanSubscribe", "ChanQueueSubscribe", "SubscribeSync", "QueueSubscribeSync", "PullSubscribe":
+					if s, ok := subj(); ok {
+						if s.kind == "fixed" {
+							for _, t := range strings.Split(s.name, ".") {
+								if t == "*" || t == ">" {
+									s.kind = "pattern"
+								}
+							}
+						}
+						f.push(at, "nats", "receive", []val{s}, true)
+					}
+					return true
+				}
+			}
 			switch sel.Sel.Name {
 			case "ConsumePartition":
 				if len(a) > 0 {

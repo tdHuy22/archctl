@@ -1099,3 +1099,67 @@ fn plan_nhieu_lambda_va_url_khong_bac_hai() {
     assert!(t.elapsed().as_secs_f64() < 10.0, "{:?}", t.elapsed());
     assert!(violations(&rep).iter().any(|x| x.starts_with("NotLinked Internet -> F")), "{:?}", violations(&rep));
 }
+
+#[test]
+fn hang_doi_toi_ben_nhan_qua_terraform() {
+    let r = Repo::new("hang-doi");
+    r.write(
+        "main.tf",
+        r#"resource "aws_sqs_queue" "jobs" {}
+resource "aws_sns_topic" "events" {}
+resource "aws_lambda_function" "worker" {
+  image_uri = "acme/worker:1"
+}
+resource "aws_lambda_function" "api" {
+  image_uri = "acme/api:1"
+  environment {
+    variables = { QUEUE_URL = aws_sqs_queue.jobs.url }
+  }
+}
+resource "aws_lambda_event_source_mapping" "jobs" {
+  event_source_arn = aws_sqs_queue.jobs.arn
+  function_name    = aws_lambda_function.worker.arn
+}
+resource "aws_sns_topic_subscription" "to_jobs" {
+  topic_arn = aws_sns_topic.events.arn
+  protocol  = "sqs"
+  endpoint  = aws_sqs_queue.jobs.arn
+}
+resource "google_pubsub_topic" "orders" {}
+resource "google_cloud_run_v2_service" "billing" {
+  template {
+    containers {
+      image = "acme/billing:1"
+    }
+  }
+}
+resource "google_pubsub_subscription" "billing" {
+  topic = google_pubsub_topic.orders.id
+  push_config {
+    push_endpoint = google_cloud_run_v2_service.billing.uri
+  }
+}
+variable "fn" {}
+resource "aws_lambda_event_source_mapping" "x" {
+  event_source_arn = aws_sqs_queue.jobs.arn
+  function_name    = lookup({}, "a")
+}
+"#,
+    )
+    .rules(
+        "service Api from tf:aws_lambda_function.api\nservice Worker from tf:aws_lambda_function.worker\nservice Jobs from tf:aws_sqs_queue.jobs\nservice Events from tf:aws_sns_topic.events\nservice Orders from tf:google_pubsub_topic.orders\nservice Billing from tf:google_cloud_run_v2_service.billing\n",
+    );
+    let rep = r.report();
+    let v = violations(&rep);
+    for want in [
+        "NotLinked Api -> Jobs main.tf:9",
+        "NotLinked Jobs -> Worker main.tf:12",
+        "NotLinked Events -> Jobs main.tf:16",
+        "NotLinked Orders -> Billing main.tf:29",
+    ] {
+        assert!(v.contains(&want.to_string()), "{want}: {v:?}");
+    }
+    // Đích của event source mapping không đọc được: báo, không bỏ lặng lẽ.
+    let u: Vec<String> = rep.deploy_unread.iter().map(|u| u.why.clone()).collect();
+    assert!(u.iter().any(|x| x.contains("function_name") && x.contains("aws_lambda_event_source_mapping.x")), "{u:?}");
+}

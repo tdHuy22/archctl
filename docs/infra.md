@@ -208,6 +208,7 @@ server, rồi ghép theo tên đầy đủ `package.Service` đọc từ `.proto
 | Go | `pb.NewXClient(conn)` (`pb` là alias import, tên package trong `go_package`, hay gọi không tiền tố trong package sinh ra hoặc qua dot-import); `conn.Invoke(ctx, "/pkg.X/M", …)` | `pb.RegisterXServer(s, impl)`; `s.RegisterService(&pb.X_ServiceDesc, impl)` |
 | Node (JS, TS) | `new proto.pkg.X(addr, creds)` khi nạp `.proto` lúc chạy qua `@grpc/proto-loader`; `new svc.XClient(addr, creds)` của mã sinh grpc-tools | `server.addService(proto.pkg.X.service, impl)`; `server.addService(svc.XService, impl)` |
 | Rust (tonic) | `x_client::XClient`, kể cả `use pb::x_client::{XClient}` rồi `XClient::connect` | `x_server::XServer`, kể cả `use pb::x_server::{X, XServer}` rồi `XServer::new`; `impl X for S` với `X` lấy từ `x_server` là chỗ cài đặt |
+| C++ | `pkg::X::NewStub(channel)` | lớp kế thừa `pkg::X::Service` (cả `AsyncService`, `CallbackService`) là chỗ cài đặt; `builder.RegisterService(&impl)` trong cùng file là chỗ đăng ký cho mọi service cài đặt ở đó (tham số là biến, không mang tên service) |
 
 Chỗ nhắc tới cũng tính, không chỉ chỗ gọi: `S = kv_pb2_grpc.KVStub` rồi `S(ch)`
 vẫn là lời gọi. Node nạp `.proto` lúc chạy nên không lần được module: như Go,
@@ -217,8 +218,11 @@ là biến gán giữa chừng (`const shop = load(def).shop`). Một chữ tr�
 khi có đuôi `Client` (`new Foo()` là lớp thường). tonic viết tên service theo UpperCamel
 (`KV` thành `KvServer`), nên Rust ghép không phân biệt hoa thường, và module
 phải cùng tên với struct (`kv_server::KvServer`). File sinh ra
-(`*_grpc_pb.js`; Rust khai `mod x_server` và dùng `tonic::codegen`) không phải
-chỗ dùng. Server trong `#[cfg(test)] mod` của Rust là server giả. `XStub` không rõ module (re-export qua `__init__.py`,
+(`*_grpc_pb.js`, `*.grpc.pb.h`, `*.grpc.pb.cc`; Rust khai `mod x_server` và
+dùng `tonic::codegen`) không phải chỗ dùng. Namespace C++ đứng trước tên
+service (`shop::v1::KV`) là package viết bằng `::`, thu hẹp như chuỗi thuộc
+tính của Node; không có namespace thì chỉ tính khi một `.proto` trong repo khai
+service đó. Server trong `#[cfg(test)] mod` của Rust là server giả. `XStub` không rõ module (re-export qua `__init__.py`,
 `self.pb.KVStub`) chỉ tính khi một `.proto` trong repo khai service `X`: không
 thì `QuantStub()` của PyTorch cũng thành gRPC.
 
@@ -284,8 +288,9 @@ hệ và tên:
 | Hệ | Bên gửi | Bên nhận | Ghép theo |
 | --- | --- | --- | --- |
 | Kafka | Python: `produce(topic)` (confluent-kafka), `send`, `send_and_wait` (kafka-python, aiokafka); Go: `sarama.ProducerMessage{Topic:}`, `kafka.Message{Topic:}`, `kafka.Writer{Topic:}` (kafka-go, confluent); Node: `producer.send({topic})`, `sendBatch` (kafkajs) | Python: `subscribe([…])`, `KafkaConsumer("t", …)`; Go: `ConsumePartition`, `group.Consume(ctx, []string{…}, h)`, `kafka.ReaderConfig{Topic:, GroupTopics:}`, `SubscribeTopics`, `Subscribe`; Node: `consumer.subscribe({topic \| topics})` | topic |
-| RabbitMQ | Python: `basic_publish(exchange, routing_key)` (pika); Go: `Publish`, `PublishWithContext` (amqp091-go, streadway); Node: `sendToQueue(q)`, `publish(exchange, key)` (amqplib) | `basic_consume(queue)`, `Consume(queue, …)`, `consume(q)`; `queue_bind`, `QueueBind`, `bindQueue` nhận từ exchange | queue (qua exchange mặc định `""`), hay exchange |
+| RabbitMQ | Python: `basic_publish(exchange, routing_key)` (pika), `ch.default_exchange.publish(msg, routing_key=q)` và `ex.publish(…)` với `ex = await ch.declare_exchange("x")` (aio-pika), `producer.publish(body, routing_key=q, exchange=ex)` (kombu); Go: `Publish`, `PublishWithContext` (amqp091-go, streadway); Node: `sendToQueue(q)`, `publish(exchange, key)` (amqplib) | `basic_consume(queue)`, `Consume(queue, …)`, `consume(q)`; aio-pika: `q.consume`, `q.iterator`, `q.get` với `q = await ch.declare_queue("q")`; kombu: `Queue(…)` truyền vào `Consumer(…, queues=[…])`; `queue_bind`, `QueueBind`, `bindQueue`, `q.bind(ex)` (aio-pika), `Queue(…, exchange=ex)` (kombu) nhận từ exchange | queue (qua exchange mặc định `""`), hay exchange |
 | Redis pub/sub | `publish(kênh, tin)` (redis-py, go-redis, node-redis, ioredis) | `subscribe(kênh, …)`; `psubscribe("news.*")` khớp theo mẫu | kênh |
+| NATS | `publish(subject)`, `request(subject)` (nats-py, nats.js); Go: `Publish`, `Request`, `PublishMsg`, JetStream `js.Publish(ctx, subject, …)` (nats.go) | `subscribe(subject)`, `pull_subscribe` (nats-py); Go: `Subscribe`, `QueueSubscribe`, `ChanSubscribe`, `SubscribeSync`, `PullSubscribe`; nats.js: `subscribe(subject)`. Subject có `*` (một đoạn), `>` (phần còn lại) khớp theo mẫu. File import cả thư viện hàng đợi khác (Redis, Kafka, RabbitMQ) thì chỉ tính khi biến chắc là client NATS: tên `nc`, `js`, có chữ `nats`, gán từ `nats.connect(…)`, `nc.jetstream()`, `nats.Connect(…)`, `jetstream.New(…)`, hay khai kiểu `*nats.Conn`; `request` luôn phải chắc là client (trùng tên với HTTP) | subject |
 | Celery | `send_task("shop.tasks.charge")` | `@app.task`, `@shared_task` (tên mặc định `<module>.<hàm>` theo đường dẫn file; `name=` thì theo tên đó) | tên task |
 
 `app.task.delay()` và `apply_async()` gọi qua hàm đã import, nên cạnh đã có từ
@@ -542,6 +547,14 @@ Terraform chưa khai" khi chưa.
   `url`, `host`, `port`…), và mọi tham chiếu tới hàng đợi, topic (SQS, SNS,
   Kinesis, Pub/Sub, MQ): ARN của bucket hay khoá KMS không phải cạnh mạng.
   Khoá mang dấu hiệu bí mật (`…_PASSWORD`, `…_TOKEN`) không bao giờ thành cạnh.
+- **Từ hàng đợi tới bên nhận:** `aws_lambda_event_source_mapping` (SQS,
+  Kinesis, MSK: `event_source_arn` tới `function_name`, kể cả qua alias),
+  `aws_sns_topic_subscription` (`topic_arn` tới `endpoint`: SQS, Lambda, URL
+  của service), push subscription của `google_pubsub_subscription` (`topic`
+  tới `push_config.push_endpoint`, URL của Cloud Run). Hàng đợi khai trong luật
+  là service, nên service gửi vào `Jobs` qua biến môi trường cần
+  `link Api -> Jobs`, còn Lambda đọc `Jobs` cần `link Jobs -> Worker`. Pull
+  subscription không có bên nhận trong Terraform: bên nhận ở mã.
 - **Lối vào Internet:** ECS sau `aws_lb` không `internal` (qua listener hay
   listener rule và target group); ECS có `assign_public_ip = true` cùng nhóm
   bảo mật mở `0.0.0.0/0`; `aws_lambda_function_url` với
@@ -625,7 +638,7 @@ chứng nhận … chạy lại lệnh verify tạo nó`, không lùi về file 
 được tin như chính lệnh. Mã chạy trong lúc plan (`data "external"`, provider)
 có thể ghi đè chính file plan của gốc đó trước khi `verify` lấy băm: cùng loại
 với việc ghi đè `.arch/.verified` sau `archctl verify`, chỉ CI chặn được. `archctl scan` không dùng
-plan: nó in đúng những gì bộ đọc HCL thấy.
+plan trừ khi có `--plan`: không cờ thì nó in đúng những gì bộ đọc HCL thấy.
 
 Khi plan dùng được, cho module gốc đó:
 
@@ -821,11 +834,14 @@ trong các ngôn ngữ archctl chưa đọc (Java, C#, Ruby); đối số đầu
   `verify` gọi `terraform plan`, `kustomize build`, `helm template`,
   kube-linter, checkov.
 - Hàng đợi: hàm bọc tự viết quanh producer (`publish_event("orders")`), tên
-  topic từ module khác, kombu,
-  aio-pika, Faust, NATS, SQS, Pub/Sub của Google; Kafka subscribe theo regex
+  topic từ module khác, Faust; SQS, SNS, Pub/Sub của Google gọi trong mã (URL
+  hàng đợi thường đọc từ biến môi trường trỏ về Terraform, nơi cạnh đã được
+  đọc; bên nhận Pub/Sub dùng tên subscription); kombu `SimpleQueue`, kombu
+  `Producer(exchange=…)` rồi `publish` không ghi exchange (coi là exchange mặc
+  định); Kafka subscribe theo regex
   (báo "không ghép được"); routing key của exchange `topic`, `direct` (mọi
   queue gắn vào exchange đều coi là bên nhận).
-- gRPC của Java, C#, C++: đợt sau. Node qua
+- gRPC của Java, C#: archctl chưa đọc hai ngôn ngữ đó. Node qua
   `makeGenericClientConstructor`, nice-grpc, ts-proto; client Node gán vào biến
   rồi mới `new`.
 - Cổng trong NetworkPolicy, policy của CNI riêng (Cilium, Calico).

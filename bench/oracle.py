@@ -65,6 +65,7 @@ import ast
 import collections
 import concurrent.futures
 import json
+import shlex
 import os
 import re
 import shutil
@@ -918,9 +919,9 @@ def tf_plan_fresh(tofu, mirror, root, module_root, files, work):
     return str(out), None
 
 
-def archctl_tf(archctl, root):
+def archctl_tf(archctl, root, extra=()):
     """`{gốc: {địa chỉ: {"edges": [...], "exposed": bool, "image": ...}}}` theo `archctl scan`."""
-    p = subprocess.run([archctl, "scan", "--json", "--verbatim", "--root", str(root)],
+    p = subprocess.run([archctl, "scan", "--json", "--verbatim", *extra, "--root", str(root)],
                        capture_output=True, text=True, timeout=600)
     if p.returncode != 0:
         bench.die(f"archctl scan hỏng ở {root}: {p.stderr.strip()[-300:]}")
@@ -979,25 +980,72 @@ def compare_terraform(t, archctl, tofu, mirror, tf_python, root, workdir, refuse
                        capture_output=True, text=True, timeout=900)
     if p.returncode != 0:
         bench.die(f"thước đo Terraform hỏng: {p.stderr.strip()[-400:]}")
-    want_all, have_all = json.loads(p.stdout), archctl_tf(archctl, root)
+    want_all = json.loads(p.stdout)
+    # Bộ đọc HCL so với thước đo.
+    diff_tf(t, want_all, archctl_tf(archctl, root), plans, "")
+    # Đường plan: chính plan đó, qua `archctl verify` thật (biên nhận, chứng
+    # nhận từng file) rồi `scan --plan`, so với thước đo trên cùng plan. Bắt
+    # lỗi khi chép ngữ nghĩa của `tf_truth.py` sang Rust (`scan/tfplan.rs`).
+    have_plan, unread = archctl_tf_plan(archctl, root, files, plans, workdir)
+    # Mọi mục về chính file plan (cũ, không đọc được, không phải JSON, không phải
+    # file thường) và mọi lệch giữa hai nguồn: không lọc theo câu chữ, để lỗi
+    # mới của đường plan không lặng lẽ rơi về kết quả của bộ đọc HCL.
+    for file, why in unread:
+        if file.startswith(".arch/tf-plan") or why.startswith("plan") or "khác nhau" in why or "chứng nhận" in why:
+            t.note(f"đường plan: {file} {why[:160]}")
+    diff_tf(t, want_all, have_plan, plans, "đường plan: ")
+
+
+def diff_tf(t, want_all, have_all, plans, tag):
     for r in sorted(plans):
         want, have = want_all.get(r, {}), have_all.get(r, {})
         t.files += 1
         for a in sorted(set(want) - set(have)):
-            t.note(f"{r or '.'}: thiếu tài nguyên `{a}`")
+            t.note(f"{tag}{r or '.'}: thiếu tài nguyên `{a}`")
         for a in sorted(set(have) - set(want)):
-            t.note(f"{r or '.'}: thừa tài nguyên `{a}`")
+            t.note(f"{tag}{r or '.'}: thừa tài nguyên `{a}`")
         for a in sorted(set(want) & set(have)):
             w, h = want[a], have[a]
             t.imports += 1 + len(w["edges"])
             for x in sorted(set(w["edges"]) - set(h["edges"])):
-                t.note(f"{r or '.'}: thiếu cạnh `{a}` → `{x}`")
+                t.note(f"{tag}{r or '.'}: thiếu cạnh `{a}` → `{x}`")
             for x in sorted(set(h["edges"]) - set(w["edges"])):
-                t.note(f"{r or '.'}: thừa cạnh `{a}` → `{x}`")
+                t.note(f"{tag}{r or '.'}: thừa cạnh `{a}` → `{x}`")
             if w["exposed"] != h["exposed"]:
-                t.note(f"{r or '.'}: `{a}` lệch lối vào từ Internet: OpenTofu {w['exposed']}, archctl {h['exposed']}")
+                t.note(f"{tag}{r or '.'}: `{a}` lệch lối vào từ Internet: OpenTofu {w['exposed']}, archctl {h['exposed']}")
             if w["image"] is not None and w["image"] != h["image"]:
-                t.note(f"{r or '.'}: `{a}` lệch image")
+                t.note(f"{tag}{r or '.'}: `{a}` lệch image")
+
+
+def archctl_tf_plan(archctl, root, files, plans, workdir):
+    """Kết quả `scan --plan` trên bản chép các file `.tf`, với plan của từng gốc
+    đưa vào qua một lệnh `verify` thật; và các mục chưa đọc được."""
+    import shutil
+    work = Path(tempfile.mkdtemp(prefix="tfplan-", dir=workdir))
+    try:
+        for f in files:
+            dst = work / f
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(Path(root) / f, dst)
+        cmds = []
+        for r, plan in sorted(plans.items()):
+            target = ".arch/tf-plan.json" if r == "" else f".arch/tf-plan/{r}.json"
+            cmds.append(f"mkdir -p {shlex.quote(str(Path(target).parent))} && cp {shlex.quote(str(Path(plan).resolve()))} {target}")
+        (work / ".arch").mkdir(exist_ok=True)
+        (work / ".arch" / "system.arch").write_text(f'verify tf_plan runs "{" && ".join(cmds)}"\n')
+        p = subprocess.run([archctl, "verify", "tf_plan", "--quiet", "--root", str(work)], capture_output=True, text=True, timeout=600)
+        if p.returncode != 0:
+            bench.die(f"archctl verify tf_plan hỏng ở {root}: {(p.stdout + p.stderr).strip()[-300:]}")
+        # Plan phải được chứng nhận đủ, không thì `scan --plan` lặng lẽ in lại
+        # đúng bộ đọc HCL và "khớp" không chứng minh gì.
+        certified = (work / ".arch" / ".verified").read_text().count(" plan=")
+        problems = [] if certified == len(plans) else [("", f"archctl verify chứng nhận {certified}/{len(plans)} file plan")]
+        out = archctl_tf(archctl, work, ["--plan"])
+        q = subprocess.run([archctl, "scan", "--json", "--plan", "--root", str(work)], capture_output=True, text=True, timeout=600)
+        unread = [(u.get("file", ""), u.get("why", "")) for u in json.loads(q.stdout)["deploy"].get("unread", [])]
+        return out, problems + unread
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def build_kustomize(cache):

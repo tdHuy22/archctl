@@ -124,12 +124,12 @@ mọi gói ghim `==` kèm sha256; grpcio-tools (`protoc`) cũng vậy. `helm` b�
 tải từ get.helm.sh, `kustomize` bản ghim tải từ bản phát hành trên GitHub, OpenTofu và provider
 aws, google bản ghim, đều kiểm sha256. `--require
 clang,node,go,syn,ipython,deploy,proto,helm,kustomize,terraform` để ngày thiếu một cái thì bước này
-đỏ chứ không lặng lẽ bỏ qua. Ba mươi tám trong sáu mươi kiểu phá của
+đỏ chứ không lặng lẽ bỏ qua. Bốn mươi trong sáu mươi hai kiểu phá của
 `sabotage.py` nhắm vào bước này: ba ở import Python, hai ở tên máy trong chuỗi
 của mã Python, ba ở import Rust, hai ở
 notebook, bốn ở cạnh Python ↔ native, bốn ở compose và Dockerfile, bảy ở
 manifest Kubernetes, cạnh qua Service, NetworkPolicy và lối vào từ Internet,
-một ở manifest dựng từ chart Helm, ba ở bản dựng Kustomize, bốn ở service Terraform, hai ở `.proto`,
+một ở manifest dựng từ chart Helm, ba ở bản dựng Kustomize, sáu ở service Terraform (hai ở đường plan), hai ở `.proto`,
 ba ở chỗ gửi, nhận qua hàng đợi. Mười hai kiểu khác nhắm vào
 phần hạ tầng của chính bộ đo (năm trên compose gồm một ở tên máy viết trong mã,
 bảy trên manifest Kubernetes gồm hai ở NetworkPolicy, một ở lối vào, một ở

@@ -562,7 +562,7 @@ git, `cargo clean` dọn.
    37 gốc, bộ mẫu shop 14, refused bị từ chối đúng); logs-t7 sabotage 79
    kiểu 0 trượt (60 kiểu khai trong CI cộng các lượt "không phá"), `verify`
    3/3, `check --strict` 0. Còn lại đợt 7: `kubernetes_*` qua Terraform.
-   11.1 đã lên main (e9694b3). 12.1 XONG, CHƯA COMMIT (chờ bạn bảo): `scan/tfplan.rs` (mới), `deploy.rs` (`apply_plans`, `merge_plan`, `tf_hash`, `plan_files`, `file_hash`, `modules_hash`, `names_plan`), `verify.rs` (biên nhận `tf=`, `plan=<file>#<băm>`, `mods=`), `setup.rs` (cmd_verify xoá trước file plan lệnh nêu rồi chứng nhận; .gitignore `**/.arch/tf-plan*`), `check.rs` (`plan_verifies`), `terraform.rs` (`plan_covers`, decls/calls/dirs), `jsonc.rs` (trần độ sâu 256, sửa tràn stack đã tái hiện), test `tests/terraform.rs` (plan_*), `archctl/tests/verify.rs`, `cli.rs`; TM-56..60 đã có; docs/infra.md, docs/verify.md. Review opus 4 vòng, lượt cuối không phát hiện. Biên nhận 2026-10-22 (logs-p4): test workspace, clippy, MSRV, release, bench 32 repo 0 bất nhất, oracle khớp hết, sabotage, verify, check --strict. Việc tiếp: commit khi bạn bảo (git add đúng file, không add bench/__pycache__), đẩy nhánh thử, CI xanh thì lên main. Còn để ngỏ: oracle/sabotage chưa có kiểu đo riêng cho đường plan (test tích hợp phủ); `scan` không dùng plan.
+   Mốc 13 (đo đường plan), 14 (hàng đợi: Terraform tới bên nhận; NATS, aio-pika, kombu), 15.1 (gRPC C++) XONG 2026-10-23, CHƯA COMMIT: review opus 3 lượt (11 phát hiện đã sửa); biên nhận logs-m15e: cargo test workspace, clippy, MSRV 1.88, release, bench 32 repo 0 bất nhất, oracle khớp hết, sabotage đạt, verify, check --strict. Việc tiếp: chờ bạn (1) cho commit và push (git add đúng file, không add bench/__pycache__), (2) hai câu chốt ở https://claude.ai/artifact/RNv54ynUhotqveFqnTnrEa : gRPC Java/C#, đồ thị pipeline học máy. Ghi chú còn mở: `@kqx` của kombu phụ thuộc thứ tự khai trong file (khớp oracle, hiếm).
    d. Chạy lần lượt, mỗi lệnh qua `receipt.py run --`, dừng ở lệnh trượt:
       `cargo test --workspace`; `cargo clippy --workspace --all-targets --
       -D warnings`; `cargo +1.88 check --workspace --tests`; `cargo build
@@ -849,3 +849,22 @@ không có `link` là vi phạm, có `link` mà cụm chặn là cảnh báo (`-
 ### Tầng hạ tầng, đợt 8: Terraform qua plan
 
 - [x] Đọc plan JSON do `verify tf_plan` tạo, chỉ khi băm `.tf` trong biên nhận còn khớp; lấp phần "chưa đọc được" của đợt 7; báo plan cũ, báo lệch giữa hai nguồn (2026-10-22, chưa commit; review opus 4 vòng, 7 phát hiện đã sửa; biên nhận đủ).
+
+### Khép đợt 8: đo đường plan
+
+- [x] Oracle đo đường plan: `scan --plan` dùng plan đã chứng nhận như `check`; oracle chạy `archctl verify` với lệnh chép plan OpenTofu vào `.arch/tf-plan/`, so kết quả có plan với thước đo `tf_truth.py` trên cùng plan (bắt lỗi khi chép ngữ nghĩa sang Rust) (2026-10-23, chưa commit; review opus 3 lượt; biên nhận đủ logs-m15e).
+- [x] Sabotage: kiểu phá `tf-plan-edge` (đường plan mất cạnh) và `tf-plan-uncertified` (biên nhận mất chứng nhận plan); plan cũ và plan giả đã có test tích hợp (2026-10-23, chưa commit; review opus 3 lượt; biên nhận đủ logs-m15e).
+
+### Nâng cấp: hàng đợi trên cloud
+
+- [x] Terraform: cạnh từ hàng đợi tới bên nhận: `aws_lambda_event_source_mapping` (SQS, Kinesis, MSK), `aws_sns_topic_subscription` (endpoint là SQS, Lambda, URL của service), push subscription của `google_pubsub_subscription` (endpoint là URL của Cloud Run). Hàng đợi khai trong luật là service (câu 3b đã chốt), nên `Api -> Jobs` (đã có) cộng `Jobs -> Worker` (mới). Thước đo `tf_truth.py`, bộ mẫu, test (2026-10-23, chưa commit; review opus 3 lượt; biên nhận đủ logs-m15e).
+- [x] Mã: NATS (nats-py, nats.go, nats.js) ghép theo subject như Redis; aio-pika, kombu vào hệ RabbitMQ. Thước đo `queue_truth.py`, bộ mẫu `fixtures/queues`, test. Không làm: SQS, Pub/Sub trong mã (URL từ env trỏ về Terraform, bên nhận dùng tên subscription), Faust (2026-10-23, chưa commit; review opus 3 lượt; biên nhận đủ logs-m15e).
+
+### Nâng cấp: gRPC Java, C#, C++
+
+- [x] gRPC C++: `X::NewStub(`, lớp kế thừa `X::Service`, `RegisterService(` (C++ đã nằm trong bộ quét) (2026-10-23, chưa commit; review opus 3 lượt; biên nhận đủ logs-m15e).
+- [ ] @ban gRPC Java (`XGrpc.newBlockingStub`, `extends XGrpc.XImplBase`), C# (`new X.XClient(`, `: X.XBase`): archctl chưa đọc Java, C#; thêm hai ngôn ngữ vào bộ quét (chỉ để dò gRPC, hay cả import) là quyết định phạm vi, chờ bạn chọn (trang https://claude.ai/artifact/RNv54ynUhotqveFqnTnrEa câu 1; khuyên A: chỉ dò gRPC, báo rõ import chưa kiểm, cho bộ đo tải công cụ Java, C# bản ghim).
+
+### Đồ thị pipeline học máy
+
+- [ ] @ban Chốt cách kiểm đồ thị LangGraph, Airflow, dvc (trang https://claude.ai/artifact/RNv54ynUhotqveFqnTnrEa câu 2; khuyên D: dò đồ thị khai trong mã thành cạnh cần `allow`, cộng công thức `verify` chụp đồ thị trong tài liệu).

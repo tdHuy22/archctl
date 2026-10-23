@@ -184,6 +184,17 @@ bộ trích, nên một lỗi trong bộ trích làm cả hai sai giống nhau m
   cạnh, lối vào, NetworkPolicy của `k8s_truth.py` ở thư mục gốc; cạnh của bản
   dựng so không kèm file, dòng. Bộ mẫu `fixtures/kustomize-*` phủ các phép biến
   đổi repo thật không dùng; chỉ so khi không có `--only`.
+- Terraform: mỗi module gốc được plan bằng OpenTofu bản ghim cùng provider
+  aws, google bản ghim (kiểm sha256, chỉ cài từ mirror, khoá giả, môi trường
+  sạch; module không cục bộ, `data "external"`, provisioner thì không plan; chỉ
+  khi `--require terraform`; CI bật). [tf_truth.py](tf_truth.py) rút service,
+  cạnh, lối vào, image từ plan JSON (`locals` đọc bằng python-hcl2), theo đặc tả
+  trong docs/infra.md, rồi so hai lần: với `archctl scan` (bộ đọc HCL), và với
+  `archctl scan --plan` sau khi plan được đưa vào qua một lệnh `verify` thật
+  (đường plan; biên nhận phải chứng nhận đủ file plan). Bộ mẫu
+  `fixtures/terraform-*` phủ module có đối số, output, ECS qua `jsonencode`,
+  cạnh qua bộ cân bằng tải, cơ sở dữ liệu, hàng đợi; `terraform-refused` phải
+  bị từ chối plan. Chỉ so khi không có `--only`.
 - Tên máy trong chuỗi: `(dòng, máy:cổng)` mà `scan --json` đọc từ chuỗi của mọi
   file Python và Go được tính lại bằng [code_hosts.py](code_hosts.py). Chuỗi và
   chỗ nó đứng (tham số, gán có kiểu hay không, khoá dict, giá trị mặc định của
@@ -293,7 +304,7 @@ rabbitmq-tutorials `Python -> Go`, `Go -> JavascriptNodejs`, `JavascriptNodejs
 dòng, thêm giả), đối chiếu bằng `queue_truth.py` (`ast` cho Python, `go/ast`
 cho Go). CI chạy bước này sau bộ đo, với `--rust-repo ripgrep
 --notebook-repo matplotlib --deploy-repo example-voting-app --k8s-repo
-microservices-demo --proto-repo vllm --tf-repo terraform-docs-samples`: sáu mươi kiểu phá.
+microservices-demo --proto-repo vllm --tf-repo terraform-docs-samples`: sáu mươi hai kiểu phá.
 
 Nó có mặt vì bộ đo này từng nằm ngoài git, và lúc đưa vào, đọc lại thì bốn
 phép kiểm không kiểm gì: một cái chỉ xét file có tồn tại vì vế sau của `or`

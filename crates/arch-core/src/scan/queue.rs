@@ -8,8 +8,9 @@
 //! ```
 //!
 //! Dò chỗ gửi và chỗ nhận theo token, rồi `check` ghép chúng theo hệ và tên:
-//! Kafka theo topic, RabbitMQ theo queue (exchange mặc định) hay exchange,
-//! Redis pub/sub theo kênh (cả mẫu của `psubscribe`), Celery theo tên task.
+//! Kafka theo topic, RabbitMQ theo queue (exchange mặc định) hay exchange
+//! (pika, aio-pika, kombu, amqp091-go, amqplib), Redis pub/sub theo kênh (cả
+//! mẫu của `psubscribe`), NATS theo subject (cả `*`, `>`), Celery theo tên task.
 //!
 //! Lời gọi có tên chung chung (`send`, `publish`, `subscribe`, `Consume`) chỉ
 //! được tính khi file import thư viện của hệ đó; lời gọi đặc trưng
@@ -19,11 +20,11 @@
 //! và `check` báo "chưa ghép", không đoán (TM-40).
 //!
 //! Không nhận ra (ghi trong `docs/infra.md`): hàm bọc tự viết quanh producer,
-//! tên topic từ module khác, aio-pika, kombu, Faust, NATS.
+//! tên topic từ module khác, Faust, SQS, Pub/Sub gọi trong mã.
 
 use super::lexer::{Tok, Token};
 use super::{Import, Lang};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Trần số chỗ gửi, nhận trong một file (TM-42).
 pub const MAX_PER_FILE: usize = 10_000;
@@ -36,6 +37,8 @@ pub enum System {
     /// Redis pub/sub.
     Redis,
     Celery,
+    /// NATS, cả JetStream: ghép theo subject.
+    Nats,
 }
 
 impl System {
@@ -45,6 +48,7 @@ impl System {
             System::Rabbit => "rabbitmq",
             System::Redis => "redis",
             System::Celery => "celery",
+            System::Nats => "nats",
         }
     }
 }
@@ -102,6 +106,10 @@ struct Libs {
     rabbit: bool,
     redis: bool,
     celery: bool,
+    nats: bool,
+    /// aio-pika, kombu: hai thư viện RabbitMQ khác pika.
+    aio: bool,
+    kombu: bool,
 }
 
 fn libs(lang: Lang, imports: &[Import]) -> Libs {
@@ -119,6 +127,9 @@ fn libs(lang: Lang, imports: &[Import]) -> Libs {
             rabbit: has(&["pika"]),
             redis: has(&["redis", "aioredis", "coredis"]),
             celery: has(&["celery"]),
+            nats: has(&["nats"]),
+            aio: has(&["aio_pika"]),
+            kombu: has(&["kombu"]),
         },
         Lang::Go => Libs {
             kafka: has(&[
@@ -130,14 +141,20 @@ fn libs(lang: Lang, imports: &[Import]) -> Libs {
             rabbit: has(&["github.com/rabbitmq/amqp091-go", "github.com/streadway/amqp"]),
             redis: has(&["github.com/redis/go-redis", "github.com/go-redis/redis"]),
             celery: false,
+            nats: has(&["github.com/nats-io/nats.go"]),
+            aio: false,
+            kombu: false,
         },
         Lang::TypeScript => Libs {
             kafka: has(&["kafkajs", "@confluentinc/kafka-javascript"]),
             rabbit: has(&["amqplib", "amqp-connection-manager"]),
             redis: has(&["redis", "ioredis", "@redis/client"]),
             celery: false,
+            nats: has(&["nats", "@nats-io/transport-node", "@nats-io/nats-core", "@nats-io/jetstream"]),
+            aio: false,
+            kombu: false,
         },
-        Lang::C | Lang::Rust => Libs { kafka: false, rabbit: false, redis: false, celery: false },
+        Lang::C | Lang::Rust => Libs { kafka: false, rabbit: false, redis: false, celery: false, nats: false, aio: false, kombu: false },
     }
 }
 
@@ -147,9 +164,15 @@ pub fn scan(toks: &[Token], lang: Lang, imports: &[Import]) -> Queues {
         return Queues::default();
     }
     let (close, depth) = brackets(toks, lang);
-    let mut cx = Cx { toks, lang, consts: HashMap::new(), close, depth, clients: HashMap::new() };
+    let mut cx = Cx { toks, lang, consts: HashMap::new(), close, depth, clients: HashMap::new(), nats: HashSet::new(), redis: HashSet::new() };
     cx.consts = consts(&cx);
     cx.clients = clients(&cx);
+    if libs.nats {
+        cx.nats = nats_clients(&cx);
+        if libs.redis {
+            cx.redis = redis_clients(&cx);
+        }
+    }
     let mut out = Queues::default();
     let mut push = |out: &mut Queues, system, role, names: Vec<Name>, line, shown: &str, strong: bool| {
         for name in names {
@@ -204,6 +227,11 @@ struct Cx<'a> {
     /// Biến gán từ hàm dựng producer, consumer Kafka (đoạn cuối của tên):
     /// `p = KafkaProducer(…)`, `const consumer = kafka.consumer(…)`.
     clients: HashMap<String, Role>,
+    /// Biến chắc là client NATS: gán từ `nats.connect(…)`, `nc.jetstream()`,
+    /// `nats.Connect(…)`, `jetstream.New(…)`, hay (Go) khai kiểu `*nats.Conn`.
+    nats: HashSet<String>,
+    /// Biến chắc là client Redis (chỉ tính khi file import cả NATS).
+    redis: HashSet<String>,
 }
 
 /// Bảng ngoặc khớp và độ sâu ngoặc của từng token, một lượt bằng ngăn xếp.
@@ -621,12 +649,29 @@ fn consts(cx: &Cx) -> HashMap<String, Option<Name>> {
         // `r.method.queue` (Python). Tên rỗng là queue do server đặt tên.
         if let Some((field, call)) = declared_queue(cx, eq) {
             let args = cx.items(call + 1);
-            let q = cx.pick(&args, "queue", Some(0)).map(|x| cx.one(x.a, x.b));
+            let q = cx.pick(&args, "queue", None).or_else(|| cx.pick(&args, "name", Some(0))).map(|x| cx.one(x.a, x.b));
             let value = match q {
                 Some(Name::Fixed(n)) if !n.is_empty() => Some(Name::Fixed(n)),
                 _ => None,
             };
             set(&mut out, format!("{name}.{field}"), value);
+            // kombu: exchange gắn với queue (`Queue("q", exchange=media)`):
+            // chuỗi, `Exchange("x")` tại chỗ, hay biến đã gán từ `Exchange`.
+            if field == "@kq"
+                && let Some(x) = cx.pick(&args, "exchange", Some(1))
+            {
+                let ex = if cx.callee(x.a).is_some_and(|(c, _)| c == "Exchange") {
+                    let inner = cx.items(x.a + 1);
+                    cx.pick(&inner, "name", Some(0)).map(|n| cx.one(n.a, n.b))
+                } else {
+                    match cx.one(x.a, x.b) {
+                        Name::Dynamic(w) => out.get(&format!("{w}.@kx")).cloned().flatten(),
+                        other => Some(other),
+                    }
+                };
+                let ex = ex.filter(|e| matches!(e, Name::Fixed(x) if !x.is_empty()));
+                set(&mut out, format!("{name}.@kqx"), ex);
+            }
         }
         // `a, b := …`: không tên nào cố định.
         if cx.punct(i + 1, ',') {
@@ -937,6 +982,120 @@ fn after_return_type(cx: &Cx, c: usize) -> usize {
 /// Biến gán từ hàm dựng producer, consumer Kafka: `X = KafkaProducer(`,
 /// `self.p = Producer(` (Python), `const X = kafka.producer(`,
 /// `this.consumer = kafka.consumer(` (JS). Tên lấy đoạn cuối.
+/// Biến chắc là client Redis (đoạn cuối của tên): gán từ `redis.Redis(…)`,
+/// `Redis.from_url(…)`, `createClient(…)`, `new Redis(…)`, `redis.NewClient(…)`,
+/// hay (Go) khai kiểu `*redis.Client`. Để file import cả NATS lẫn Redis biết
+/// `publish` của ai.
+fn redis_clients(cx: &Cx) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for i in 1..cx.toks.len() {
+        if cx.lang == Lang::Go
+            && cx.word(i) == Some("redis")
+            && cx.punct(i + 1, '.')
+            && matches!(cx.word(i + 2), Some("Client" | "ClusterClient" | "UniversalClient" | "Ring"))
+        {
+            let at = if cx.punct(i - 1, '*') { i.checked_sub(2) } else { Some(i - 1) };
+            if let Some(name) = at.and_then(|a| cx.word(a)) {
+                out.insert(name.to_string());
+            }
+            continue;
+        }
+        if !cx.punct(i, '=') || cx.punct(i + 1, '=') {
+            continue;
+        }
+        let mut at = i - 1;
+        if cx.lang == Lang::Go && cx.punct(at, ':') {
+            at = match at.checked_sub(1) {
+                Some(a) => a,
+                None => continue,
+            };
+        }
+        let Some(name) = cx.word(at) else { continue };
+        let name = name.rsplit('.').next().unwrap_or(name);
+        let limit = (i + 8).min(cx.toks.len());
+        let Some(call) = (i + 1..limit).find(|&j| cx.callee(j).is_some()) else { continue };
+        let Some((m, _)) = cx.callee(call) else { continue };
+        if matches!(m, "Redis" | "StrictRedis" | "from_url" | "pubsub" | "createClient" | "NewClient" | "NewClusterClient" | "NewUniversalClient") {
+            out.insert(name.to_string());
+        }
+    }
+    out
+}
+
+/// Biến chắc là client NATS (đoạn cuối của tên).
+fn nats_clients(cx: &Cx) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for i in 1..cx.toks.len() {
+        // Go: `nc *nats.Conn`, `js nats.JetStreamContext`, `js jetstream.JetStream`
+        // (tham số, trường, `var`).
+        if cx.lang == Lang::Go
+            && let Some(t) = cx.word(i)
+            && cx.punct(i + 1, '.')
+            && ((t == "nats" && matches!(cx.word(i + 2), Some("Conn" | "EncodedConn" | "JetStreamContext")))
+                || (t == "jetstream" && cx.word(i + 2) == Some("JetStream")))
+        {
+            // `a, b *nats.Conn`: mọi tên đứng trước kiểu (tối đa 16).
+            let mut at = if cx.punct(i - 1, '*') { i.checked_sub(2) } else { Some(i - 1) };
+            let mut n = 0;
+            while let Some(a) = at
+                && let Some(name) = cx.word(a)
+                && n < 16
+            {
+                out.insert(name.to_string());
+                n += 1;
+                at = (a >= 2 && cx.punct(a - 1, ',')).then(|| a - 2);
+            }
+            continue;
+        }
+        // Python: chú thích kiểu `bus: NATS`, `nc: nats.aio.client.Client`.
+        if cx.lang == Lang::Python
+            && cx.punct(i, ':')
+            && let (Some(name), Some(t)) = (cx.word(i - 1), cx.word(i + 1))
+            && (t == "NATS" || t.ends_with(".NATS") || t.starts_with("nats."))
+        {
+            out.insert(name.rsplit('.').next().unwrap_or(name).to_string());
+            continue;
+        }
+        if !cx.punct(i, '=') || cx.punct(i + 1, '=') {
+            continue;
+        }
+        // Tên bên trái: `nc = …`, `nc := …`, `nc, err := …`, `const nc = …`.
+        let mut at = i - 1;
+        if cx.lang == Lang::Go && cx.punct(at, ':') {
+            at = match at.checked_sub(1) {
+                Some(a) => a,
+                None => continue,
+            };
+        }
+        if at >= 2 && cx.punct(at - 1, ',') && cx.word(at).is_some() {
+            at -= 2;
+        }
+        let Some(name) = cx.word(at) else { continue };
+        let name = name.rsplit('.').next().unwrap_or(name);
+        let limit = (i + 8).min(cx.toks.len());
+        let Some(call) = (i + 1..limit).find(|&j| cx.callee(j).is_some()) else { continue };
+        let direct = (i + 1..call).all(|k| {
+            cx.punct(k, '.') || matches!(cx.word(k), Some("await" | "new")) || (cx.word(k).is_some() && cx.punct(k + 1, '.'))
+        });
+        let Some((m, _)) = cx.callee(call) else { continue };
+        let qual = cx.word(call).and_then(|w| w.rsplit_once('.').map(|(h, _)| h)).or_else(|| {
+            (call >= 2 && cx.punct(call - 1, '.')).then(|| cx.word(call - 2)).flatten()
+        });
+        let maker = match (cx.lang, m) {
+            (Lang::Go, "Connect") => qual == Some("nats"),
+            (Lang::Go, "New") => qual == Some("jetstream"),
+            (Lang::Go, "JetStream") => true,
+            (Lang::Python | Lang::TypeScript, "connect") => qual.is_none_or(|q| q == "nats"),
+            (Lang::Python, "jetstream") | (Lang::TypeScript, "jetstream") => true,
+            _ => false,
+        };
+        if direct && maker {
+            out.insert(name.to_string());
+        }
+    }
+    out
+}
+
 fn clients(cx: &Cx) -> HashMap<String, Role> {
     let mut out = HashMap::new();
     if cx.lang == Lang::Go {
@@ -1009,6 +1168,88 @@ impl Cx<'_> {
         }
     }
 
+    /// Phương thức ở `i` là của client NATS: biến đứng trước chắc là client
+    /// (tên `nc`, `js`, có chữ `nats`, hay gán từ hàm dựng), hoặc file không
+    /// import thư viện hàng đợi nào khác dùng chung tên phương thức đó.
+    /// `request` thì luôn phải chắc (trùng tên với HTTP: `requests.request`).
+    fn nats_call(&self, i: usize, libs: &Libs, m: &str) -> bool {
+        let shared = libs.kafka || libs.rabbit || libs.redis || libs.aio || libs.kombu;
+        // `request` của Python, JS trùng tên với HTTP (`requests.request`);
+        // Go không có `X.Request(` hay gặp nên theo luật của `Publish`.
+        self.nats_sure(i) || (!shared && m != "request")
+    }
+
+    /// Đối số đầu là chuỗi cố định có dạng subject NATS: có `.`, không có
+    /// `/`, `:`, khoảng trắng, không phải động từ HTTP.
+    fn subject_like(&self, open: usize) -> bool {
+        let args = self.items(open);
+        let Some(a) = self.pick(&args, "subject", Some(0)) else { return false };
+        matches!(self.one(a.a, a.b), Name::Fixed(s) if s.contains('.') && !s.contains(['/', ':', ' '])
+            && !matches!(s.as_str(), "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"))
+    }
+
+    /// Đối số đầu là hàm (`v => …`, `function`, `async`): callback của RxJS.
+    fn callback_first(&self, open: usize) -> bool {
+        let args = self.items(open);
+        let Some(a) = args.first() else { return false };
+        matches!(self.word(a.a), Some("function" | "async")) || (a.a..a.b).any(|j| self.punct(j, '=') && self.punct(j + 1, '>'))
+    }
+
+    fn nats_sure(&self, i: usize) -> bool {
+        self.receiver(i).is_some_and(|r| {
+            let lower = r.to_ascii_lowercase();
+            matches!(r, "nc" | "js") || lower.contains("nats") || self.nats.contains(r)
+        })
+    }
+
+    /// Lời gọi `m` ở `i`, mở ngoặc ở `open`, chắc là của một hệ khác cùng tên
+    /// phương thức với NATS (Redis, Kafka, RabbitMQ): biến là client đã biết
+    /// của hệ đó, hay số đối số chỉ hệ đó có.
+    fn other_sure(&self, i: usize, open: usize, libs: &Libs, m: &str) -> bool {
+        let r = self.receiver(i).unwrap_or("");
+        let lower = r.to_ascii_lowercase();
+        let n = self.items(open).len();
+        let redis = libs.redis && (matches!(r, "r" | "rdb") || lower.starts_with("redis") || self.redis.contains(r));
+        let kafka = libs.kafka && (self.kafka_client(i, Role::Send) || self.kafka_client(i, Role::Receive));
+        let rabbit = match self.lang {
+            Lang::Go => libs.rabbit && matches!(m, "Publish") && n == 5,
+            Lang::TypeScript => libs.rabbit && m == "publish" && n >= 3,
+            _ => false,
+        };
+        redis || kafka || rabbit || ((libs.aio || libs.kombu) && m == "publish" && self.rabbit_publish(i, libs))
+    }
+
+    /// `publish` ở `i` là của aio-pika, kombu: biến đứng trước là exchange của
+    /// aio-pika, hay chắc là producer kombu; không thì chỉ khi file không import
+    /// Redis (`r.publish(kênh, tin)` cùng tên).
+    fn rabbit_publish(&self, i: usize, libs: &Libs) -> bool {
+        let head = self.word(i).and_then(|w| w.rsplit_once('.')).map(|(h, _)| h).unwrap_or("");
+        let aio = libs.aio && (head.ends_with("default_exchange") || self.declared(head, "@aiox").is_some());
+        let kombu = libs.kombu && self.kafka_client(i, Role::Send);
+        aio || kombu || !libs.redis
+    }
+
+    /// Tên queue, exchange khai qua biến `var` (`q = await ch.declare_queue("q")`):
+    /// hằng số `var.<trường>` mà [`consts`] ghi.
+    fn declared(&self, var: &str, field: &str) -> Option<Name> {
+        self.consts.get(&format!("{var}.{field}")).cloned().flatten()
+    }
+
+    /// Đối số kombu là `Queue("q")`/`Exchange("x")` viết tại chỗ, biến gán từ
+    /// nó, hay chuỗi.
+    fn kombu_ref(&self, x: &Arg, ctor: &str, field: &str) -> Name {
+        if self.callee(x.a).is_some_and(|(c, _)| c == ctor) {
+            let inner = self.items(x.a + 1);
+            return self
+                .pick(&inner, "name", Some(0))
+                .map_or_else(|| Name::Dynamic(self.shown(x.a, x.b)), |n| self.one(n.a, n.b));
+        }
+        match self.one(x.a, x.b) {
+            Name::Dynamic(w) => self.declared(&w, field).unwrap_or(Name::Dynamic(w)),
+            other => other,
+        }
+    }
+
     /// Biến ở `i` chắc là client Kafka vai `role`: tên nói vậy (`producer`,
     /// `consumer`), hay được gán từ hàm dựng. `res.send(…)`, `ws.send(…)`,
     /// `obs.subscribe({ next })` thì không.
@@ -1033,6 +1274,12 @@ fn declared_queue(cx: &Cx, eq: usize) -> Option<(&'static str, usize)> {
         (Lang::Go, "QueueDeclare") => Some(("Name", call)),
         (Lang::TypeScript, "assertQueue") => Some(("queue", call)),
         (Lang::Python, "queue_declare") => Some(("method.queue", call)),
+        // aio-pika: `q = await ch.declare_queue("q")`, `x = await ch.declare_exchange("x")`;
+        // kombu: `q = Queue("q", …)`, `x = Exchange("x")`.
+        (Lang::Python, "declare_queue") => Some(("@aioq", call)),
+        (Lang::Python, "declare_exchange") => Some(("@aiox", call)),
+        (Lang::Python, "Queue") => Some(("@kq", call)),
+        (Lang::Python, "Exchange") => Some(("@kx", call)),
         _ => None,
     }
 }
@@ -1070,6 +1317,9 @@ fn exchange_name(n: Name) -> Name {
 fn queue_method(lang: Lang, libs: &Libs, m: &str) -> Option<(System, Role)> {
     use {Role::*, System::*};
     match (lang, m) {
+        (Lang::Python | Lang::TypeScript, "publish" | "request") if libs.nats => Some((Nats, Send)),
+        (Lang::Python | Lang::TypeScript, "subscribe") if libs.nats => Some((Nats, Receive)),
+        (Lang::Python, "pull_subscribe") if libs.nats => Some((Nats, Receive)),
         (Lang::Python, "produce" | "send" | "send_and_wait") if libs.kafka => Some((Kafka, Send)),
         (Lang::Python, "subscribe") if libs.kafka => Some((Kafka, Receive)),
         (Lang::Python, "subscribe" | "psubscribe") if libs.redis => Some((Redis, Receive)),
@@ -1141,6 +1391,98 @@ fn python_at(cx: &Cx, libs: &Libs, i: usize, out: &mut Queues, push: &mut Push) 
     let open = i + 1;
     let shown = || cx.shown(i, (cx.close(open) + 1).min(cx.toks.len()));
     match m {
+        // File import cả NATS lẫn aio-pika, kombu: `publish` của NATS nhận
+        // subject, của hai thư viện kia nhận tin nhắn, body.
+        "publish" | "request" if method && libs.nats && cx.nats_call(i, libs, m) => {
+            let args = cx.items(open);
+            if let Some(a) = cx.pick(&args, "subject", Some(0)) {
+                push(out, System::Nats, Role::Send, vec![cx.one(a.a, a.b)], line, &shown(), true);
+            }
+        }
+        "subscribe" | "pull_subscribe" if method && libs.nats && cx.nats_call(i, libs, m) => {
+            let args = cx.items(open);
+            if let Some(a) = cx.pick(&args, "subject", Some(0)) {
+                push(out, System::Nats, Role::Receive, vec![nats_name(cx.one(a.a, a.b))], line, &shown(), true);
+            }
+        }
+        // File import NATS cùng hệ khác, biến không chắc là của bên nào: báo
+        // "không ghép được", không đoán (TM-40).
+        "publish" | "subscribe" if method && libs.nats && !cx.other_sure(i, open, libs, m) => {
+            let role = if m == "publish" { Role::Send } else { Role::Receive };
+            push(out, System::Nats, role, vec![Name::Dynamic(shown())], line, &shown(), true);
+        }
+        // `client.request("pricing.quote", …)` trên client không nhận ra:
+        // subject có dạng tên NATS thì báo, không đoán; `requests.request("GET",
+        // url)` thì bỏ qua.
+        "request" if method && libs.nats && cx.subject_like(open) => {
+            push(out, System::Nats, Role::Send, vec![Name::Dynamic(shown())], line, &shown(), true);
+        }
+        "publish" if method && (libs.aio || libs.kombu) && cx.rabbit_publish(i, libs) => {
+            // aio-pika: `ch.default_exchange.publish(msg, routing_key="q")`,
+            // `ex.publish(msg, routing_key=k)` với `ex = await ch.declare_exchange("x")`;
+            // kombu: `producer.publish(body, routing_key="q", exchange=ex)`.
+            let args = cx.items(open);
+            let key = cx.pick(&args, "routing_key", Some(1)).map(|x| cx.one(x.a, x.b));
+            // Biến trước `publish` là exchange của aio-pika thì theo aio-pika;
+            // không thì theo kombu khi file import kombu.
+            let head = cx.word(i).and_then(|w| w.rsplit_once('.')).map(|(h, _)| h).unwrap_or("");
+            let aio = if head.ends_with("default_exchange") { Some(Name::Fixed(String::new())) } else { cx.declared(head, "@aiox") };
+            let ex = match (aio, libs.kombu) {
+                (Some(x), _) if libs.aio => x,
+                (_, true) => match cx.pick(&args, "exchange", None) {
+                    None => Name::Fixed(String::new()),
+                    Some(x) => cx.kombu_ref(x, "Exchange", "@kx"),
+                },
+                _ => Name::Dynamic(head.to_string()),
+            };
+            push(out, System::Rabbit, Role::Send, vec![rabbit_target(ex, key)], line, &shown(), true);
+        }
+        "consume" | "iterator" | "get" if method && libs.aio => {
+            // `q = await ch.declare_queue("q")` rồi `q.consume(cb)`.
+            let head = cx.word(i).and_then(|w| w.rsplit_once('.')).map(|(h, _)| h).unwrap_or("");
+            if let Some(q) = cx.declared(head, "@aioq") {
+                push(out, System::Rabbit, Role::Receive, vec![queue_name(q)], line, &shown(), true);
+            } else if m == "consume" {
+                push(out, System::Rabbit, Role::Receive, vec![Name::Dynamic(head.to_string())], line, &shown(), true);
+            }
+        }
+        "bind" if method && libs.aio => {
+            let args = cx.items(open);
+            if let Some(x) = cx.pick(&args, "exchange", Some(0)) {
+                let ex = match cx.one(x.a, x.b) {
+                    Name::Dynamic(w) => cx.declared(&w, "@aiox").unwrap_or(Name::Dynamic(w)),
+                    other => other,
+                };
+                push(out, System::Rabbit, Role::Receive, vec![exchange_name(ex)], line, &shown(), true);
+            }
+        }
+        "Consumer" if libs.kombu => {
+            // `Consumer(conn, queues=[q])`, `conn.Consumer(queues=[Queue("q")])`.
+            let args = cx.items(open);
+            if let Some(a) = cx.pick(&args, "queues", Some(if method { 0 } else { 1 })) {
+                let items = if cx.punct(a.a, '[') || cx.punct(a.a, '(') { cx.items(a.a) } else { vec![Arg { key: None, a: a.a, b: a.b }] };
+                for q in items {
+                    let name = cx.kombu_ref(&q, "Queue", "@kq");
+                    push(out, System::Rabbit, Role::Receive, vec![queue_name(name)], line, &shown(), true);
+                    // `video = Queue("video", exchange=media)` rồi `queues=[video]`.
+                    if let Name::Dynamic(w) = cx.one(q.a, q.b)
+                        && let Some(ex) = cx.declared(&w, "@kqx")
+                    {
+                        push(out, System::Rabbit, Role::Receive, vec![exchange_name(ex)], line, &shown(), true);
+                    }
+                    // Queue gắn exchange khác mặc định: nhận cả từ exchange đó.
+                    if cx.callee(q.a).is_some_and(|(c, _)| c == "Queue") {
+                        let inner = cx.items(q.a + 1);
+                        if let Some(x) = cx.pick(&inner, "exchange", Some(1)) {
+                            let ex = cx.kombu_ref(x, "Exchange", "@kx");
+                            if !matches!(&ex, Name::Fixed(e) if e.is_empty()) {
+                                push(out, System::Rabbit, Role::Receive, vec![exchange_name(ex)], line, &shown(), true);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         "send_task" if method => {
             // `app.send_task("x")` với `app` import từ module khác: tên cố định
             // vẫn tính; tên không cố định chỉ khi file import celery.
@@ -1312,6 +1654,26 @@ fn go_at(cx: &Cx, libs: &Libs, i: usize, out: &mut Queues, push: &mut Push) {
                 push(out, System::Rabbit, Role::Receive, vec![queue_name(q)], line, &shown(), true);
             }
         }
+        "Publish" | "Request" | "PublishMsg" | "RequestWithContext" | "PublishAsync" if libs.nats && cx.nats_call(i, libs, m) => {
+            // `nc.Publish("s", data)`; JetStream mới: `js.Publish(ctx, "s", data)`.
+            let args = args();
+            if let Some(s) = nats_subject(cx, &args) {
+                push(out, System::Nats, Role::Send, vec![s], line, &shown(), true);
+            }
+        }
+        "Subscribe" | "QueueSubscribe" | "ChanSubscribe" | "ChanQueueSubscribe" | "SubscribeSync" | "QueueSubscribeSync"
+        | "PullSubscribe"
+            if libs.nats && cx.nats_call(i, libs, m) =>
+        {
+            let args = args();
+            if let Some(s) = nats_subject(cx, &args) {
+                push(out, System::Nats, Role::Receive, vec![nats_name(s)], line, &shown(), true);
+            }
+        }
+        "Publish" | "Subscribe" | "Request" | "RequestWithContext" if libs.nats && !cx.other_sure(i, open, libs, m) => {
+            let role = if m == "Subscribe" { Role::Receive } else { Role::Send };
+            push(out, System::Nats, role, vec![Name::Dynamic(shown())], line, &shown(), true);
+        }
         "Subscribe" | "PSubscribe" if libs.redis || libs.kafka => {
             let args = args();
             if libs.redis && args.len() >= 2 {
@@ -1378,6 +1740,25 @@ fn node_at(cx: &Cx, libs: &Libs, i: usize, out: &mut Queues, push: &mut Push) {
     let nth = |args: &[Arg], n: usize| args.get(n).map(|x| cx.one(x.a, x.b));
     let object = |args: &[Arg]| args.first().filter(|a| cx.punct(a.a, '{')).map(|a| a.a);
     match m {
+        "publish" | "request" if libs.nats && cx.nats_call(i, libs, m) => {
+            if let Some(s) = nth(&args(), 0) {
+                push(out, System::Nats, Role::Send, vec![s], line, &shown(), true);
+            }
+        }
+        // RxJS `obs.subscribe(v => …)`: đối số đầu là hàm, không phải subject.
+        "subscribe" if libs.nats && cx.callback_first(open) => {}
+        "subscribe" if libs.nats && object(&args()).is_none() && cx.nats_call(i, libs, m) => {
+            if let Some(s) = nth(&args(), 0) {
+                push(out, System::Nats, Role::Receive, vec![nats_name(s)], line, &shown(), true);
+            }
+        }
+        "publish" | "subscribe" if libs.nats && object(&args()).is_none() && !cx.other_sure(i, open, libs, m) => {
+            let role = if m == "publish" { Role::Send } else { Role::Receive };
+            push(out, System::Nats, role, vec![Name::Dynamic(shown())], line, &shown(), true);
+        }
+        "request" if libs.nats && cx.subject_like(open) => {
+            push(out, System::Nats, Role::Send, vec![Name::Dynamic(shown())], line, &shown(), true);
+        }
         "send" if libs.kafka => {
             // `producer.send({ topic, messages })`. Không tìm ra tên (`send(rec)`)
             // thì báo, không im lặng (TM-40), khi biến chắc là producer:
@@ -1495,8 +1876,9 @@ pub fn celery_default(file: &str, func: &str) -> String {
 pub struct Index {
     /// (hệ, tên) → chủ (component).
     fixed: HashMap<(System, String), BTreeSet<String>>,
-    /// Mẫu `psubscribe` của Redis.
-    patterns: Vec<(String, String)>,
+    /// Mẫu tên của bên nhận: `psubscribe` của Redis, subject có `*`, `>` của
+    /// NATS. Hệ, mẫu, chủ.
+    patterns: Vec<(System, String, String)>,
     /// Task Celery chưa đặt tên: tên đầy đủ mặc định → chủ.
     tasks: Vec<(String, String)>,
     /// Quá [`MAX_PATTERNS`] mẫu: mẫu sau không xét, bên gọi báo ra.
@@ -1519,7 +1901,7 @@ impl Index {
                 if self.patterns.len() >= MAX_PATTERNS {
                     self.patterns_cut = true;
                 } else {
-                    self.patterns.push((p.clone(), owner.to_string()));
+                    self.patterns.push((site.system, p.clone(), owner.to_string()));
                 }
             }
             Name::Task(f) => self.tasks.push((celery_default(file, f), owner.to_string())),
@@ -1531,9 +1913,7 @@ impl Index {
     /// Chủ của mọi bên nhận khớp tên `name` của hệ `system`.
     pub fn targets(&self, system: System, name: &str) -> BTreeSet<String> {
         let mut out = self.fixed.get(&(system, name.to_string())).cloned().unwrap_or_default();
-        if system == System::Redis {
-            out.extend(self.patterns.iter().filter(|(p, _)| glob(p, name)).map(|(_, c)| c.clone()));
-        }
+        out.extend(self.patterns.iter().filter(|(s, p, _)| *s == system && pattern_matches(system, p, name)).map(|(_, _, c)| c.clone()));
         if system == System::Celery {
             // Bên gửi viết tên tính từ gốc package, đường dẫn file có thể dài
             // hơn (`src/shop/tasks.py`).
@@ -1541,6 +1921,69 @@ impl Index {
             out.extend(self.tasks.iter().filter(|(full, _)| full == name || full.ends_with(&tail)).map(|(_, c)| c.clone()));
         }
         out
+    }
+}
+
+/// Mẫu `pattern` của hệ `system` khớp tên `name` không: glob với Redis,
+/// luật subject với NATS.
+pub fn pattern_matches(system: System, pattern: &str, name: &str) -> bool {
+    match system {
+        System::Nats => nats_match(pattern, name),
+        _ => glob(pattern, name),
+    }
+}
+
+/// Phần chữ cố định đứng đầu mẫu của hệ `system`: mọi tên khớp mẫu đều bắt
+/// đầu bằng nó.
+pub fn pattern_prefix(system: System, pattern: &str) -> &str {
+    match system {
+        System::Nats => {
+            let mut end = 0;
+            for tok in pattern.split('.') {
+                if tok == "*" || tok == ">" {
+                    break;
+                }
+                end += tok.len() + 1;
+            }
+            &pattern[..end.min(pattern.len())]
+        }
+        _ => glob_prefix(pattern),
+    }
+}
+
+/// Subject của NATS: đoạn cách nhau bởi `.`; `*` khớp đúng một đoạn, `>` (chỉ
+/// ở cuối) khớp một đoạn trở lên. Không đệ quy, O(số đoạn).
+pub fn nats_match(pattern: &str, subject: &str) -> bool {
+    let mut p = pattern.split('.');
+    let mut s = subject.split('.');
+    loop {
+        match (p.next(), s.next()) {
+            (Some(">"), Some(_)) => return p.next().is_none(),
+            (Some("*"), Some(_)) => {}
+            (Some(a), Some(b)) if a == b => {}
+            (None, None) => return true,
+            _ => return false,
+        }
+    }
+}
+
+/// Subject của bên nhận NATS có `*`, `>` là mẫu.
+fn nats_name(n: Name) -> Name {
+    match n {
+        Name::Fixed(x) if x.split('.').any(|t| t == "*" || t == ">") => Name::Pattern(x),
+        other => other,
+    }
+}
+
+/// Subject trong lời gọi Go: đối số đầu, hay đối số thứ hai khi đầu là
+/// `ctx` (JetStream mới).
+fn nats_subject(cx: &Cx, args: &[Arg]) -> Option<Name> {
+    let first = args.first().map(|x| cx.one(x.a, x.b))?;
+    match first {
+        Name::Dynamic(w) if args.len() >= 3 && (w == "ctx" || w.ends_with("Context()") || w.contains("context.")) => {
+            args.get(1).map(|x| cx.one(x.a, x.b))
+        }
+        other => Some(other),
     }
 }
 
@@ -1590,6 +2033,130 @@ mod tests {
 
     fn fixed(s: &str) -> Name {
         Name::Fixed(s.into())
+    }
+
+    #[test]
+    fn nats_ba_ngon_ngu_va_mau_subject() {
+        use {Role::*, System::*};
+        let py = run(
+            "a.py",
+            "import nats\nasync def main():\n    nc = await nats.connect()\n    await nc.publish('orders.new', b'x')\n    \
+             await nc.request(subject='billing.charge', payload=b'')\n    await nc.subscribe('orders.*', cb=h)\n    \
+             js = nc.jetstream()\n    await js.pull_subscribe('audit.>', 'durable')\n",
+        );
+        assert_eq!(
+            py,
+            vec![
+                (Nats, Send, fixed("orders.new")),
+                (Nats, Send, fixed("billing.charge")),
+                (Nats, Receive, Name::Pattern("orders.*".into())),
+                (Nats, Receive, Name::Pattern("audit.>".into())),
+            ]
+        );
+        let go = run(
+            "a.go",
+            "package a\nimport \"github.com/nats-io/nats.go\"\nfunc f(nc *nats.Conn, js jetstream.JetStream) {\n\
+             nc.Publish(\"orders.new\", nil)\n nc.QueueSubscribe(\"orders.new\", \"workers\", h)\n js.Publish(ctx, \"audit.log\", nil)\n}\n",
+        );
+        assert_eq!(
+            go,
+            vec![(Nats, Send, fixed("orders.new")), (Nats, Receive, fixed("orders.new")), (Nats, Send, fixed("audit.log"))]
+        );
+        let js = run("a.ts", "import { connect } from 'nats';\nnc.publish('orders.new', data);\nconst sub = nc.subscribe('orders.>');\n");
+        assert_eq!(js, vec![(Nats, Send, fixed("orders.new")), (Nats, Receive, Name::Pattern("orders.>".into()))]);
+        // Không import NATS: `publish`, `subscribe` không phải NATS.
+        assert!(run("b.py", "x.publish('a.b', 1)\n").is_empty());
+    }
+
+    #[test]
+    fn aio_pika_va_kombu_vao_rabbitmq() {
+        use {Role::*, System::*};
+        let send = run(
+            "send.py",
+            "import aio_pika\nasync def main():\n    ch = await conn.channel()\n    \
+             await ch.default_exchange.publish(aio_pika.Message(b'x'), routing_key='hello')\n    \
+             logs = await ch.declare_exchange('logs', aio_pika.ExchangeType.FANOUT)\n    \
+             await logs.publish(aio_pika.Message(b'y'), routing_key='')\n",
+        );
+        assert_eq!(send, vec![(Rabbit, Send, fixed("q:hello")), (Rabbit, Send, fixed("x:logs"))]);
+        let recv = run(
+            "recv.py",
+            "import aio_pika\nasync def main():\n    queue = await ch.declare_queue('hello')\n    await queue.consume(cb)\n    \
+             tmp = await ch.declare_queue(exclusive=True)\n    await tmp.bind('logs')\n",
+        );
+        assert_eq!(recv, vec![(Rabbit, Receive, fixed("q:hello")), (Rabbit, Receive, fixed("x:logs"))]);
+        let kombu = run(
+            "k.py",
+            "from kombu import Connection, Exchange, Queue, Consumer\nmedia = Exchange('media', 'direct')\n\
+             video = Queue('video', exchange=media, routing_key='video')\n\
+             producer.publish({'n': 1}, exchange=media, routing_key='video')\nproducer.publish(b, routing_key='jobs')\n\
+             with Consumer(conn, queues=[video, Queue('jobs')]):\n    pass\n",
+        );
+        assert_eq!(
+            kombu,
+            vec![
+                (Rabbit, Send, fixed("x:media")),
+                (Rabbit, Send, fixed("q:jobs")),
+                (Rabbit, Receive, fixed("q:video")),
+                // `video` khai với `exchange=media`: nhận cả từ exchange đó.
+                (Rabbit, Receive, fixed("x:media")),
+                (Rabbit, Receive, fixed("q:jobs")),
+            ]
+        );
+        // `queue.Queue()` của thư viện chuẩn, không import kombu: không phải hàng đợi.
+        assert!(run("c.py", "import queue\nq = queue.Queue()\nq.get()\n").is_empty());
+    }
+
+    #[test]
+    fn nats_chi_khi_chac_la_client() {
+        use {Role::*, System::*};
+        // Thêm `import nats` không biến Redis, Kafka thành NATS; `requests.request`
+        // không phải NATS.
+        let py = run(
+            "m.py",
+            "import nats, redis, requests\nfrom kafka import KafkaConsumer\nasync def f(r, consumer, url):\n    \
+             nc = await nats.connect()\n    r.publish('cache-events', 'hi')\n    consumer.subscribe(['orders'])\n    \
+             requests.request('GET', url)\n    await nc.publish('orders.new', b'')\n",
+        );
+        assert_eq!(py, vec![(Redis, Send, fixed("cache-events")), (Kafka, Receive, fixed("orders")), (Nats, Send, fixed("orders.new"))]);
+        // File chỉ import nats: `request` vẫn phải chắc là client.
+        assert!(run("r.py", "import nats\nrequests.request('GET', u)\n").is_empty());
+        // Go: amqp091, go-redis cùng NATS.
+        let go = run(
+            "m.go",
+            "package a\nimport (\n\"github.com/nats-io/nats.go\"\n\"github.com/redis/go-redis/v9\"\n)\nfunc f(conn *nats.Conn, rdb *redis.Client) {\n\
+             conn.Publish(\"orders.new\", nil)\n rdb.Publish(ctx, \"events\", \"x\")\n}\n",
+        );
+        assert_eq!(go, vec![(Nats, Send, fixed("orders.new")), (Redis, Send, fixed("events"))]);
+        // Không chắc là client của bên nào: báo, không đoán; chú thích kiểu
+        // `bus: NATS` là chắc.
+        let amb = run(
+            "b.py",
+            "import nats, redis\nasync def f(self, bus: NATS):\n    await self.client.publish('a.b', b'')\n    await bus.publish('c.d', b'')\n",
+        );
+        assert_eq!(amb.len(), 2);
+        assert!(matches!(&amb[0], (Nats, Send, Name::Dynamic(_))));
+        assert_eq!(amb[1], (Nats, Send, fixed("c.d")));
+        // `request` trên client không nhận ra: subject dạng NATS thì báo;
+        // RxJS `subscribe(v => …)` không phải NATS.
+        let req = run("q.py", "import nats\nasync def f(client):\n    await client.request('pricing.quote', b'')\n");
+        assert!(matches!(req.as_slice(), [(Nats, Send, Name::Dynamic(_))]), "{req:?}");
+        assert!(run("rx.ts", "import { connect } from 'nats';\nthis.route.params.subscribe(p => this.load(p));\n").is_empty());
+        // aio-pika cùng Redis: `r.publish` là Redis.
+        let aio = run("a.py", "import aio_pika, redis\ndef f(r):\n    r.publish('cache-events', 'hi')\n");
+        assert_eq!(aio, vec![(Redis, Send, fixed("cache-events"))]);
+    }
+
+    #[test]
+    fn khop_subject_nats() {
+        assert!(nats_match("orders.*", "orders.new"));
+        assert!(!nats_match("orders.*", "orders.new.eu"));
+        assert!(nats_match("orders.>", "orders.new.eu"));
+        assert!(!nats_match("orders.>", "orders"));
+        assert!(nats_match("*.new", "orders.new"));
+        assert!(!nats_match("orders.new", "orders.old"));
+        assert_eq!(pattern_prefix(System::Nats, "orders.*.eu"), "orders.");
+        assert_eq!(pattern_prefix(System::Nats, ">"), "");
     }
 
     #[test]

@@ -370,6 +370,10 @@ fn plan_chi_duoc_chung_nhan_khi_chinh_lenh_ghi_ra() {
     let out = p.out(&["check", "--strict"]);
     assert!(out.contains("Worker -> Db"), "plan thật phải cho cạnh: {out}");
     assert!(!out.contains("registry"), "{out}");
+    // `scan --plan` thấy đúng thứ `check` thấy; không cờ thì chỉ bộ đọc HCL.
+    let with = p.out(&["scan", "--json", "--plan"]);
+    assert!(with.contains("module.ecs.aws_lambda_function.worker"), "{with}");
+    assert!(!p.out(&["scan", "--json"]).contains("module.ecs.aws_lambda_function.worker"));
     // Chạy lại với cùng nội dung plan: vẫn được chứng nhận (lệnh ghi lại file).
     p.tick();
     p.out(&["verify", "tf_plan"]);

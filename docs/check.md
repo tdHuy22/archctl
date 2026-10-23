@@ -601,8 +601,12 @@ Thêm mẫu glob vào `.arch/.archignore` để bỏ qua thêm.
 ## `archctl scan`: archctl đọc được gì
 
 ```
-archctl scan [--root <dir>] [--json] [--verbatim] [--all-hosts] [<file>...]
+archctl scan [--root <dir>] [--json] [--verbatim] [--all-hosts] [--plan] [<file>...]
 ```
+
+`--plan`: phần Terraform dùng plan đã chứng nhận như `check` (lệnh ghi plan
+lấy từ `.arch/system.arch`, xem [infra.md](infra.md#lấp-phần-chưa-đọc-được-bằng-plan));
+không có cờ thì in đúng những gì bộ đọc HCL thấy.
 
 In từng import archctl đọc được trong file, ở dòng nào, và phân giải ra đâu —
 đúng những gì `check` và `init --from-code` thấy: cùng danh sách file, cùng

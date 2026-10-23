@@ -1234,6 +1234,55 @@ impl Cx<'_> {
             kept.dedup();
             u.edges = kept;
         }
+        // Bên nhận của hàng đợi, topic: Lambda đọc qua event source mapping,
+        // đăng ký SNS, push subscription của Pub/Sub. Hàng đợi khai trong luật
+        // là service, nên `Api -> Jobs` (biến môi trường) cộng `Jobs -> Worker`.
+        let mut from_queue: Vec<(String, RefEdge)> = Vec::new();
+        for &(i, r) in &sorted {
+            let d = &self.insts[i].module.resources[r];
+            let (src_key, dst_key) = match d.ty.as_str() {
+                "aws_lambda_event_source_mapping" => ("event_source_arn", "function_name"),
+                "aws_sns_topic_subscription" => ("topic_arn", "endpoint"),
+                "google_pubsub_subscription" => ("topic", "push_endpoint"),
+                _ => continue,
+            };
+            let a = addr_of(self, i, r);
+            let (body, fid, line, ty) = (d.body.clone(), d.file, d.line, d.ty.clone());
+            let file = self.insts[i].module.files[fid].clone();
+            let mut values = Vec::new();
+            values.extend(self.attr(i, fid, &body, src_key).map(|(v, _)| (src_key, v)));
+            values.extend(self.attr(i, fid, &body, dst_key).map(|(v, _)| (dst_key, v)));
+            for b in body.blocks("push_config") {
+                values.extend(self.attr(i, fid, &b.body, dst_key).map(|(v, _)| (dst_key, v)));
+            }
+            let (mut srcs, mut dsts) = (Vec::new(), Vec::new());
+            for (k, v) in &values {
+                if let Some(w) = v.hard() {
+                    self.unread(format!("{}:{}", w.file, w.line), format!("`{k}` của `{a}` chưa đọc được: {}", w.what));
+                }
+                v.refs(if *k == src_key { &mut srcs } else { &mut dsts });
+            }
+            for (src, _, _) in srcs.iter().filter(|(x, _, _)| MESSAGING.contains(&type_of(x))) {
+                for (t, _, _) in &dsts {
+                    let resolved = unit_of.get(t).or_else(|| fronts.get(t)).cloned().unwrap_or_else(|| {
+                        if MESSAGING.contains(&type_of(t)) { vec![t.clone()] } else { Vec::new() }
+                    });
+                    for to in resolved.into_iter().filter(|to| to != src) {
+                        for q in [src, &to] {
+                            if MESSAGING.contains(&type_of(q)) {
+                                if let Some(&(qi, qr)) = by_addr.get(q) {
+                                    targets.push((q.clone(), qi, qr));
+                                } else if let Some(place) = self.data_place(&all, q) {
+                                    data_targets.push((q.clone(), place));
+                                }
+                            }
+                        }
+                        let shown = format!("{ty}: {src} → {t}");
+                        from_queue.push((src.clone(), RefEdge { key: ty.clone(), file: file.clone(), line, target: to, shown }));
+                    }
+                }
+            }
+        }
         targets.sort_by(|a, b| a.0.cmp(&b.0));
         targets.dedup_by(|a, b| a.0 == b.0);
         for (addr, i, r) in targets {
@@ -1282,6 +1331,13 @@ impl Cx<'_> {
             }
         }
         units.retain(|u| !pseudo_addrs.contains(&u.addr));
+        for (src, e) in from_queue {
+            if let Some(u) = units.iter_mut().find(|u| u.addr == src)
+                && !u.edges.contains(&e)
+            {
+                u.edges.push(e);
+            }
+        }
         self.out.units.extend(units);
         self.out.manifests.extend(manifests);
         self.scope = Scope::Both;

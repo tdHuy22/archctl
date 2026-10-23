@@ -610,11 +610,70 @@ pub fn read(root: &str, plan: &J, modules: Option<&J>, fs: &Fs<'_>) -> Out {
         let exposed = open.contains(u);
         out.units.push(Unit { addr: u.clone(), ty: type_of(u), compute: true, edges, exposed, image });
     }
+    // Bên nhận của hàng đợi, topic: như bộ đọc HCL (event source mapping, đăng
+    // ký SNS, push subscription của Pub/Sub).
+    let mut from_queue: Vec<(String, String, String)> = Vec::new();
+    for (ty, src_key, dst_key) in [
+        ("aws_lambda_event_source_mapping", "event_source_arn", "function_name"),
+        ("aws_sns_topic_subscription", "topic_arn", "endpoint"),
+        ("google_pubsub_subscription", "topic", "push_endpoint"),
+    ] {
+        for a in of(ty).into_iter().filter(|a| made(a)) {
+            let Some(&(r, owner)) = res.get(&a) else { continue };
+            let Some(e) = r.get("expressions") else { continue };
+            let (mut src_refs, mut dst_refs) = (Vec::new(), Vec::new());
+            if let Some(x) = e.get(src_key) {
+                config_refs(x, &mut src_refs);
+            }
+            if let Some(x) = e.get(dst_key) {
+                config_refs(x, &mut dst_refs);
+            }
+            for b in e.get("push_config").and_then(J::as_array).unwrap_or(&[]) {
+                if let Some(x) = b.get(dst_key) {
+                    config_refs(x, &mut dst_refs);
+                }
+            }
+            let srcs: Vec<String> = src_refs
+                .iter()
+                .flat_map(|x| cx.resolve(owner, x))
+                .map(|(t, _)| t)
+                .filter(|t| super::terraform::is_messaging(&type_of(t)))
+                .collect();
+            let dsts: Vec<String> = dst_refs.iter().flat_map(|x| cx.resolve(owner, x)).map(|(t, _)| t).collect();
+            for src in &srcs {
+                for t in &dsts {
+                    let to: Vec<String> = if let Some(v) = names.get(t) {
+                        v.clone()
+                    } else if let Some(v) = fronts.get(t) {
+                        v.iter().cloned().collect()
+                    } else if super::terraform::is_messaging(&type_of(t)) {
+                        vec![t.clone()]
+                    } else {
+                        Vec::new()
+                    };
+                    for x in to.into_iter().filter(|x| x != src) {
+                        targets.push(src.clone());
+                        if super::terraform::is_messaging(&type_of(&x)) {
+                            targets.push(x.clone());
+                        }
+                        from_queue.push((src.clone(), x, format!("{ty}: {src} → {t}")));
+                    }
+                }
+            }
+        }
+    }
     targets.sort();
     targets.dedup();
     for t in targets {
         if !units.contains(&t) {
             out.units.push(Unit { ty: type_of(&t), addr: t, compute: false, edges: Vec::new(), exposed: false, image: None });
+        }
+    }
+    for (src, to, shown) in from_queue {
+        if let Some(u) = out.units.iter_mut().find(|u| u.addr == src)
+            && !u.edges.iter().any(|(t, _)| *t == to)
+        {
+            u.edges.push((to, shown));
         }
     }
     if cx.steps >= MAX_STEPS {

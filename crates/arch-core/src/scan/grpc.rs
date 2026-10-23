@@ -203,6 +203,8 @@ pub fn generated_stub_path(path: &str) -> bool {
         || name.ends_with("_grpc_pb.js")
         || name.ends_with("_grpc_pb.ts")
         || name.ends_with("_grpc_pb.d.ts")
+        || name.ends_with(".grpc.pb.h")
+        || name.ends_with(".grpc.pb.cc")
 }
 
 pub fn scan(toks: &[Token], lang: Lang) -> Rpc {
@@ -211,7 +213,7 @@ pub fn scan(toks: &[Token], lang: Lang) -> Rpc {
         Lang::Go => go(toks),
         Lang::TypeScript => node(toks),
         Lang::Rust => rust(toks),
-        Lang::C => Rpc::default(),
+        Lang::C => cpp(toks),
     }
 }
 
@@ -417,6 +419,88 @@ fn rust(toks: &[Token]) -> Rpc {
                 Role::Implement => out.implements.push(site),
                 Role::Call => out.calls.push(site),
             }
+        }
+    }
+    out
+}
+
+/// C++: `Greeter::NewStub(channel)` (client); lớp kế thừa `Greeter::Service`,
+/// `AsyncService`, `CallbackService` (cài đặt), và `RegisterService(&impl)`
+/// của `ServerBuilder` trong cùng file (đăng ký: tham số là biến, không mang
+/// tên service, nên tính cho mọi service cài đặt trong file). Namespace đứng
+/// trước tên service (`helloworld::Greeter`) là package của `.proto`, viết
+/// bằng `::`; không có namespace thì như Go, chỉ tin khi `.proto` trong repo
+/// khai service đó.
+fn cpp(toks: &[Token]) -> Rpc {
+    let word = |i: usize| match toks.get(i).map(|t| &t.tok) {
+        Some(Tok::Word(w)) => Some(w.as_str()),
+        _ => None,
+    };
+    let punct = |i: usize, c: char| matches!(toks.get(i).map(|t| &t.tok), Some(Tok::Punct(p)) if *p == c);
+    // Chữ đứng trước `::` ở `i`: `a::b::X` với `i` là chỉ số của `X`.
+    let qualifier = |i: usize| -> (Vec<&str>, usize) {
+        let mut parts = Vec::new();
+        let mut j = i;
+        // Trần 16 đoạn namespace (TM-13).
+        // Từ khoá đứng trước `::` toàn cục (`return ::pkg::X`) không phải namespace.
+        let keyword = |w: Option<&str>| {
+            matches!(w, Some("return" | "co_return" | "public" | "protected" | "private" | "virtual" | "new" | "throw" | "case" | "else" | "auto"))
+        };
+        while parts.len() < 16 && j >= 3 && punct(j - 1, ':') && punct(j - 2, ':') && word(j - 3).is_some() && !keyword(word(j - 3)) {
+            parts.push(word(j - 3).unwrap_or(""));
+            j -= 3;
+        }
+        parts.reverse();
+        (parts, j)
+    };
+    let origin = |ns: &[&str]| {
+        let ns: Vec<&str> = ns.iter().copied().filter(|s| !s.is_empty() && *s != "std").collect();
+        if ns.is_empty() { Origin::Unknown } else { Origin::Suffix(ns.join(".")) }
+    };
+    let mut out = Rpc::default();
+    let mut implemented: Vec<(String, Origin)> = Vec::new();
+    let mut register_line = None;
+    for (i, tok) in toks.iter().enumerate() {
+        let line = tok.line;
+        match word(i) {
+            Some("NewStub") if punct(i + 1, '(') => {
+                let (q, _) = qualifier(i);
+                if let [ns @ .., service] = q.as_slice()
+                    && service.starts_with(|c: char| c.is_ascii_uppercase())
+                    && !infrastructure_name(service)
+                    && !ns.iter().any(|n| matches!(*n, "health" | "reflection"))
+                {
+                    let shown = format!("{}::NewStub", q.join("::"));
+                    out.calls.push(Site { service: (*service).to_string(), origin: origin(ns), line, shown });
+                }
+            }
+            Some("Service" | "AsyncService" | "CallbackService" | "StreamedUnaryService" | "SplitStreamedService" | "StreamedService") => {
+                let (q, start) = qualifier(i);
+                // Chỉ trong danh sách lớp cha: `: public X::Service`, `, X::Service`.
+                let base = start >= 1
+                    && (matches!(word(start - 1), Some("public" | "protected" | "private" | "virtual"))
+                        || punct(start - 1, ':')
+                        || punct(start - 1, ','));
+                // `: public grpc::Service` là lớp cha chung, không phải service.
+                if let [ns @ .., service] = q.as_slice()
+                    && base
+                    && service.starts_with(|c: char| c.is_ascii_uppercase())
+                    && !infrastructure_name(service)
+                {
+                    let shown = format!("{}::{}", q.join("::"), word(i).unwrap_or(""));
+                    out.implements.push(Site { service: (*service).to_string(), origin: origin(ns), line, shown });
+                    implemented.push(((*service).to_string(), origin(ns)));
+                }
+            }
+            Some("RegisterService") if punct(i + 1, '(') && register_line.is_none() => register_line = Some(line),
+            _ => {}
+        }
+    }
+    if let Some(line) = register_line {
+        implemented.sort();
+        implemented.dedup();
+        for (service, origin) in implemented {
+            out.serves.push(Site { service, origin, line, shown: "RegisterService(…)".into() });
         }
     }
     out
@@ -978,6 +1062,32 @@ mod tests {
         let p = read_proto(&many);
         assert!(p.truncated && p.services.len() == MAX_SERVICES);
         assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn cpp_client_server() {
+        let toks = Lang::C.tokens(
+            "#include \"helloworld.grpc.pb.h\"\nclass GreeterServiceImpl final : public helloworld::Greeter::Service {};\n\
+             class Async : public Greeter::AsyncService, public grpc::Service {};\n\
+             void run() {\n  GreeterServiceImpl service;\n  builder.RegisterService(&service);\n\
+               auto stub = helloworld::Greeter::NewStub(channel);\n  auto h = grpc::health::v1::Health::NewStub(ch);\n  auto s = Shop::NewStub(c);\n}\n\
+             std::unique_ptr<Greeter::Stub> Greeter::NewStub(x);\n",
+        );
+        let rpc = scan(&toks, Lang::C);
+        let names = |v: &[Site]| v.iter().map(|s| (s.service.clone(), s.origin.clone(), s.line)).collect::<Vec<_>>();
+        let suffix = |p: &str| Origin::Suffix(p.into());
+        assert_eq!(names(&rpc.implements), vec![("Greeter".into(), suffix("helloworld"), 2), ("Greeter".into(), Origin::Unknown, 3)]);
+        assert_eq!(names(&rpc.serves), vec![("Greeter".into(), Origin::Unknown, 6), ("Greeter".into(), suffix("helloworld"), 6)]);
+        assert_eq!(
+            names(&rpc.calls),
+            vec![("Greeter".into(), suffix("helloworld"), 7), ("Shop".into(), Origin::Unknown, 9), ("Greeter".into(), Origin::Unknown, 11)]
+        );
+        assert!(generated_stub_path("gen/helloworld.grpc.pb.cc"));
+        // `::` toàn cục sau từ khoá: từ khoá không phải namespace.
+        let toks = Lang::C.tokens("auto f() { return ::shop::KV::NewStub(ch); }\nclass I : public ::shop::KV::Service {};\n");
+        let rpc = scan(&toks, Lang::C);
+        assert_eq!(rpc.calls[0].origin, Origin::Suffix("shop".into()));
+        assert_eq!(rpc.implements[0].origin, Origin::Suffix("shop".into()));
     }
 
     #[test]

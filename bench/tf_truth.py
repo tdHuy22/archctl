@@ -231,8 +231,32 @@ def truth(root_dir, plan):
                         targets.add(t)
         edges.discard(u)
         out[u] = {"edges": sorted(edges), "exposed": exposed(u, res, values, points), "image": image(h, values)}
+    # Bên nhận của hàng đợi, topic (docs/infra.md): Lambda qua event source
+    # mapping, đăng ký SNS, push subscription của Pub/Sub; hàng đợi là đích.
+    from_queue = {}
+    for a, r in res.items():
+        keys = {"aws_lambda_event_source_mapping": ("event_source_arn", "function_name"),
+                "aws_sns_topic_subscription": ("topic_arn", "endpoint"),
+                "google_pubsub_subscription": ("topic", "push_endpoint")}.get(type_of(a))
+        if not keys or a not in values:
+            continue
+        e = r.get("expressions", {})
+        src_x = e.get(keys[0], {})
+        dst_x = [e.get(keys[1], {})] + [b.get(keys[1], {}) for b in e.get("push_config", []) if isinstance(b, dict)]
+        srcs = {t for ref in config_refs(src_x) for t, _ in resolve(owner[a], ref, frozenset()) if type_of(t) in MESSAGING}
+        for src in srcs:
+            for ref in config_refs(dst_x):
+                for t, _ in resolve(owner[a], ref, frozenset()):
+                    to = set(names[t]) if t in names else set(fronts[t]) if t in fronts else {t} if type_of(t) in MESSAGING else set()
+                    for x in to - {src}:
+                        from_queue.setdefault(src, set()).add(x)
+                        targets.add(src)
+                        if type_of(x) in MESSAGING:
+                            targets.add(x)
     for t in sorted(targets - set(units)):
         out[t] = {"edges": [], "exposed": False, "image": None}
+    for src, to in from_queue.items():
+        out[src]["edges"] = sorted(set(out[src]["edges"]) | to)
     return out
 
 

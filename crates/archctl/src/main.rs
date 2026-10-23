@@ -106,7 +106,7 @@ Lệnh chung:
                                           Cho thẳng đường dẫn thì nhanh nhất.
                                           --strict: mọi cảnh báo, kể cả
                                           của file luật, thành vi phạm.
-  archctl scan [--root <dir>] [--json] [--verbatim] [--all-hosts] [<file>...]
+  archctl scan [--root <dir>] [--json] [--verbatim] [--all-hosts] [--plan] [<file>...]
                                           In import archctl đọc được, đích
                                           phân giải của từng cái, cạnh qua
                                           ranh giới ngôn ngữ, và service đọc
@@ -116,6 +116,8 @@ Lệnh chung:
                                           --all-hosts: in mọi tên máy trong
                                           chuỗi của mã, không chỉ tên service
                                           (có thể chứa secret).
+                                          --plan: dùng plan Terraform đã
+                                          chứng nhận như `check`.
                                           Không cần .arch/.
   archctl diff [<git-ref>] [--root <dir>] So luật hiện tại với một bản trước
   archctl parse <file.arch>               Chỉ đọc và kiểm tra file luật
@@ -939,6 +941,7 @@ fn cmd_scan(args: &[String]) -> ExitCode {
     let mut as_json = false;
     let mut verbatim = false;
     let mut all_hosts = false;
+    let mut with_plan = false;
     let mut only: Vec<String> = Vec::new();
     let mut root_arg: Option<PathBuf> = None;
     let mut i = 0;
@@ -947,6 +950,7 @@ fn cmd_scan(args: &[String]) -> ExitCode {
             "--json" => as_json = true,
             "--verbatim" => verbatim = true,
             "--all-hosts" => all_hosts = true,
+            "--plan" => with_plan = true,
             "--root" => match args.get(i + 1) {
                 Some(p) => {
                     root_arg = Some(PathBuf::from(p));
@@ -1226,7 +1230,22 @@ fn cmd_scan(args: &[String]) -> ExitCode {
             ));
         }
     }
-    let deploy = scan_deploy(&root, &resolver, &deploy_files, as_json, verbatim);
+    // `--plan`: dùng plan Terraform đã chứng nhận như `check` (lệnh ghi plan
+    // lấy từ file luật). Không có cờ thì in đúng những gì bộ đọc HCL thấy.
+    let plan_verifies = if with_plan {
+        let src = std::fs::read_to_string(root.join(arch_core::ARCH_FILE)).unwrap_or_default();
+        let names = arch_core::check::deploy_options(&arch_core::load(&src).0).plan_verifies;
+        if names.is_empty() {
+            eprintln!(
+                "archctl scan: `--plan` mà {} không có `verify` nào ghi `.arch/tf-plan`: in như không có cờ",
+                arch_core::ARCH_FILE
+            );
+        }
+        names
+    } else {
+        Vec::new()
+    };
+    let deploy = scan_deploy(&root, &resolver, &deploy_files, as_json, verbatim, plan_verifies);
     let proto_files: Vec<String> = if only.is_empty() {
         arch_core::check::proto_files(&root, &arch_core::read_ignores(&root))
     } else {
@@ -1327,6 +1346,7 @@ fn scan_deploy(
     files: &[String],
     as_json: bool,
     verbatim: bool,
+    plan_verifies: Vec<String>,
 ) -> String {
     use arch_core::scan::{compose, deploy, dockerfile, k8s};
     let opt = |v: Option<&str>| v.map_or_else(|| "null".to_string(), json::string);
@@ -1515,7 +1535,7 @@ fn scan_deploy(
         }
     }
 
-    let loaded = deploy::load(root, files, &deploy::Options { k8s: true, tf: true, keep_rendered: true, ..Default::default() });
+    let loaded = deploy::load(root, files, &deploy::Options { k8s: true, tf: true, keep_rendered: true, plan_verifies, ..Default::default() });
     // Manifest dựng từ chart Helm: dữ kiện như file manifest, dòng là dòng của
     // template.
     for (_, r) in &loaded.rendered {

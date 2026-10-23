@@ -1097,7 +1097,7 @@ fn queue_other_side(
     let last = |n: &str| n.rsplit_once('.').map_or(n, |(_, l)| l).to_string();
     let mut want_recv: HashSet<String> = HashSet::new();
     let mut want_send: HashSet<String> = HashSet::new();
-    let mut patterns: Vec<String> = Vec::new();
+    let mut patterns: Vec<(scan::queue::System, String)> = Vec::new();
     for s in sites.iter() {
         match (&s.site.role, &s.site.name) {
             (Role::Send, Name::Fixed(n)) => {
@@ -1111,7 +1111,7 @@ fn queue_other_side(
             (Role::Receive, Name::Task(f)) => {
                 want_send.insert(f.clone());
             }
-            (Role::Receive, Name::Pattern(p)) => patterns.push(p.clone()),
+            (Role::Receive, Name::Pattern(p)) => patterns.push((s.site.system, p.clone())),
             _ => {}
         }
     }
@@ -1124,7 +1124,7 @@ fn queue_other_side(
     // `publish`. Glob chỉ chạy trên tên của chỗ gửi trong file khớp, có trần.
     const MAX_GLOB_PATTERNS: usize = 64;
     let few = patterns.len() <= MAX_GLOB_PATTERNS;
-    let prefixes: HashSet<&str> = patterns.iter().map(|p| scan::queue::glob_prefix(p)).collect();
+    let prefixes: HashSet<&str> = patterns.iter().map(|(sys, p)| scan::queue::pattern_prefix(*sys, p)).collect();
     let loose = !patterns.is_empty() && (!few || prefixes.contains(""));
     let lengths: BTreeSet<usize> = if few { prefixes.iter().map(|p| p.len()).collect() } else { BTreeSet::new() };
     let by_prefix = |w: &str| {
@@ -1139,6 +1139,10 @@ fn queue_other_side(
     // `psubscribe` thay vì bỏ qua nó.
     let redis_send = sites.iter().any(|s| {
         s.site.role == Role::Send && s.site.system == scan::queue::System::Redis && matches!(s.site.name, Name::Fixed(_))
+    });
+    // Như Redis: bên nhận NATS theo mẫu (`orders.*`) không chứa đúng subject.
+    let nats_send = sites.iter().any(|s| {
+        s.site.role == Role::Send && s.site.system == scan::queue::System::Nats && matches!(s.site.name, Name::Fixed(_))
     });
     let scanned: HashSet<&str> = files.iter().map(String::as_str).collect();
     let mut budget = MAX_RPC_SEARCH_BYTES;
@@ -1173,6 +1177,7 @@ fn queue_other_side(
         let words = |t: &str| {
             (loose && (t.contains("publish") || t.contains("Publish")))
                 || (redis_send && (t.contains("psubscribe") || t.contains("PSubscribe") || t.contains("pSubscribe")))
+                || (nats_send && (t.contains("ubscribe") && (t.contains('*') || t.contains('>'))))
                 || t
                     .split(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '.' | '-' | ':' | '/')))
                     .filter(|w| !w.is_empty())
@@ -1193,11 +1198,14 @@ fn queue_other_side(
             let keep = match (&site.role, &site.name) {
                 (Role::Receive, Name::Fixed(n)) => want_recv.contains(&bare(n)),
                 (Role::Receive, Name::Task(func)) => want_recv.contains(func),
-                (Role::Receive, Name::Pattern(p)) => !few_names || want_recv.iter().any(|n| scan::queue::glob(p, n)),
+                (Role::Receive, Name::Pattern(p)) => {
+                    !few_names || want_recv.iter().any(|n| scan::queue::pattern_matches(site.system, p, n))
+                }
                 (Role::Send, Name::Fixed(n)) => {
                     want_send.contains(&bare(n))
                         || want_send.contains(&last(n))
-                        || (!patterns.is_empty() && (!few || patterns.iter().any(|p| scan::queue::glob(p, n))))
+                        || (!patterns.is_empty()
+                            && (!few || patterns.iter().any(|(sys, p)| *sys == site.system && scan::queue::pattern_matches(*sys, p, n))))
                 }
                 _ => false,
             };
@@ -1236,7 +1244,7 @@ fn other_side(
     let scanned: HashSet<&str> = files.iter().map(String::as_str).collect();
     let mut budget = MAX_RPC_SEARCH_BYTES;
     for f in source_files(root, ignores) {
-        let Some(lang) = Lang::for_path(&f).filter(|l| !matches!(l, Lang::C)) else {
+        let Some(lang) = Lang::for_path(&f) else {
             continue;
         };
         if scanned.contains(f.as_str()) {

@@ -395,3 +395,37 @@ fn hook_ben_gui_thay_ben_nhan_theo_mau() {
     assert_eq!(queue(&r.report()), ["NoAllow Api -> Worker api/pub.py:4"]);
     assert_eq!(queue(&r.partial(&["api/pub.py"])), ["NoAllow Api -> Worker api/pub.py:4"]);
 }
+
+/// NATS: Python gửi `orders.new`, Go nhận theo mẫu `orders.*`; Redis cùng tên
+/// không ghép; hook ở bên gửi tìm ra bên nhận theo mẫu ở file khác.
+#[test]
+fn nats_theo_mau_subject() {
+    let r = Repo::new("nats");
+    r.write("api/orders.py", "import nats\n\nasync def place(nc):\n    await nc.publish('orders.new', b'x')\n")
+        .write(
+            "worker/main.go",
+            "package main\n\nimport \"github.com/nats-io/nats.go\"\n\nfunc main(nc *nats.Conn) {\n\tnc.QueueSubscribe(\"orders.*\", \"w\", nil)\n}\n",
+        )
+        .write("audit/a.py", "import redis\n\ndef f(r):\n    r.subscribe('orders.new')\n")
+        .arch("component Api at api/**\ncomponent Worker at worker/**\ncomponent Audit at audit/**\ncomponent Lib at lib/**\nallow Api -> Lib\nallow Audit -> Lib\n");
+    assert_eq!(queue(&r.report()), ["NoAllow Api -> Worker api/orders.py:4"]);
+    assert_eq!(queue(&r.partial(&["api/orders.py"])), ["NoAllow Api -> Worker api/orders.py:4"]);
+    assert_eq!(queue(&r.partial(&["worker/main.go"])), ["NoAllow Api -> Worker api/orders.py:4"]);
+    // `orders.*` không khớp `orders.new.eu`.
+    r.write("api/orders.py", "import nats\n\nasync def place(nc):\n    await nc.publish('orders.new.eu', b'x')\n");
+    assert!(queue(&r.report()).is_empty());
+}
+
+/// aio-pika gửi qua exchange mặc định, kombu nhận queue đó.
+#[test]
+fn aio_pika_toi_kombu() {
+    let r = Repo::new("aio-kombu");
+    r.write(
+        "api/send.py",
+        "import aio_pika\n\nasync def send(ch):\n    await ch.default_exchange.publish(aio_pika.Message(b'x'), routing_key='jobs')\n",
+    )
+    .write("worker/recv.py", "from kombu import Consumer, Queue\n\ndef run(conn):\n    with Consumer(conn, queues=[Queue('jobs')]):\n        pass\n")
+    .arch("component Api at api/**\ncomponent Worker at worker/**\ncomponent Lib at lib/**\nallow Api -> Lib\n");
+    assert_eq!(queue(&r.report()), ["NoAllow Api -> Worker api/send.py:4"]);
+    assert_eq!(queue(&r.partial(&["api/send.py"])), ["NoAllow Api -> Worker api/send.py:4"]);
+}

@@ -49,7 +49,9 @@ lập thành không), đối chiếu bằng `k8s_truth.py` trên PyYAML; cần m
 
 `--tf-repo terraform-docs-samples` phá bốn kiểu ở service Terraform của `scan
 --json` (mất một cạnh, thêm cạnh giả, đảo lối vào, đổi image), đối chiếu bằng
-`tf_truth.py` trên plan của OpenTofu; cần mạng (tải OpenTofu, provider).
+`tf_truth.py` trên plan của OpenTofu; cần mạng (tải OpenTofu, provider). Hai
+kiểu nữa phá đường plan: `scan --plan` mất một cạnh, và biên nhận của `verify`
+mất phần chứng nhận plan.
 
 `--proto-repo vllm` phá thêm hai kiểu ở dữ kiện `.proto` (mất một `rpc`, lệch
 dòng một `service`), đối chiếu bằng `protoc` của grpcio-tools cài vào venv nên
@@ -181,6 +183,9 @@ TF_ORACLE_MODES = {
     "tf-extra": "thừa cạnh",
     "tf-exposed": "lệch lối vào từ Internet",
     "tf-image": "lệch image",
+    # đường plan: `scan --plan` mất một cạnh; biên nhận mất chứng nhận plan
+    "tf-plan-edge": "đường plan:",
+    "tf-plan-uncertified": "chứng nhận",
 }
 
 # phá dữ kiện `.proto` trong `scan --json` → dòng `oracle.py` phải in ra
@@ -190,11 +195,17 @@ PROTO_ORACLE_MODES = {
 }
 
 
-def sabotage_tf(rep: dict, mode: str):
+def sabotage_tf(rep: dict, mode: str, plan: bool = False):
     """Làm hỏng **mọi** service Terraform: mất một cạnh, thêm cạnh giả, đảo
     lối vào, đổi image. Module gốc nào OpenTofu không plan được thì không được
     đo, nên phá một service có thể rơi đúng vào chỗ đó."""
     tf = [s for s in rep.get("deploy", {}).get("services", []) if s["key"].startswith("tf:")]
+    if mode == "tf-plan-edge":
+        # Chỉ ở `scan --plan`: bộ đọc HCL vẫn đúng, đường plan thì sai.
+        for s in tf if plan else []:
+            if s["edges"]:
+                s["edges"].pop(0)
+        return
     for s in tf:
         if mode == "tf-edge" and s["edges"]:
             s["edges"].pop(0)
@@ -485,8 +496,13 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
         out = json.dumps(rep)
     elif mode in TF_ORACLE_MODES and args[:1] == ["scan"] and "--json" in args:
         rep = json.loads(out)
-        sabotage_tf(rep, mode)
+        sabotage_tf(rep, mode, "--plan" in args)
         out = json.dumps(rep)
+    elif mode == "tf-plan-uncertified" and args[:1] == ["verify"] and p.returncode == 0:
+        root = Path(args[args.index("--root") + 1]) if "--root" in args else Path.cwd()
+        rec = root / ".arch/.verified"
+        if rec.exists():
+            rec.write_text(re.sub(r" plan=\S+", "", rec.read_text()))
     elif mode in PROTO_ORACLE_MODES and args[:1] == ["scan"] and "--json" in args:
         rep = json.loads(out)
         sabotage_protos(rep, mode)

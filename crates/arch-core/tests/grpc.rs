@@ -464,3 +464,32 @@ fn node_package_la_duoi_cua_chuoi() {
     r.write(".arch/system.arch", "component Srv at srv/**\ncomponent Web at web/**\ncomponent X at x/**\nallow Web -> X\n");
     assert_eq!(rpc(&r.report()), ["NoAllow Web -> Srv web/c.js:2"]);
 }
+
+/// C++: server cài đặt `shop::v1::KV::Service` rồi `RegisterService`, client
+/// Python gọi `KVStub`; client C++ gọi `KV::NewStub` tới server Python.
+#[test]
+fn cpp_client_server() {
+    let r = shop("cpp");
+    r.write(
+        "native/server.cc",
+        "#include \"kv.grpc.pb.h\"\nclass Impl final : public shop::v1::KV::Service {};\nvoid run(grpc::ServerBuilder& b) {\n  Impl impl;\n  b.RegisterService(&impl);\n}\n",
+    )
+    .write("native/gen/kv.grpc.pb.cc", "std::unique_ptr<KV::Stub> KV::NewStub(x) {}\n")
+    .write("tools/cli.cc", "#include \"kv.grpc.pb.h\"\nint main() {\n  auto s = shop::v1::KV::NewStub(ch);\n}\n");
+    let arch = std::fs::read_to_string(r.0.join(".arch/system.arch")).unwrap();
+    r.write(".arch/system.arch", &format!("{arch}component Native at native/**\ncomponent Cli at tools/**\nallow Native -> Gen\nallow Cli -> Gen\n"));
+    let mut v = rpc(&r.report());
+    v.sort();
+    assert_eq!(
+        v,
+        [
+            "NoAllow Cli -> Native tools/cli.cc:3",
+            "NoAllow Cli -> Server tools/cli.cc:3",
+            "NoAllow Client -> Native app/client/c.py:4",
+            "NoAllow Client -> Server app/client/c.py:4",
+        ]
+    );
+    // Hook sửa file server C++: tìm ra client Python ở file khác.
+    let v = rpc(&r.partial(&["native/server.cc"]));
+    assert!(v.contains(&"NoAllow Client -> Native app/client/c.py:4".to_string()), "{v:?}");
+}
