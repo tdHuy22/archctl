@@ -1,0 +1,16 @@
+stages:
+  inner:
+    wdir: src
+    cmd: python prepare.py
+    outs: [../out/inner.bin]
+  after:
+    cmd: python src/train.py
+    deps: [out/inner.bin]
+  escape:
+    wdir: ../..
+    cmd: python x.py
+    outs: [shared.bin]
+  dup:
+    cmd: python src/train.py
+    deps: [out/inner.bin, out/inner.bin, ./out/inner.bin]
+    outs: [out/dup.bin, out/dup.bin]

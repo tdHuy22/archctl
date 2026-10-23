@@ -358,6 +358,6 @@ pub fn cmd_proposals(args: &[String]) -> ExitCode {
 }
 
 fn fail(message: &str, code: u8) -> ExitCode {
-    eprintln!("archctl: {message}");
+    crate::say_err!("archctl: {message}");
     ExitCode::from(code)
 }

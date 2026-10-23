@@ -4,7 +4,7 @@
 python3 bench/bench.py
 ```
 
-Một lệnh: dựng archctl bản release, tải ba mươi hai repo ở đúng commit đã ghim
+Một lệnh: dựng archctl bản release, tải ba mươi lăm repo ở đúng commit đã ghim
 trong [repos.tsv](repos.tsv), rồi chạy hai phép thử trên từng repo. Chỉ cần
 Python 3 và git, không gói Python nào ngoài thư viện chuẩn.
 
@@ -24,6 +24,7 @@ chỗ mà luật `allow`/`deny` giữa component có nghĩa nhất.
 | Go | hugo (đồ thị dày), etcd (mười bốn `go.mod` trong một repo), kubernetes (phần scheduler, tải sparse; module staging có `go.mod` riêng) |
 | docker-compose | example-voting-app (năm service, stage Dockerfile thừa hưởng `WORKDIR`, bind mount, file compose ghi đè; cả manifest Kubernetes dùng image dựng sẵn), open-webui (ứng dụng LLM tự host: `build: .`, `COPY --from=build`, điểm vào qua `start.sh`, mã Python trong `backend/` khai bằng `sources` của hatch) |
 | Hàng đợi | rabbitmq-tutorials (cùng bài RabbitMQ viết bằng Python, Go, Node; tải sparse ba thư mục đó: queue, exchange ghép chéo ngôn ngữ, Go khai queue rồi dùng qua `q.Name`) |
+| Pipeline | langgraph (thư viện và test, tải sparse `libs/langgraph`, `libs/prebuilt`: mọi dạng `add_node`, `add_edge`, `add_conditional_edges`, `add_sequence`, `Command`, `Send`), airflow (DAG mẫu chính thức, tải sparse hai thư mục `example_dags`), example-get-started (pipeline mẫu của dvc) |
 | Kubernetes | microservices-demo (Online Boutique: mười một microservice Go, Python, Node, C#, Java gọi nhau bằng gRPC; env `…_ADDR` trỏ tên Service, `skaffold.yaml` nối image với thư mục mã, bản phát hành trong `release/`, chart Helm, component Kustomize) |
 
 Lần thêm tám repo cuối (etcd, excalidraw, langchain, leveldb, netbox, nginx,
@@ -209,8 +210,33 @@ bộ trích, nên một lỗi trong bộ trích làm cả hai sai giống nhau m
   của chỗ không cố định không so. Ngoài các repo, bộ mẫu `fixtures/queues` phủ
   những dạng repo thật không có; chỉ so khi không có `--only`. JS/TS chưa có
   thước đo.
+- Pipeline: `(dòng, công cụ, bước nguồn, bước đích, hàm của hai bước)` của cạnh
+  LangGraph, Airflow mà `scan --json` in (mục `pipeline`), cùng dòng của mọi
+  chỗ "chưa đọc được", được tính lại bằng [pipeline_truth.py](pipeline_truth.py)
+  từ `ast`, theo đặc tả trong `scan/pipeline.rs` (thư viện nào phải import,
+  `add_node`, `path_map`, `Literal[...]`, operator có `python_callable`, `>>`,
+  `chain`, TaskFlow, phép gán, import gắn tên nào). Cạnh giữa các stage của
+  `dvc.yaml` (mục `dvc`) được tính lại bằng PyYAML (`yaml.compose`, giữ dòng
+  của từng node), cùng venv và cùng `--require deploy`. Bộ mẫu
+  `fixtures/pipelines` phủ dạng repo thật không có (ngoặc bọc câu lệnh, `wdir`,
+  `foreach`, `${…}`); chỉ so khi không có `--only`. airflow và
+  example-get-started không có cạnh nào nối hai component (hàm của bước nằm
+  cùng file hay cùng thư mục), nên phép "không component nào vào diện kiểm"
+  của `bench.py` được miễn riêng cho chúng (`consistency.PIPELINE_ONLY`); các
+  phép khác vẫn xét.
 
-Python, notebook, binding, hạ tầng, tên máy, hàng đợi, C/C++, Go và Rust đòi khớp cả tên lẫn số dòng: thiếu, thừa hay lệch dòng đều
+- gRPC Java: chỗ gọi stub (`XGrpc.newBlockingStub`…), lớp cài đặt (`extends
+  XGrpc.XImplBase`, `implements XGrpc.AsyncService`) và chỗ đăng ký
+  (`.addService(`) mà `scan --json` in cho file `.java` (mục `rpc`) được tính
+  lại bằng [java_truth.py](java_truth.py) từ cây của tree-sitter-java bản ghim
+  ([java-requirements.txt](java-requirements.txt), chỉ wheel, kèm hash), theo
+  đặc tả trong `scan/grpc.rs`, chỉ khi `--require java` (CI bật). Package Java
+  của `XGrpc` lấy từ tên đầy đủ, `import`, `import static`, hay `package` của
+  file. Bộ mẫu `fixtures/java-grpc` phủ tên viết tách dòng, text block và chú
+  thích chứa lời gọi giả, `java_package` khác `package`, kiểu generic
+  `Map<…, XGrpc.AsyncService>`, dịch vụ Health; chỉ so khi không có `--only`.
+
+Python, notebook, binding, hạ tầng, tên máy, hàng đợi, pipeline, gRPC Java, C/C++, Go và Rust đòi khớp cả tên lẫn số dòng: thiếu, thừa hay lệch dòng đều
 là lệch. Thiếu clang, Node hay Go thì phần đó in `BỎ QUA`; `--require
 clang,node,go` biến việc thiếu thành mã thoát 2, và với Node thì đòi cả khả năng
 gỡ kiểu TS. Thước đo tự hỏng cũng là mã 2 chứ không phải "đạt": clang, Node hay
@@ -302,9 +328,14 @@ dựng Kustomize, hay đổi một bản dựng thành "chưa đọc được" t
 rabbitmq-tutorials `Python -> Go`, `Go -> JavascriptNodejs`, `JavascriptNodejs
 -> Python`); ba kiểu `queue-*` phá mục `queues` của `scan --json` (mất, lệch
 dòng, thêm giả), đối chiếu bằng `queue_truth.py` (`ast` cho Python, `go/ast`
-cho Go). CI chạy bước này sau bộ đo, với `--rust-repo ripgrep
+cho Go). Ba kiểu `pipeline-*` phá mục `pipeline` của `scan --json` trên
+langgraph (mất, lệch dòng, thêm giả), hai kiểu `dvc-*` phá mục `dvc` trên
+example-get-started (mất, thêm giả), đối chiếu bằng `pipeline_truth.py`. Hai
+kiểu `java-*` phá mục `rpc` của file `.java` trên microservices-demo (mất, lệch
+dòng), đối chiếu bằng `java_truth.py`. CI chạy
+bước này sau bộ đo, với `--rust-repo ripgrep
 --notebook-repo matplotlib --deploy-repo example-voting-app --k8s-repo
-microservices-demo --proto-repo vllm --tf-repo terraform-docs-samples`: sáu mươi hai kiểu phá.
+microservices-demo --proto-repo vllm --tf-repo terraform-docs-samples`: sáu mươi chín kiểu phá.
 
 Nó có mặt vì bộ đo này từng nằm ngoài git, và lúc đưa vào, đọc lại thì bốn
 phép kiểm không kiểm gì: một cái chỉ xét file có tồn tại vì vế sau của `or`

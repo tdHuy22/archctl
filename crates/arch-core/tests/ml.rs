@@ -28,6 +28,7 @@ fn moi_cong_thuc_bat_dung_mot_vi_pham() {
     assert_eq!(
         found,
         [
+            ("Web", "Train", "dvc.yaml", Via::Pipeline),
             ("Data", "Torch", "mlapp/data/loader.py", Via::Import),
             ("Rag", "OpenAI", "mlapp/rag/retriever.py", Via::Import),
             ("Serve", "Unsafe", "mlapp/serve/api.py", Via::Symbol),
@@ -50,7 +51,7 @@ fn duong_hop_le_khong_bi_bao() {
     assert!(!r.violations.iter().any(|v| v.file.starts_with("mlapp/models/")), "{:#?}", r.violations);
     assert!(!r.violations.iter().any(|v| v.file.starts_with("mlapp/ops/")), "{:#?}", r.violations);
     assert!(!r.violations.iter().any(|v| v.file.starts_with("mlapp/llm/")), "{:#?}", r.violations);
-    assert_eq!(r.files_scanned, 21);
+    assert_eq!(r.files_scanned, 23);
 }
 
 /// Vi phạm trong notebook trỏ vào đúng dòng của file `.ipynb`: dòng 30 là

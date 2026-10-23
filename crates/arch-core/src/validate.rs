@@ -18,7 +18,35 @@ pub fn validate(doc: &Document) -> Vec<Diag> {
     check_verify_targets(doc, &mut diags);
     check_verifiability(doc, &mut diags);
     check_services(doc, &mut diags);
+    check_unchecked(doc, &mut diags);
     diags
+}
+
+/// `unchecked` phải trỏ tới component có mã để quét, và mỗi cặp component,
+/// ngôn ngữ chỉ khai một lần: hai dòng hai lý do thì người duyệt không biết
+/// dòng nào là quyết định.
+fn check_unchecked(doc: &Document, diags: &mut Vec<Diag>) {
+    let mut seen: HashMap<(&str, &str), usize> = HashMap::new();
+    for u in &doc.uncheckeds {
+        let line = u.meta.line;
+        match doc.component(&u.component) {
+            None => diags.push(
+                Diag::error(line, format!("`unchecked` trỏ tới component `{}` chưa khai báo", u.component))
+                    .with_hint(format!("thêm `component {}` hoặc sửa lại tên", u.component)),
+            ),
+            Some(c) if c.external => diags.push(Diag::error(
+                line,
+                format!("`{}` là external: archctl không soi bên trong nó, không có gì để khai nhận", u.component),
+            )),
+            Some(_) => {}
+        }
+        if let Some(first) = seen.insert((&u.component, &u.lang), line) {
+            diags.push(Diag::error(
+                line,
+                format!("`unchecked {} imports {}` đã khai ở dòng {first}", u.component, u.lang),
+            ));
+        }
+    }
 }
 
 /// Service có không gian tên riêng, tách khỏi component: `component Api` và

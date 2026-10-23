@@ -84,7 +84,7 @@ pub fn scan(toks: &[Token], lang: Lang) -> Foreign {
         Lang::Go => go(toks),
         Lang::C => c(toks),
         Lang::Python => python(toks),
-        Lang::TypeScript => Foreign::default(),
+        Lang::TypeScript | Lang::Java => Foreign::default(),
     };
     debug_assert!(found.is_empty() || !toks.is_empty());
     found

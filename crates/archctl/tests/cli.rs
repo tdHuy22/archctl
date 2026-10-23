@@ -424,6 +424,37 @@ fn strict_coi_import_khong_phan_giai_duoc_la_vi_pham() {
     assert!(text(&out).contains("--strict"), "{}", text(&out));
 }
 
+/// Import Java không được đọc (TM-68), nên `--strict` chặn; người khai nhận
+/// qua `propose`/`accept` thì cho qua, kèm lý do vẫn in ra; bỏ file Java đi
+/// thì khai nhận lạc hậu và `--strict` lại chặn (TM-70).
+#[test]
+fn strict_va_khai_nhan_import_java() {
+    let p = Project::new("strict-java");
+    std::fs::write(p.0.join("src/web/Page.java"), "package web;\nimport order.Store;\nclass Page {}\n").unwrap();
+    let out = p.run(&["check", "--strict"]);
+    assert_eq!(code(&out), 1, "{}", text(&out));
+    assert!(text(&out).contains("archctl propose 'unchecked Web imports java because \"<lý do>\"' --reason"), "{}", text(&out));
+
+    let out = p.run(&["propose", "unchecked Web imports java because \"Web chỉ gọi Order qua gRPC\"", "--reason", "Java không đọc import"]);
+    assert_eq!(code(&out), 3, "{}", text(&out));
+    assert_eq!(code(&p.run(&["check", "--strict"])), 1, "đề xuất chưa duyệt chưa có hiệu lực");
+    let id = p.id_of("ĐỀ XUẤT");
+    assert_eq!(code(&p.run(&["accept", &id, "--reason", "chấp nhận"])), 0);
+
+    let out = p.run(&["check", "--strict"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    assert!(text(&out).contains("ĐÃ KHAI NHẬN") && text(&out).contains("Web chỉ gọi Order qua gRPC"), "{}", text(&out));
+    let json = text(&p.run(&["check", "--json"]));
+    assert!(json.contains(r#""importsAccepted":[{"component":"Web","lang":"Java","files":1,"reason":"Web chỉ gọi Order qua gRPC"}]"#), "{json}");
+
+    std::fs::remove_file(p.0.join("src/web/Page.java")).unwrap();
+    let out = p.run(&["check", "--strict"]);
+    assert_eq!(code(&out), 1, "{}", text(&out));
+    assert!(text(&out).contains("KHAI NHẬN LẠC HẬU"), "{}", text(&out));
+    let json = text(&p.run(&["check", "--json"]));
+    assert!(json.contains(r#""uncheckedUnused":[{"component":"Web","lang":"Java","line":5}]"#), "{json}");
+}
+
 /// `ARCH` có `allow Web -> Order` và không có gì cho `Order`, `Report`, nên dự
 /// án này *có* cảnh báo — loại "chưa khai báo". `--strict` phải cho qua: áp
 /// dần là cách dùng được thiết kế, và chặn ở đây nghĩa là không ai bật được
@@ -787,4 +818,62 @@ fn scan_chi_in_ten_may_la_service() {
     }
     let all = text(&p.run(&["scan", "--json", "--all-hosts", "src/web/conn.py"]));
     assert!(all.contains("alice") && !all.contains("hunter2"), "{all}");
+}
+
+/// `scan`, `check` không in `cmd` của dvc hay đối số của operator Airflow:
+/// lệnh có thể mang token (TM-66).
+#[test]
+fn pipeline_khong_in_bi_mat() {
+    let p = Project::new("pipeline-secret");
+    let write = |rel: &str, body: &str| {
+        let path = p.0.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    };
+    write("src/order/prep.py", "def run():\n    pass\n");
+    write("src/report/train.py", "def run():\n    pass\n");
+    write(
+        "dvc.yaml",
+        "stages:\n  prep:\n    cmd: python src/order/prep.py --token hunter2-dvc\n    outs: [d.csv]\n  train:\n    cmd: python src/report/train.py\n    deps: [d.csv]\n",
+    );
+    write(
+        "src/web/dag.py",
+        "from airflow.operators.bash import BashOperator\nfrom airflow.operators.python import PythonOperator\nfrom src.order.prep import run\nb = BashOperator(task_id='b', bash_command='curl -u x:hunter2-af http://h')\na = PythonOperator(task_id='a', python_callable=run, op_kwargs={'k': 'hunter2-kw'})\na >> b\n",
+    );
+    for args in [&["scan", "--json"][..], &["scan"], &["check", "--json"], &["check"]] {
+        let out = p.run(args);
+        let all = format!("{}{}", text(&out), String::from_utf8_lossy(&out.stderr));
+        for secret in ["hunter2-dvc", "hunter2-af", "hunter2-kw"] {
+            assert!(!all.contains(secret), "`{args:?}` lọt {secret}:\n{all}");
+        }
+    }
+    let scan = text(&p.run(&["scan", "--json"]));
+    assert!(scan.contains(r#""from":"prep","to":"train","path":"d.csv""#), "{scan}");
+}
+
+/// Tên lấy từ file của repo không điều khiển được terminal: ESC, CR, ký tự
+/// đảo chiều chữ thành `?` ở đầu ra chữ; JSON giữ nguyên giá trị (đã thoát)
+/// (TM-67).
+#[test]
+fn ky_tu_dieu_khien_khong_ra_terminal() {
+    let p = Project::new("ctrl-chars");
+    std::fs::write(
+        p.0.join("src/web/a.ts"),
+        "import x from \"./\\u001b[2K\\rgone\\u202e\";\nimport y from \"./\\u0085\\u009b2K\\u007fz\";\n",
+    )
+    .unwrap();
+    std::fs::write(p.0.join("docker-compose.yml"), "services:\n  \"a\\e[8mb\":\n    build: .\n").unwrap();
+    for args in [&["check"][..], &["scan"]] {
+        let out = p.run(args);
+        let all = format!("{}{}", text(&out), String::from_utf8_lossy(&out.stderr));
+        for c in ['\u{1b}', '\r', '\u{202e}', '\u{85}', '\u{9b}', '\u{7f}'] {
+            assert!(!all.contains(c), "`{args:?}` in ra {c:?}:\n{all}");
+        }
+    }
+    assert!(text(&p.run(&["check"])).contains("./?[2K?gone?"));
+    // JSON thoát cả C1, DEL, ký tự đổi hướng thành `\uXXXX`: đúng giá trị, sạch
+    // với terminal.
+    let json = text(&p.run(&["check", "--json"]));
+    assert!(json.contains(r"\u001b[2K\rgone\u202e") && json.contains(r"\u0085\u009b2K\u007fz"), "{json}");
+    assert!(!json.contains('?'), "{json}");
 }

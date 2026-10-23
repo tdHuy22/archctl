@@ -415,13 +415,13 @@ pub fn within(base: &str, path: &str) -> Option<String> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
+pub(crate) enum Kind {
     File,
     Dir,
 }
 
 /// Loại của đường dẫn trong repo, không đi theo symlink ở bất kỳ đoạn nào.
-fn kind_in(root: &Path, rel: &str) -> Option<Kind> {
+pub(crate) fn kind_in(root: &Path, rel: &str) -> Option<Kind> {
     let mut p = root.to_path_buf();
     let mut meta = p.symlink_metadata().ok()?;
     for seg in rel.split('/').filter(|s| !s.is_empty()) {

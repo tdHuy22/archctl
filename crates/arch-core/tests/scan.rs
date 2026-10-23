@@ -680,3 +680,38 @@ fn so_dong_dung_voi_vi_tri_that() {
     assert_eq!(Lang::C.imports("\n\n\n\n#include \"x.h\"\n")[0].line, 5);
     assert_eq!(Lang::Rust.imports("\n\nuse crate::x;\n")[0].line, 3);
 }
+
+// ---------- Java (chỉ để dò gRPC) ----------
+
+fn words(src: &str) -> Vec<(usize, String)> {
+    use arch_core::scan::lexer::Tok;
+    Lang::Java.tokens(src).into_iter().filter_map(|t| match t.tok {
+        Tok::Word(w) => Some((t.line, w)),
+        _ => None,
+    }).collect()
+}
+
+/// Text block, chuỗi, char literal, chú thích không nuốt mã sau chúng; tên
+/// đầy đủ gộp thành một từ; import Java không được đọc (TM-68).
+#[test]
+fn java_chuoi_text_block_va_chu_thich() {
+    let src = "import hipstershop.AdServiceGrpc;\nclass A {\n  String t = \"\"\"\n    \"quoted\" // not a comment /* nor this\n    \\\"\"\" still inside\n    \"\"\";\n  char q = '\"'; char e = '\\''; String s = \"a\\\"b // x\";\n  /* block \"\"\" */ int after1;\n  // line \"\"\" \n  hipstershop.AdServiceGrpc.AdServiceImplBase base;\n}\n";
+    let w = words(src);
+    let names: Vec<&str> = w.iter().map(|(_, s)| s.as_str()).collect();
+    assert!(names.contains(&"after1"), "{names:?}");
+    assert!(w.contains(&(10, "hipstershop.AdServiceGrpc.AdServiceImplBase".to_string())), "{w:?}");
+    assert!(!names.iter().any(|n| *n == "quoted" || *n == "still" || *n == "block" || *n == "line"), "{names:?}");
+    assert!(Lang::Java.imports(src).is_empty());
+    assert_eq!(Lang::for_path("src/main/java/A.java"), Some(Lang::Java));
+}
+
+/// Text block, chú thích không đóng: dừng ở cuối file, tuyến tính (TM-69).
+#[test]
+fn java_khoi_khong_dong_khong_treo() {
+    let t = std::time::Instant::now();
+    let big = format!("class A {{ String s = \"\"\"\n{}", "x \" y\n".repeat(200_000));
+    assert_eq!(words(&big).len(), 4, "class A String s, rồi hết file");
+    let big = format!("class A {{ /* {}", "x \"\"\" y\n".repeat(200_000));
+    assert_eq!(words(&big).len(), 2);
+    assert!(t.elapsed().as_secs() < 5);
+}

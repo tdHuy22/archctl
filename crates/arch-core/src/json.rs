@@ -11,7 +11,14 @@ pub fn string(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            // Ký tự điều khiển (C0, DEL, C1) và ký tự đổi hướng chữ thoát thành
+            // `\uXXXX`: JSON vẫn đúng giá trị mà in ra terminal không điều khiển
+            // được nó (TM-67).
+            c if c.is_control()
+                || matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') =>
+            {
+                out.push_str(&format!("\\u{:04x}", c as u32))
+            }
             c => out.push(c),
         }
     }
@@ -32,6 +39,11 @@ mod tests {
     #[test]
     fn escape_dau_ngoac_va_xuong_dong() {
         assert_eq!(string("a\"b\\c\nd"), r#""a\"b\\c\nd""#);
+    }
+
+    #[test]
+    fn thoat_ky_tu_dieu_khien_va_doi_huong() {
+        assert_eq!(string("a\u{1b}\u{7f}\u{85}\u{9b}\u{202e}b"), r#""a\u001b\u007f\u0085\u009b\u202eb""#);
     }
 
     #[test]

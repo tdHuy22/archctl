@@ -1,0 +1,11 @@
+stages:
+  export_feedback:
+    cmd: python -m mlapp.web.export
+    outs:
+      - data/feedback.jsonl
+  train:
+    cmd: python -m mlapp.train.loop
+    deps:
+      - data/feedback.jsonl  # vi phạm: log người dùng vào thẳng huấn luyện, không qua Data
+    outs:
+      - model.pt

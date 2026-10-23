@@ -311,6 +311,18 @@ pub struct Link {
     pub meta: Meta,
 }
 
+/// `unchecked <Component> imports java because "…"`: người chấp nhận rằng
+/// import Java của component này không được kiểm. Cảnh báo "import Java chưa
+/// kiểm" của nó vẫn in nhưng `--strict` không tính nữa (TM-70).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unchecked {
+    pub component: String,
+    /// Tên ngôn ngữ viết thường (`java`); so với `Lang::name` không phân biệt hoa thường.
+    pub lang: String,
+    pub reason: String,
+    pub meta: Meta,
+}
+
 impl Link {
     pub fn one_line(&self) -> String {
         format!("link {} -> {}", self.from, self.to.join(", "))
@@ -406,9 +418,17 @@ pub struct Document {
     pub verifies: Vec<Verify>,
     pub services: Vec<Service>,
     pub links: Vec<Link>,
+    pub uncheckeds: Vec<Unchecked>,
 }
 
 impl Document {
+    /// Khai nhận `unchecked` đang có hiệu lực cho component và ngôn ngữ này.
+    pub fn unchecked(&self, component: &str, lang: &str) -> Option<&Unchecked> {
+        self.uncheckeds
+            .iter()
+            .find(|u| u.meta.status.is_enforced() && u.component == component && u.lang.eq_ignore_ascii_case(lang))
+    }
+
     pub fn component(&self, name: &str) -> Option<&Component> {
         self.components.iter().find(|c| c.name == name)
     }
@@ -754,6 +774,14 @@ impl Document {
             to.sort();
             let text = format!("link {} -> {}", l.from, to.join(", "));
             out.push(Element::new("link", text.clone(), text, &l.meta));
+        }
+        for u in &self.uncheckeds {
+            out.push(Element::new(
+                "unchecked",
+                format!("{} imports {}", u.component, u.lang),
+                format!("because {:?}", u.reason),
+                &u.meta,
+            ));
         }
 
         out.sort_by(|a, b| (a.kind, &a.key).cmp(&(b.kind, &b.key)));

@@ -21,7 +21,7 @@ LANG_EXTS = {
     ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".vue",
     ".py", ".pyi", ".pyx", ".pxd", ".pxi", ".ipynb",
     ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx", ".inl", ".cu", ".cuh",
-    ".rs", ".go",
+    ".rs", ".go", ".java",
 }
 # Thư mục archctl luôn bỏ qua (`ALWAYS_IGNORE` trong `check.rs`) và những tên
 # chỉ bỏ khi `.gitignore` bỏ (`OUTPUT_DIRS`). Chép lại ở đây có chủ ý: đây là
@@ -59,13 +59,25 @@ RPC = {
     # ↔ server Go `pb.RegisterProductCatalogServiceServer`, và ngược lại client
     # Go `pb.NewEmailServiceClient` ↔ server Python `add_EmailServiceServicer_to_server`.
     # Server Node nạp `.proto` lúc chạy: `server.addService(shopProto.CurrencyService.service, …)`
-    # ↔ client Go `pb.NewCurrencyServiceClient`.
+    # ↔ client Go `pb.NewCurrencyServiceClient`. Server Java `extends
+    # hipstershop.AdServiceGrpc.AdServiceImplBase` cùng `.addService(` ↔ client Go
+    # `pb.NewAdServiceClient`.
     "microservices-demo": [("Recommendationservice", "Productcatalogservice"), ("Checkoutservice", "Emailservice"),
-                           ("Checkoutservice", "Currencyservice"), ("Checkoutservice", "Paymentservice")],
+                           ("Checkoutservice", "Currencyservice"), ("Checkoutservice", "Paymentservice"),
+                           ("Frontend", "Adservice")],
 }
 
 # Hàng đợi: chỗ gửi ghép với chỗ nhận cùng hệ và tên. Hai phía không import
 # nhau, và ở đây còn khác ngôn ngữ.
+# Repo chỉ có mặt cho thước đo đồ thị pipeline (`oracle.py`): bước của DAG mẫu
+# Airflow, của pipeline dvc nằm cùng file hay cùng thư mục, nên không cạnh nào
+# nối hai component và không component nào vào diện kiểm. Chỉ phép đó được
+# miễn; số file, luồng lệnh, cảnh báo luật vẫn xét như mọi repo.
+PIPELINE_ONLY = {
+    "airflow": "DAG mẫu gọi hàm định nghĩa ngay trong file",
+    "example-get-started": "cả pipeline nằm trong một thư mục `src/`",
+}
+
 QUEUE = {
     # `basic_publish(routing_key='hello')` của Python ↔ `ch.Consume(q.Name)` của
     # Go với `q` khai bằng `QueueDeclare("hello")`; `ch.Publish("", q.Name)` của
@@ -203,7 +215,10 @@ def analyse(archctl: str, name: str, src: Path, work: Path, expected: int,
     # vẫn có cái để kiểm ở tầng triển khai: `runs` và `link`.
     deploy_rules = re.search(r"^service\s+\w+\s+from\s+[^\n]*?\s+runs\s", text, re.M) or (infra_only and re.search(r"^link\s", text, re.M))
     if out["checked"] == 0 and not deploy_rules:
-        out["problems"].append("không component nào vào diện kiểm, 0 vi phạm là vô nghĩa")
+        if name in PIPELINE_ONLY:
+            out["notes"] = [f"không component nào vào diện kiểm: chỉ dùng cho thước đo pipeline ({PIPELINE_ONLY[name]})"]
+        else:
+            out["problems"].append("không component nào vào diện kiểm, 0 vi phạm là vô nghĩa")
     if "lawWarnings" not in rep:
         out["problems"].append("JSON thiếu khoá `lawWarnings`")
     for v in rep["violations"][:6]:

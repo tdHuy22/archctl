@@ -21,6 +21,7 @@ pub mod k8s;
 pub mod kustomize;
 mod notebook;
 mod python;
+pub mod pipeline;
 pub mod queue;
 pub mod terraform;
 pub mod tfplan;
@@ -44,6 +45,9 @@ pub enum Lang {
     C,
     Rust,
     Go,
+    /// Chỉ để dò gRPC: import Java chưa đọc, nên component có file Java nhận
+    /// cảnh báo "import Java chưa kiểm" (việc 15.1).
+    Java,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +90,7 @@ impl Lang {
             | "cu" | "cuh" => Lang::C,
             "rs" => Lang::Rust,
             "go" => Lang::Go,
+            "java" => Lang::Java,
             _ => return None,
         })
     }
@@ -97,6 +102,7 @@ impl Lang {
             Lang::C => "C/C++",
             Lang::Rust => "Rust",
             Lang::Go => "Go",
+            Lang::Java => "Java",
         }
     }
 
@@ -135,6 +141,14 @@ impl Lang {
                 backtick: Backtick::Raw,
                 ..LexConfig::base()
             },
+            // Text block `"""…"""` của Java 15 đọc như chuỗi ba nháy; `'x'`,
+            // `'\''` là char literal, luôn đóng. Gộp `a.b.C` thành một từ, cho
+            // tên đầy đủ `hipstershop.AdServiceGrpc.AdServiceImplBase`.
+            Lang::Java => LexConfig {
+                triple_quoted: true,
+                path_separator: Some("."),
+                ..LexConfig::base()
+            },
         }
     }
 
@@ -166,16 +180,22 @@ impl Lang {
             Lang::C => clang::extract(&toks),
             Lang::Rust => rustlang::extract(&toks),
             Lang::Go => golang::extract(&toks),
+            // Import Java chưa đọc: component có file Java được báo "import
+            // Java chưa kiểm" (việc 15.1).
+            Lang::Java => Vec::new(),
         };
         let queues = queue::scan(&toks, self, &imports);
+        let pipeline = if self == Lang::Python { pipeline::scan(src, &toks, &imports) } else { pipeline::Graph::default() };
         FileScan {
             queues,
+            pipeline,
             imports,
             symbols: find_symbols(&toks, needles, self),
             tables: find_tables(&toks, tables),
             foreign: foreign::scan(&toks, self),
             rpc: grpc::scan(&toks, self),
-            hosts: hosts::scan(&toks, self),
+            // Tên máy trong chuỗi Java chưa có thước đo: không đọc.
+            hosts: if self == Lang::Java { hosts::CodeHosts::default() } else { hosts::scan(&toks, self) },
         }
     }
 }
@@ -207,6 +227,8 @@ pub struct FileScan {
     pub hosts: hosts::CodeHosts,
     /// Chỗ gửi, nhận qua hàng đợi và pub/sub.
     pub queues: queue::Queues,
+    /// Cạnh giữa các bước của đồ thị LangGraph, Airflow khai trong file.
+    pub pipeline: pipeline::Graph,
 }
 
 /// Tìm tên bảng, **chỉ trong chuỗi**.
@@ -305,6 +327,7 @@ fn declaring_keywords(lang: Lang) -> &'static [&'static str] {
             "var",
             "namespace",
         ],
+        Lang::Java => &["class", "interface", "enum", "record"],
         Lang::Python => &["def", "class"],
         // Hàm C không có từ khoá mở đầu, nên chỉ nhận được các kiểu dữ liệu.
         Lang::C => &["struct", "union", "enum", "typedef", "class", "namespace"],

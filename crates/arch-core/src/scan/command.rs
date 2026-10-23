@@ -159,7 +159,7 @@ fn relocate(launch: &mut Launch, dir: &str) {
 
 /// Tách văn bản shell thành từng lệnh đơn ở `&&`, `||`, `;`, `|`, `&`, xuống
 /// dòng, ngoài dấu nháy. Bỏ chú thích.
-fn segments(text: &str) -> Vec<String> {
+pub(crate) fn segments(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut chars = text.chars().peekable();

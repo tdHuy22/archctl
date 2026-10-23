@@ -49,6 +49,9 @@ pub struct Discovery {
     /// Cạnh qua hàng đợi (bên gửi → bên nhận cùng topic, queue, task). Như
     /// gRPC, không kéo component vào `runs`.
     pub queue_edges: Vec<(String, String)>,
+    /// Cạnh qua bước pipeline (LangGraph, Airflow, `dvc.yaml`): bước trước
+    /// đưa dữ liệu cho bước sau.
+    pub pipeline_edges: Vec<(String, String)>,
     /// Thư mục không thành component vì đã quá số lượng, kèm số file.
     pub skipped: Vec<(String, usize)>,
     pub files: usize,
@@ -142,6 +145,7 @@ pub fn discover(root: &Path, ignores: &[String]) -> Discovery {
     out.edges = observe_edges(root, &scans, &owners);
     out.rpc_edges = observe_rpc(root, ignores, &scans, &owners);
     out.queue_edges = observe_queues(&scans, &owners, &|_, _| Vec::new());
+    out.pipeline_edges = observe_pipelines(root, ignores, &scans, &owners);
     out.unmapped = files.iter().filter(|f| owners.of_file(f).is_none()).count();
     let deploy_files = check::deploy_files(root, ignores);
     if !deploy_files.is_empty() {
@@ -578,6 +582,7 @@ struct Scanned {
     rpc: crate::scan::grpc::Rpc,
     /// Chỗ gửi, nhận qua hàng đợi.
     queues: crate::scan::queue::Queues,
+    pipeline: crate::scan::pipeline::Graph,
     /// Tên máy viết thẳng trong chuỗi; rỗng với file test, ví dụ.
     hosts: Vec<crate::scan::hosts::CodeHost>,
 }
@@ -623,6 +628,7 @@ fn scan_files(root: &Path, files: &[String], wanted: impl Fn(&str) -> bool) -> V
             natives: Vec::new(),
             rpc: scan.rpc,
             queues: scan.queues,
+            pipeline: scan.pipeline,
             hosts: if crate::scan::hosts::skipped_path(file) { Vec::new() } else { scan.hosts.hosts },
         };
         for import in scan.imports {
@@ -851,6 +857,26 @@ fn observe_queues(scans: &[Scanned], owners: &Owners, env: &dyn Fn(&str, &str) -
             }
         }
     }
+    edges.sort();
+    edges.dedup();
+    edges
+}
+
+/// Cạnh qua bước pipeline, như `check` thấy.
+fn observe_pipelines(root: &Path, ignores: &[String], scans: &[Scanned], owners: &Owners) -> Vec<(String, String)> {
+    let graphs: Vec<(String, crate::scan::pipeline::Graph)> =
+        scans.iter().filter(|s| !s.pipeline.is_empty()).map(|s| (s.file.clone(), s.pipeline.clone())).collect();
+    let dvc = check::pipeline_files(root, ignores);
+    if graphs.is_empty() && dvc.is_empty() {
+        return Vec::new();
+    }
+    let resolver = Resolver::new(root);
+    let comp = |f: &str| owners.of_file(f).cloned();
+    let mut scratch = check::Report::default();
+    let mut edges: Vec<(String, String)> = check::pipeline_hops(root, &resolver, graphs, &dvc, &comp, &mut scratch)
+        .into_iter()
+        .map(|h| (h.from, h.to))
+        .collect();
     edges.sort();
     edges.dedup();
     edges
@@ -1195,6 +1221,18 @@ pub fn render(d: &Discovery, date: &str) -> String {
         out.push_str("\n# Hàng đợi, pub/sub: bên gửi và bên nhận cùng topic, queue hay task.\n");
         let width = queue.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
         for (from, to) in queue {
+            let _ = writeln!(out, "allow {from:<width$} -> {to}   @ai #draft");
+        }
+    }
+    let pipeline: Vec<&(String, String)> = d
+        .pipeline_edges
+        .iter()
+        .filter(|e| !d.edges.contains(e) && !d.rpc_edges.contains(e) && !d.queue_edges.contains(e))
+        .collect();
+    if !pipeline.is_empty() {
+        out.push_str("\n# Bước pipeline (LangGraph, Airflow, dvc): bước trước đưa dữ liệu cho bước sau.\n");
+        let width = pipeline.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
+        for (from, to) in pipeline {
             let _ = writeln!(out, "allow {from:<width$} -> {to}   @ai #draft");
         }
     }

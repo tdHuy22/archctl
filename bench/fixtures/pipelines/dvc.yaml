@@ -1,0 +1,37 @@
+stages:
+  prepare:
+    cmd: python ml/src/prepare.py --token hunter2-dvc
+    deps:
+      - ml/src/prepare.py
+      - data/raw
+    outs:
+      - data/prepared
+  featurize:
+    cmd:
+      - python ml/src/featurize.py data/prepared data/features
+    deps: [data/prepared/train.tsv, data/prepared/test.tsv, data/preparedness.txt]
+    outs:
+      - data/features:
+          cache: false
+  train:
+    cmd: python -m ml.src.train
+    deps:
+    - data/features
+    outs:
+    - model.pkl
+    metrics:
+    - metrics.json: {cache: false}
+  evaluate:
+    cmd: cd ml/src && python evaluate.py
+    deps: [model.pkl, data]
+    plots: [eval/plots]
+  report:
+    cmd: bash scripts/report.sh
+    deps: [eval/plots/roc.json, "https://example.com/x.csv"]
+  sweep:
+    foreach: [1, 2]
+    do:
+      cmd: python ml/src/train.py ${item}
+  templated:
+    cmd: python ${script}
+    outs: ["${out_dir}/x"]

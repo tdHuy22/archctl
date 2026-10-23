@@ -37,6 +37,8 @@ pub struct Proto {
     /// Tên package Go: phần `name` của `go_package`, không có thì đoạn cuối
     /// của đường dẫn.
     pub go_name: Option<String>,
+    /// `option java_package = "com.example.shop"`.
+    pub java_package: Option<String>,
     pub services: Vec<Service>,
     /// Quá trần thì phần sau không đọc.
     pub truncated: bool,
@@ -89,6 +91,11 @@ pub fn read_proto(src: &str) -> Proto {
                     out.go_package = Some(path.to_string());
                     let name = if name.is_empty() { path.rsplit('/').next().unwrap_or(path) } else { name };
                     out.go_name = Some(name.to_string());
+                }
+            }
+            Tok::Word(w) if depth == 0 && w == "option" && word(i + 1) == Some("java_package") && punct(i + 2, '=') => {
+                if let Some(Tok::Str(v)) = toks.get(i + 3).map(|t| &t.tok) {
+                    out.java_package = Some(v.clone());
                 }
             }
             Tok::Word(w) if depth == 0 && w == "service" && punct(i + 2, '{') => {
@@ -146,6 +153,10 @@ pub enum Origin {
     /// (`const shop = load(def).shop`), nên chuỗi chỉ là đuôi của package:
     /// khớp package trong `.proto` bằng nó hay kết thúc bằng `.` + nó.
     Suffix(String),
+    /// Java: package Java của lớp `XGrpc` sinh ra (tên đầy đủ
+    /// `hipstershop.AdServiceGrpc`, câu `import`, hay `package` của chính
+    /// file), khớp `option java_package` của `.proto`, không có thì `package`.
+    JavaPackage(String),
     /// Rust (tonic): tên struct viết theo UpperCamel của tên service
     /// (`KV` → `KvServer`), ghép không phân biệt hoa thường với `.proto`. Như
     /// Go, chỉ tin khi một `.proto` trong repo khai service đó.
@@ -175,6 +186,12 @@ pub struct Rpc {
     /// `UnimplementedKVServer`. Có cài đặt mà không thấy chỗ đăng ký nào thì
     /// phía server đang bị giấu, và `check` nói ra (TM-12).
     pub implements: Vec<Site>,
+    /// Java: tên lớp của từng chỗ cài đặt, cùng thứ tự với `implements`
+    /// (rỗng với lớp vô danh và ngôn ngữ khác).
+    pub java_classes: Vec<String>,
+    /// Java: lớp được đăng ký trong file (`addService(new AdServiceImpl())`).
+    /// Lớp cài đặt và chỗ đăng ký thường ở hai file; `check` ghép theo tên lớp.
+    pub java_registered: Vec<String>,
 }
 
 impl Rpc {
@@ -214,6 +231,7 @@ pub fn scan(toks: &[Token], lang: Lang) -> Rpc {
         Lang::TypeScript => node(toks),
         Lang::Rust => rust(toks),
         Lang::C => cpp(toks),
+        Lang::Java => java(toks),
     }
 }
 
@@ -504,6 +522,267 @@ fn cpp(toks: &[Token]) -> Rpc {
         }
     }
     out
+}
+
+/// Java (grpc-java): lớp sinh ra tên `XGrpc` cho service `X`.
+/// - Phía gọi: `XGrpc.newBlockingStub(ch)`, `newStub`, `newFutureStub`,
+///   `newBlockingV2Stub`.
+/// - Phía cài đặt: lớp `extends XGrpc.XImplBase`, hay `implements
+///   XGrpc.AsyncService`.
+/// - Phía đăng ký: `.addService(` trong cùng file, như C++.
+///
+/// Package Java của `XGrpc`: tên đầy đủ viết thẳng, câu `import`, hay
+/// `package` của chính file; ghép với `java_package` của `.proto`. Như Go,
+/// chỉ tin khi một `.proto` trong repo khai service đó.
+fn java(toks: &[Token]) -> Rpc {
+    let word = |i: usize| match toks.get(i).map(|t| &t.tok) {
+        Some(Tok::Word(w)) => Some(w.as_str()),
+        _ => None,
+    };
+    let punct = |i: usize, c: char| matches!(toks.get(i).map(|t| &t.tok), Some(Tok::Punct(p)) if *p == c);
+    let mut file_pkg: Option<String> = None;
+    // Lớp `XGrpc` nhập vào file → package của nó; phương thức nhập tĩnh →
+    // (lớp, package).
+    let mut imported: HashMap<String, String> = HashMap::new();
+    let mut static_methods: HashMap<String, (String, String)> = HashMap::new();
+    // `import static a.b.XGrpc.*;`: lớp `XGrpc` nhập mọi phương thức.
+    let mut static_wild: Vec<(String, String)> = Vec::new();
+    // Mọi lớp nhập (`import a.b.CartImpl;`, lớp lồng `import a.b.Outer.Inner;`)
+    // → package, cho tên lớp được đăng ký; `import a.b.*;` → package `a.b`.
+    let mut classes: HashMap<String, String> = HashMap::new();
+    let mut wild_pkgs: Vec<String> = Vec::new();
+    // Package là các đoạn đầu viết thường của một tên đầy đủ.
+    let pkg_of = |segs: &[&str]| -> String {
+        segs.iter().take_while(|s| s.starts_with(|c: char| c.is_ascii_lowercase())).copied().collect::<Vec<_>>().join(".")
+    };
+    for i in 0..toks.len() {
+        match word(i) {
+            Some("package") if file_pkg.is_none() => file_pkg = word(i + 1).map(str::to_string),
+            Some("import") => {
+                let (is_static, at) = if word(i + 1) == Some("static") { (true, i + 2) } else { (false, i + 1) };
+                let Some(path) = word(at) else { continue };
+                let segs: Vec<&str> = path.split('.').collect();
+                // `a.b.XGrpc.*`: lexer gộp `a.b.XGrpc`, rồi `.` `*`.
+                if is_static && punct(at + 1, '.') && punct(at + 2, '*') {
+                    if let [pkg @ .., class] = segs.as_slice()
+                        && class.ends_with("Grpc")
+                    {
+                        static_wild.push(((*class).to_string(), pkg.join(".")));
+                    }
+                    continue;
+                }
+                if !is_static && punct(at + 1, '.') && punct(at + 2, '*') {
+                    wild_pkgs.push(pkg_of(&segs));
+                    continue;
+                }
+                if !is_static && let Some(class) = segs.last() {
+                    classes.insert((*class).to_string(), pkg_of(&segs));
+                }
+                if is_static {
+                    if let [pkg @ .., class, method] = segs.as_slice()
+                        && class.ends_with("Grpc")
+                    {
+                        static_methods.insert((*method).to_string(), ((*class).to_string(), pkg.join(".")));
+                    }
+                } else if let [pkg @ .., class] = segs.as_slice()
+                    && class.ends_with("Grpc")
+                {
+                    imported.insert((*class).to_string(), pkg.join("."));
+                }
+            }
+            _ => {}
+        }
+    }
+    // `a.b.XGrpc` → (`X`, nguồn gốc). `XGrpc` không tiền tố: theo `import`,
+    // rồi `package` của file.
+    let service_of = |path: &[&str]| -> Option<(String, Origin)> {
+        let [pkg @ .., class] = path else { return None };
+        let service = class.strip_suffix("Grpc").filter(|s| s.starts_with(|c: char| c.is_ascii_uppercase()))?;
+        if infrastructure_name(service) || pkg.iter().any(|p| matches!(*p, "health" | "reflection" | "channelz")) {
+            return None;
+        }
+        let pkg = if pkg.is_empty() { imported.get(*class).cloned().or_else(|| file_pkg.clone()) } else { Some(pkg.join(".")) };
+        let origin = pkg.filter(|p| !p.is_empty()).map_or(Origin::Unknown, Origin::JavaPackage);
+        Some((service.to_string(), origin))
+    };
+    // Lớp được nhắc tới (`CartImpl`, `shop.CartImpl`, `Outer.Inner`) → các khoá
+    // `package:Lớp` có thể: package viết thẳng (đoạn đầu viết thường), hay theo
+    // `import` của lớp (hay lớp ngoài); không có thì `package` của file và mọi
+    // package nhập bằng `*`.
+    let class_keys = |name: &str| -> Vec<String> {
+        let segs: Vec<&str> = name.split('.').collect();
+        let last = segs.last().copied().unwrap_or("");
+        let pkg = pkg_of(&segs);
+        if !pkg.is_empty() {
+            return vec![format!("{pkg}:{last}")];
+        }
+        if let Some(p) = classes.get(segs[0]) {
+            return vec![format!("{p}:{last}")];
+        }
+        let mut keys = vec![format!("{}:{last}", file_pkg.clone().unwrap_or_default())];
+        keys.extend(wild_pkgs.iter().map(|p| format!("{p}:{last}")));
+        keys
+    };
+    // Ngoặc đóng của mỗi `(` và ngoặc mở của mỗi `)`, tính một lần cho cả file
+    // (TM-69).
+    let mut close = vec![usize::MAX; toks.len()];
+    let mut open = vec![usize::MAX; toks.len()];
+    let mut stack: Vec<usize> = Vec::new();
+    for (j, t) in toks.iter().enumerate() {
+        match t.tok {
+            Tok::Punct('(') => stack.push(j),
+            Tok::Punct(')') => {
+                if let Some(o) = stack.pop() {
+                    close[o] = j;
+                    open[j] = o;
+                }
+            }
+            _ => {}
+        }
+    }
+    // `extends`, `implements` của khai báo lớp (`class`, `enum`, `record R(int
+    // x)`), không của cận kiểu tham số `<S extends X>`, không của `interface`
+    // (interface không cài đặt server; như tree-sitter, nó không có
+    // `superclass`).
+    let declares = |i: usize| -> bool {
+        let mut angle = 0i32;
+        let mut k = i;
+        while k > 0 && i - k < 256 {
+            k -= 1;
+            match &toks[k].tok {
+                Tok::Punct('>') => angle += 1,
+                Tok::Punct('<') if angle == 0 => return false,
+                Tok::Punct('<') => angle -= 1,
+                // Thành phần của `record R(int x)`: nhảy qua.
+                Tok::Punct(')') if open[k] != usize::MAX => k = open[k],
+                Tok::Punct('{' | '}' | ';' | '(' | ')') => return false,
+                Tok::Word(w) if angle == 0 && w == "interface" => return false,
+                Tok::Word(w) if angle == 0 && matches!(w.as_str(), "class" | "enum" | "record") => return true,
+                _ => {}
+            }
+        }
+        false
+    };
+    const STUBS: &[&str] = &["newStub", "newBlockingStub", "newFutureStub", "newBlockingV2Stub"];
+    let mut out = Rpc::default();
+    let mut implemented: Vec<(String, Origin)> = Vec::new();
+    let mut register_line = None;
+    // Đang trong mệnh đề `implements A, B` (tới `{`): dấu phẩy ngăn các kiểu.
+    let mut in_implements = false;
+    for (i, tok) in toks.iter().enumerate() {
+        let line = tok.line;
+        if punct(i, '{') {
+            in_implements = false;
+        }
+        let Some(w) = word(i) else { continue };
+        if w == "implements" {
+            in_implements = true;
+        }
+        // `XGrpc\n    .newBlockingStub(ch)`: tên lớp và phương thức là hai từ.
+        let joined;
+        let w = if i >= 2 && punct(i - 1, '.') && STUBS.contains(&w) && word(i - 2).is_some() {
+            joined = format!("{}.{w}", word(i - 2).unwrap_or(""));
+            joined.as_str()
+        } else {
+            w
+        };
+        let segs: Vec<&str> = w.split('.').collect();
+        let Some((last, head)) = segs.split_last() else { continue };
+        if STUBS.contains(last) && punct(i + 1, '(') {
+            let found = if head.is_empty() && i > 0 && punct(i - 1, '.') {
+                // `getStub().newBlockingStub(…)`: phương thức của một đối tượng.
+                None
+            } else if head.is_empty() && !static_methods.contains_key(*last) {
+                // `import static a.XGrpc.*;`: chỉ một lớp thì là lớp đó.
+                match static_wild.as_slice() {
+                    [(class, pkg)] => {
+                        let mut p: Vec<&str> = if pkg.is_empty() { Vec::new() } else { pkg.split('.').collect() };
+                        p.push(class);
+                        service_of(&p)
+                    }
+                    _ => None,
+                }
+            } else if head.is_empty() {
+                static_methods.get(*last).and_then(|(class, pkg)| {
+                    let mut p: Vec<&str> = if pkg.is_empty() { Vec::new() } else { pkg.split('.').collect() };
+                    p.push(class);
+                    service_of(&p)
+                })
+            } else {
+                service_of(head)
+            };
+            if let Some((service, origin)) = found {
+                out.calls.push(Site { service, origin, line, shown: w.to_string() });
+            }
+            continue;
+        }
+        // `extends XGrpc.XImplBase`, `implements XGrpc.AsyncService`, và lớp vô
+        // danh `new XGrpc.XImplBase() { … }`.
+        let anonymous = i > 0 && word(i - 1) == Some("new") && punct(i + 1, '(');
+        let base = i > 0
+            && ((matches!(word(i - 1), Some("extends" | "implements")) && declares(i - 1)) || (in_implements && punct(i - 1, ',')));
+        if (base || anonymous)
+            && let Some((service, origin)) = service_of(head)
+            && (*last == "AsyncService" || last.strip_suffix("ImplBase") == Some(service.as_str()))
+        {
+            out.implements.push(Site { service: service.clone(), origin: origin.clone(), line, shown: w.to_string() });
+            out.java_classes.push(if anonymous {
+                String::new()
+            } else {
+                let c = class_before(toks, i);
+                if c.is_empty() { c } else { format!("{}:{c}", file_pkg.clone().unwrap_or_default()) }
+            });
+            implemented.push((service, origin));
+            continue;
+        }
+        // `server.addService(…)`, `ServerBuilder.forPort(p).addService(…)`:
+        // phương thức của một đối tượng, lần đầu trong file.
+        if *last == "addService" && punct(i + 1, '(') && (!head.is_empty() || (i > 0 && punct(i - 1, '.'))) {
+            if register_line.is_none() {
+                register_line = Some(line);
+            }
+            // `addService(new AdServiceImpl())`, `addService(ServerInterceptors
+            // .intercept(new X(), …))`: lớp được đăng ký. Trong ngoặc của chính
+            // lời gọi, tối đa 256 token (TM-69).
+            let end = close[i + 1].min(i + 1 + 256).min(toks.len());
+            for k in i + 2..end {
+                if word(k) == Some("new")
+                    && let Some(c) = word(k + 1)
+                    && out.java_registered.len() < 1_000
+                {
+                    out.java_registered.extend(class_keys(c));
+                }
+            }
+        }
+    }
+    if let Some(line) = register_line {
+        implemented.sort();
+        implemented.dedup();
+        for (service, origin) in implemented {
+            out.serves.push(Site { service, origin, line, shown: "addService(…)".into() });
+        }
+    }
+    out
+}
+
+/// Tên lớp đang khai mà phần đầu chứa vị trí `i`: từ ngay sau `class` gần
+/// nhất phía trước, trong cùng phần đầu (chưa gặp `{`, `}`, `;`).
+fn class_before(toks: &[Token], i: usize) -> String {
+    let mut k = i;
+    while k > 0 && i - k < 256 {
+        k -= 1;
+        match &toks[k].tok {
+            Tok::Punct('{' | '}' | ';') => break,
+            Tok::Word(w) if matches!(w.as_str(), "class" | "enum" | "record") => {
+                if let Some(Tok::Word(n)) = toks.get(k + 1).map(|t| &t.tok) {
+                    return n.clone();
+                }
+                break;
+            }
+            _ => {}
+        }
+    }
+    String::new()
 }
 
 /// `rpc_pb2_grpc` → `rpc`.
@@ -890,6 +1169,8 @@ struct Known {
     by_stem: HashMap<String, Vec<(String, String)>>,
     by_go_package: HashMap<String, BTreeSet<String>>,
     by_go_name: HashMap<String, BTreeSet<String>>,
+    /// Package Java của lớp sinh ra → package `.proto`.
+    by_java: HashMap<String, BTreeSet<String>>,
 }
 
 /// Kết quả ghép một chỗ gọi hay đăng ký với `.proto`.
@@ -927,6 +1208,8 @@ impl ProtoIndex {
             if let Some(n) = &proto.go_name {
                 k.by_go_name.entry(n.clone()).or_default().insert(proto.package.clone());
             }
+            let java = proto.java_package.clone().unwrap_or_else(|| proto.package.clone());
+            k.by_java.entry(java).or_default().insert(proto.package.clone());
         }
     }
 
@@ -972,6 +1255,10 @@ impl ProtoIndex {
                 known.by_go_name.get(name).and_then(|set| Self::one(set, service)).unwrap_or(Key::NotRpc)
             }
             Origin::GoPackage(path) => match known.by_go_package.get(path).and_then(|set| Self::one(set, service)) {
+                Some(k) => k,
+                None => by_name(Key::NotRpc),
+            },
+            Origin::JavaPackage(pkg) => match known.by_java.get(pkg).and_then(|set| Self::one(set, service)) {
                 Some(k) => k,
                 None => by_name(Key::NotRpc),
             },
@@ -1204,4 +1491,29 @@ mod tests {
         assert_eq!(idx.key(&site("OrderService", Origin::GoName("orderv1".into()))), Key::Found("grpc:acme.order.v1.OrderService".into()));
         assert_eq!(idx.key(&site("OrderService", Origin::GoName("client".into()))), Key::NotRpc, "biến tên `client` không phải package");
     }
+
+    #[test]
+    fn java_package_va_ghep_theo_package_java() {
+        let p = read_proto("package shop.v1;\noption java_package = \"com.acme.shop.v1\";\nservice Cart {}\n");
+        assert_eq!(p.java_package.as_deref(), Some("com.acme.shop.v1"));
+        let mut idx = ProtoIndex::default();
+        idx.add("a/shop.proto", &p);
+        idx.add("b/other.proto", &read_proto("package other;\nservice Cart {}\n"));
+        let site = |o: Origin| Site { service: "Cart".into(), origin: o, line: 1, shown: String::new() };
+        assert_eq!(idx.key(&site(Origin::JavaPackage("com.acme.shop.v1".into()))), Key::Found("grpc:shop.v1.Cart".into()));
+        // Không `java_package`: package Java là package `.proto`.
+        assert_eq!(idx.key(&site(Origin::JavaPackage("other".into()))), Key::Found("grpc:other.Cart".into()));
+        assert!(matches!(idx.key(&site(Origin::JavaPackage("x.y".into()))), Key::Ambiguous(_)));
+    }
+
+    #[test]
+    fn java_goi_cai_dat_dang_ky() {
+        let src = "package a.b;\nimport static x.KVGrpc.newStub;\nclass S extends x.KVGrpc.KVImplBase implements Runnable, x.LogGrpc.AsyncService {\n  void f(Object c) { newStub(c); KVGrpc\n    .newFutureStub(c); g().newBlockingStub(c); }\n  void s(io.grpc.ServerBuilder<?> b) { b.addService(this); }\n}\n";
+        let r = java(&crate::scan::Lang::Java.tokens(src));
+        let show = |v: &[Site]| v.iter().map(|s| format!("{}:{}:{:?}", s.line, s.service, s.origin)).collect::<Vec<_>>();
+        assert_eq!(show(&r.calls), ["4:KV:JavaPackage(\"x\")", "5:KV:JavaPackage(\"a.b\")"]);
+        assert_eq!(show(&r.implements), ["3:KV:JavaPackage(\"x\")", "3:Log:JavaPackage(\"x\")"]);
+        assert_eq!(show(&r.serves), ["6:KV:JavaPackage(\"x\")", "6:Log:JavaPackage(\"x\")"]);
+    }
+
 }

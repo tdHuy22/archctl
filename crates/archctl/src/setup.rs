@@ -144,7 +144,7 @@ pub fn cmd_init(args: &[String]) -> ExitCode {
         match write_hook(&root) {
             Ok(true) => crate::say!("  tạo  .claude/settings.json  (hook tự kiểm sau mỗi lần sửa)"),
             Ok(false) => {}
-            Err(e) => eprintln!("  ⚠ .claude/settings.json: {e}"),
+            Err(e) => crate::say_err!("  ⚠ .claude/settings.json: {e}"),
         }
     }
 
@@ -152,7 +152,7 @@ pub fn cmd_init(args: &[String]) -> ExitCode {
         match append_pointer(&root, pointer) {
             Ok(true) => crate::say!("  sửa  {pointer}"),
             Ok(false) => {}
-            Err(e) => eprintln!("  ⚠ {pointer}: {e}"),
+            Err(e) => crate::say_err!("  ⚠ {pointer}: {e}"),
         }
     }
     if let Ok(true) = append_gitignore(&root) {
@@ -361,7 +361,7 @@ pub fn cmd_baseline(args: &[String]) -> ExitCode {
 }
 
 fn fail(message: &str, code: u8) -> ExitCode {
-    eprintln!("archctl: {message}");
+    crate::say_err!("archctl: {message}");
     ExitCode::from(code)
 }
 
@@ -373,23 +373,23 @@ pub fn cmd_verify(args: &[String]) -> ExitCode {
     let parsed = match crate::proto::parse_args(args, &["root"], &["quiet"]) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("archctl: {e}");
+            crate::say_err!("archctl: {e}");
             return ExitCode::from(exit::USAGE);
         }
     };
     let start = parsed.flags.get("root").map_or_else(|| PathBuf::from("."), PathBuf::from);
     let Some(root) = arch_core::find_root(&start) else {
-        eprintln!("archctl: không tìm thấy `{}`", arch_core::ARCH_FILE);
+        crate::say_err!("archctl: không tìm thấy `{}`", arch_core::ARCH_FILE);
         return ExitCode::from(exit::USAGE);
     };
     let Ok(src) = std::fs::read_to_string(root.join(arch_core::ARCH_FILE)) else {
-        eprintln!("archctl: không đọc được `{}`", arch_core::ARCH_FILE);
+        crate::say_err!("archctl: không đọc được `{}`", arch_core::ARCH_FILE);
         return ExitCode::from(exit::USAGE);
     };
     let (doc, diags) = arch_core::load(&src);
     if arch_core::diag::has_errors(&diags) {
         for d in diags.iter().filter(|d| d.severity == arch_core::Severity::Error) {
-            eprintln!("✗ {}:{d}", arch_core::ARCH_FILE);
+            crate::say_err!("✗ {}:{d}", arch_core::ARCH_FILE);
         }
         return ExitCode::from(exit::DSL_INVALID);
     }
@@ -404,7 +404,7 @@ pub fn cmd_verify(args: &[String]) -> ExitCode {
             .filter(|name| doc.verify(name).is_none())
             .collect();
         if !unknown.is_empty() {
-            eprintln!(
+            crate::say_err!(
                 "archctl: không có cách kiểm nào tên: {}",
                 unknown.iter().map(|n| n.as_str()).collect::<Vec<_>>().join(", ")
             );
@@ -499,7 +499,7 @@ pub fn cmd_verify(args: &[String]) -> ExitCode {
     }
 
     if let Err(e) = arch_core::write_atomic(&path, &arch_core::verify::render(&receipts)) {
-        eprintln!("archctl: không ghi được biên nhận: {e}");
+        crate::say_err!("archctl: không ghi được biên nhận: {e}");
         return ExitCode::from(exit::USAGE);
     }
     crate::say!("\n{}/{} đạt · biên nhận ghi vào {}", wanted.len() - failed, wanted.len(),

@@ -74,13 +74,13 @@ pub fn cmd_serve(args: &[String]) -> ExitCode {
     let parsed = match parse_args(args, &["root", "port"], &["no-open"]) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("archctl: {e}");
+            crate::say_err!("archctl: {e}");
             return ExitCode::from(exit::USAGE);
         }
     };
     let start = parsed.flags.get("root").map_or_else(|| PathBuf::from("."), PathBuf::from);
     let Some(root) = arch_core::find_root(&start) else {
-        eprintln!("archctl: không tìm thấy `{ARCH_FILE}`");
+        crate::say_err!("archctl: không tìm thấy `{ARCH_FILE}`");
         return ExitCode::from(exit::USAGE);
     };
     let port: u16 = parsed.flags.get("port").and_then(|p| p.parse().ok()).unwrap_or(4000);
@@ -88,7 +88,7 @@ pub fn cmd_serve(args: &[String]) -> ExitCode {
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("archctl: không mở được cổng {port}: {e}");
+            crate::say_err!("archctl: không mở được cổng {port}: {e}");
             return ExitCode::from(exit::USAGE);
         }
     };
@@ -484,6 +484,7 @@ fn model_json(root: &Path) -> String {
                     Via::Entry => "entry",
                     Via::Rpc => "rpc",
                     Via::Queue => "queue",
+                    Via::Pipeline => "pipeline",
                 }),
                 v.count,
                 json::string(&v.rule),
@@ -501,6 +502,18 @@ fn model_json(root: &Path) -> String {
         .deploy_unread
         .iter()
         .map(|u| card(format!("chưa đọc được {}", u.file), u.why.clone()))
+        .chain(report.imports_unchecked.iter().map(|(c, l, n)| {
+            card(
+                format!("import {} chưa kiểm ở {c}", l.name()),
+                format!("{n} file: archctl chỉ đọc lời gọi gRPC, phụ thuộc qua import không được kiểm"),
+            )
+        }))
+        .chain(report.imports_accepted.iter().map(|(c, l, n, why)| {
+            card(format!("import {} chưa kiểm ở {c}, đã khai nhận", l.name()), format!("{n} file — {why}"))
+        }))
+        .chain(report.unchecked_unused.iter().map(|(c, l, line)| {
+            card(format!("khai nhận lạc hậu: unchecked {c} imports {l}"), format!("system.arch:{line} — {c} không còn file {l} nào trong diện kiểm"))
+        }))
         .chain(report.entry_unknown.iter().map(|(s, why)| {
             card(format!("không rõ điểm vào của service {s}"), format!("{why} — `runs` chỉ được kiểm theo cạnh import"))
         }))

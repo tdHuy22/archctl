@@ -11,6 +11,7 @@ Hiện kiểm **luật phụ thuộc giữa component** cho năm ngôn ngữ.
 | C, C++ | `.c .h .cc .cpp .cxx .hpp .hh .hxx .inl`, CUDA `.cu .cuh` | `#include "x"`, `#include <x>` | **thư mục `-I` đọc từ build**; `"…"` ưu tiên thư mục file gọi; không có build thì khớp tên **duy nhất** trong repo |
 | Rust | `.rs` | `use`, `pub use`, cây `use a::{b::{c, d as e}, self}`, `use {a, b}`, `extern crate` | theo cây module; **gốc crate của từng file** (thư viện, binary, test, đường dẫn khai trong `Cargo.toml`); nhìn xuyên re-export ở gốc; các crate anh em trong workspace |
 | Go | `.go` | `import "x"`, khối `import ( … )` | đọc `module` trong mọi `go.mod` tới độ sâu 4 (trừ `testdata/`, `vendor/`, thư mục ẩn) để tách nội bộ với bên ngoài; module dài nhất thắng |
+| Java | `.java` | **chỉ để dò gRPC**: import Java chưa đọc | không có. Component đã vào diện kiểm mà có file Java nhận cảnh báo `⚠ IMPORT JAVA CHƯA KIỂM`, và `--strict` tính nó: phụ thuộc qua import của các file đó không được kiểm. Chấp nhận được thì khai nhận bằng `unchecked` (xem [Khai nhận phần không kiểm được](#khai-nhận-phần-không-kiểm-được)). Nhóm `api`, tên bảng dữ liệu và tên trong `flow`, `contract` thì vẫn dò trong file Java như mọi ngôn ngữ (dò định danh và chuỗi, không cần import) |
 
 Mọi ngôn ngữ dùng chung một lexer cấu hình được. Nó biết bỏ qua chú thích,
 chuỗi, char literal, raw string, docstring và regex theo từng ngôn ngữ — đó là
@@ -74,6 +75,7 @@ request. Bảng dưới là lần đo khi bộ đo có 24 repo:
 | Hạ tầng (2026-10-12) | PyYAML 6.0.3 (`compose` giữ số dòng, `<<` trải bằng `flatten_mapping`) cho compose, dockerfile-parse 2.0.1 cho Dockerfile, cài vào venv nên cần mạng; CI bật | 12 repo, 49 file compose và Dockerfile, 4 792 dữ kiện (service, build, lệnh, khoá env, `depends_on`, bind mount, alias, chỉ thị Dockerfile): khớp cả giá trị lẫn dòng; vllm chiếm 3 830. Hai Dockerfile có heredoc của BuildKit (hugo, vllm) bị bỏ qua vì dockerfile-parse không đọc heredoc. Bộ đọc YAML còn được so riêng với PyYAML trên 804 file YAML của bộ đo: 793 khớp, phần lệch là template Helm và anchor trùng tên, không phải compose |
 | Kubernetes (2026-10-13) | PyYAML 6.0.3 cùng venv hạ tầng, [k8s_truth.py](../bench/k8s_truth.py): dữ kiện từng manifest và `skaffold.yaml`, và mọi cạnh qua Service tính lại độc lập theo luật DNS, selector của tài liệu Kubernetes | 3 repo (microservices-demo, example-voting-app, etcd), 87 file, 455 dữ kiện (workload, nhãn, container, image, lệnh, khoá env, tham chiếu ConfigMap, Service, selector, NetworkPolicy) cộng 54 cạnh và kết quả NetworkPolicy (cô lập, cho phép rõ) của từng workload: khớp hết. Template Helm bỏ qua ở cả hai phía. Ngữ nghĩa NetworkPolicy còn có ca vàng viết tay theo tài liệu Kubernetes trong test |
 | Hàng đợi (2026-10-19) | `ast` cho Python, `go/ast` cho Go, [queue_truth.py](../bench/queue_truth.py) viết lại đặc tả bên gửi, bên nhận | rabbitmq-tutorials 25 file, 37 chỗ gửi, nhận; flask, open-webui, opentelemetry-python 13; bộ mẫu `fixtures/queues` 72 (Kafka, RabbitMQ, Redis, Celery, env, hằng số theo phạm vi, queue khai rồi dùng qua biến, `getattr`, tham chiếu phương thức): khớp cả hệ, vai, tên lẫn dòng. JS/TS không có thước đo |
+| Pipeline (2026-10-23) | `ast` cho LangGraph, Airflow (phạm vi tên lấy từ cây `ast`, không từ thụt lề như archctl), PyYAML (`yaml.compose`, cùng venv hạ tầng) cho `dvc.yaml`; [pipeline_truth.py](../bench/pipeline_truth.py) viết lại đặc tả bước, cạnh, chỗ chưa đọc được | langgraph (thư viện và test) 53 file, 1 120 dữ kiện; airflow (DAG mẫu) 26 file, 78; example-get-started 1 `dvc.yaml`, 4; bộ mẫu `fixtures/pipelines` 10 file, 90 (ngoặc bọc câu lệnh, nối dòng, `path_map` qua biến, `Literal`, `tools_condition`, `add_sequence`, hai builder cùng tên ở hai hàm, lớp bọc, bí danh, `TaskGroup`, TaskFlow qua đối số, `chain` hai danh sách, `wdir`, `foreach`, `${…}`, đường dẫn lặp): khớp cả cạnh, hàm của hai bước lẫn dòng. Lần đầu lệch 6 chỗ: câu lệnh Airflow bọc trong ngoặc `( a >> [b, c] )`, đã sửa. Review và agent đối kháng sau đó tìm thêm lỗi mà cả hai phía chép chung đặc tả nên thước đo không thấy (phạm vi tên, danh sách lồng nổ cấp số mũ; vòng 2: thân `@task` bị coi là chỗ nối đồ thị, gán lại builder, `generate = traceable(generate)`, `ToolNode(tools)` qua biến); đã sửa, có test đơn vị riêng vì thước đo chép cùng đặc tả, và đưa vào bộ mẫu |
 | Kustomize (2026-10-19) | `kustomize build` v5.8.1 bản ghim sha256 (chỉ khi `--require kustomize`; CI bật), dữ kiện từng tài nguyên dựng ra tính bằng PyYAML như mục Kubernetes, đuôi băm của ConfigMap sinh ra bỏ đi | microservices-demo 2 bản dựng, 142 dữ kiện; bộ mẫu `fixtures/kustomize-overlay` 3 bản dựng, 43 dữ kiện và cạnh (patch strategic merge và JSON 6902, component, `namePrefix`/`nameSuffix`, overlay chồng overlay, nhãn, `images`, `configMapGenerator`, `namespace`, `replicas`): khớp. Cạnh, NetworkPolicy, lối vào của bản dựng tính lại trên bản `kustomize build`, so không kèm file, dòng. Kustomization gốc tính lại bằng PyYAML: gốc archctl không dựng mà không báo là lệch |
 | Terraform (2026-10-20) | plan của OpenTofu 1.12.7 bản ghim sha256, provider aws 6.67.0, google 8.5.0 chỉ cài từ mirror đã kiểm băm, khoá giả, môi trường sạch (chỉ khi `--require terraform`; CI bật); tham chiếu từng biểu thức lấy từ JSON plan, `locals` đọc bằng python-hcl2 ghim băm, luật cạnh và lối vào viết lại trong `bench/tf_truth.py` | terraform-docs-samples (`run/`) 37 module gốc, 42 dữ kiện; bộ mẫu `fixtures/terraform-shop` 2 module gốc, 14 dữ kiện (module trong repo, `jsonencode`, heredoc JSON, `locals`, bộ cân bằng tải, cơ sở dữ liệu, hàng đợi, các dạng lối vào): khớp. Module gốc OpenTofu không plan được (data source cần khoá thật, provider ngoài danh sách) thì bỏ qua và in số |
 
@@ -263,6 +265,32 @@ mô tả cả repo trước khi có được giá trị nào.
 Ngoại lệ: **`deny` luôn có hiệu lực**, kể cả với component chưa vào diện kiểm.
 Luật cấm không nên phải chờ ai bật.
 
+## Khai nhận phần không kiểm được
+
+archctl không đọc import Java, nên component có file Java nhận cảnh báo
+`⚠ IMPORT JAVA CHƯA KIỂM` và `--strict` chặn. Nếu người duyệt chấp nhận khoảng
+trống đó cho một component, ghi nó vào file luật kèm lý do:
+
+```
+unchecked Adservice imports java because "Adservice chỉ gọi ra ngoài qua gRPC"
+```
+
+Từ đó cảnh báo đổi thành `ℹ IMPORT JAVA CHƯA KIỂM, ĐÃ KHAI NHẬN` kèm lý do, vẫn
+in ra (phần mã đó vẫn không được kiểm), nhưng `--strict` không tính nữa. JSON
+đưa nó vào `importsAccepted` thay vì `importsUnchecked`.
+
+- Chỉ khai được cho ngôn ngữ mà archctl không đọc import: hiện là `java`.
+- Lý do bắt buộc, trong nháy kép. Component phải đã khai và không phải
+  `external`. Mỗi cặp component, ngôn ngữ chỉ khai một lần.
+- Như mọi luật, chỉ có hiệu lực từ `#accepted`. Agent không ghi `system.arch`:
+  nó chạy `archctl propose 'unchecked … because "…"' --reason "…"` rồi chờ người
+  `accept`.
+- `archctl diff` đánh dấu `!` (nới lỏng) khi thêm một khai nhận có hiệu lực hay
+  nâng nó từ `#proposed` lên.
+- Lần kiểm cả repo mà component không còn file Java nào trong diện kiểm thì báo
+  `⚠ KHAI NHẬN LẠC HẬU` (JSON `uncheckedUnused`), và `--strict` tính. Hook chỉ
+  thấy file vừa sửa nên không kết luận điều này.
+
 ## Thứ tự xét
 
 1. Có `deny` đang có hiệu lực khớp quan hệ, và nguồn không nằm trong `except` → **vi phạm**
@@ -429,6 +457,18 @@ tới mức đó thì người đọc bỏ qua cả những dòng đáng đọc,
 ích hơn chứ không phải kém đi.
 
 `--json` vẫn đưa đủ, không cắt gì.
+
+Đầu ra chữ không điều khiển được terminal. Tên lấy từ file của repo (spec
+import, tên service, tên stage) đã được bộ đọc giải mã thoát, nên
+`import x from "./\u001b[2K\rgone"` từng in ESC và CR thô: `\e[2K\r` xoá dòng
+vi phạm đứng trước, `\e[8m` ẩn phần sau. Ký tự điều khiển (trừ xuống dòng, tab)
+và ký tự đổi hướng chữ (U+202E…) giờ in thành `?`:
+
+```
+⚠ CHƯA PHÂN GIẢI  './?[2K?gone'
+```
+
+`--json` giữ giá trị gốc: các ký tự đó thoát thành `\uXXXX`. Xuống dòng trong tên thì vẫn xuống dòng ở đầu ra chữ.
 
 ## Ba nhóm cảnh báo, và `--strict` chặn hai nhóm
 

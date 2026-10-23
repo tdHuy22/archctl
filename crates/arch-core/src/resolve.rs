@@ -273,6 +273,8 @@ impl Resolver {
             Lang::C => self.c(importer, spec, import.system),
             Lang::Rust => self.rust(importer, spec),
             Lang::Go => self.go(spec),
+            // Không bao giờ được gọi: bộ quét Java không ra import nào.
+            Lang::Java => Resolved::Internal,
         }
     }
 

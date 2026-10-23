@@ -154,13 +154,13 @@ fn libs(lang: Lang, imports: &[Import]) -> Libs {
             aio: false,
             kombu: false,
         },
-        Lang::C | Lang::Rust => Libs { kafka: false, rabbit: false, redis: false, celery: false, nats: false, aio: false, kombu: false },
+        Lang::C | Lang::Rust | Lang::Java => Libs { kafka: false, rabbit: false, redis: false, celery: false, nats: false, aio: false, kombu: false },
     }
 }
 
 pub fn scan(toks: &[Token], lang: Lang, imports: &[Import]) -> Queues {
     let libs = libs(lang, imports);
-    if matches!(lang, Lang::C | Lang::Rust) {
+    if matches!(lang, Lang::C | Lang::Rust | Lang::Java) {
         return Queues::default();
     }
     let (close, depth) = brackets(toks, lang);
@@ -196,7 +196,7 @@ pub fn scan(toks: &[Token], lang: Lang, imports: &[Import]) -> Queues {
             Lang::Python => python_at(&cx, &libs, i, &mut out, &mut push),
             Lang::Go => go_at(&cx, &libs, i, &mut out, &mut push),
             Lang::TypeScript => node_at(&cx, &libs, i, &mut out, &mut push),
-            Lang::C | Lang::Rust => {}
+            Lang::C | Lang::Rust | Lang::Java => {}
         }
     }
     out
@@ -565,7 +565,7 @@ impl Cx<'_> {
                 }
                 None
             }
-            Lang::C | Lang::Rust => None,
+            Lang::C | Lang::Rust | Lang::Java => None,
         }
     }
 

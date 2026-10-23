@@ -1,6 +1,6 @@
 # Một dự án ML/LLM nhỏ: dữ liệu → đặc trưng → mô hình → huấn luyện, phục vụ,
 # và một ứng dụng RAG gọi LLM qua một cổng duy nhất.
-# Cố ý chứa bảy vi phạm, mỗi công thức luật một cái, và notebook cũng
+# Cố ý chứa tám vi phạm, mỗi công thức luật một cái, và notebook cũng
 # không được đi tắt — xem docs/ml.md.
 
 component Data     at mlapp/data/**       @human #accepted
@@ -57,6 +57,11 @@ boundary LLMCalls contains LLM:   @human #accepted
 
 # 6. Op C++ chỉ được gọi qua lớp bọc `Ops`. Không có `allow Train -> Kernels`,
 #    nên `torch.ops.mlapp_ops.x` gọi từ Train là vi phạm qua ranh giới ngôn ngữ.
+
+# 7. Log người dùng không vào thẳng huấn luyện: phải qua Data để lọc dữ liệu
+#    cá nhân. Cạnh này nằm trong `dvc.yaml` (stage ghi file mà stage sau đọc),
+#    không trong import nào.
+deny Web -> Train
 
 # Kiến trúc mô hình theo layer không đọc được bằng phân tích tĩnh: chụp nó khi
 # chạy thật rồi so với bản đã duyệt.

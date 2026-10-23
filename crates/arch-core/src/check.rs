@@ -82,6 +82,10 @@ pub enum Via {
     /// Hàng đợi, pub/sub: chỗ gửi ghép với chỗ nhận cùng hệ và tên (topic
     /// Kafka, queue hay exchange RabbitMQ, kênh Redis, task Celery).
     Queue,
+    /// Bước của pipeline đưa dữ liệu cho bước sau: cạnh khai bằng lời gọi
+    /// của LangGraph, Airflow, hay stage `dvc.yaml` ghi file mà stage sau
+    /// đọc. Hai bước không import nhau.
+    Pipeline,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +117,9 @@ pub enum UnresolvedReason {
     /// Chỗ gửi, nhận qua hàng đợi không ghép được: tên không cố định, tên
     /// lấy từ biến môi trường chưa lần ra, bên nhận chỉ có trong test.
     Queue,
+    /// Đồ thị pipeline dựng lúc chạy: tên bước từ biến, nhánh do hàm chọn,
+    /// hàm của bước không lần được về file nào.
+    Pipeline,
 }
 
 impl UnresolvedReason {
@@ -125,6 +132,7 @@ impl UnresolvedReason {
             (UnresolvedReason::Missing, _) => "không tìm thấy file nào ở đường dẫn này",
             (UnresolvedReason::Rpc, _) => "không ghép được lời gọi gRPC với server",
             (UnresolvedReason::Queue, _) => "không ghép được chỗ gửi, nhận qua hàng đợi",
+            (UnresolvedReason::Pipeline, _) => "không đọc được cạnh của đồ thị pipeline",
         }
     }
 }
@@ -203,6 +211,17 @@ pub struct Report {
     pub unproven: Vec<(String, crate::verify::Stale)>,
     /// File triển khai không đọc được: hỏng, quá lớn, trỏ ra ngoài dự án.
     pub deploy_unread: Vec<deploy::Unread>,
+    /// Component đã vào diện kiểm có file của ngôn ngữ mà archctl không đọc
+    /// import (Java: chỉ dò gRPC): component, ngôn ngữ, số file. Phụ thuộc qua
+    /// import của các file đó không được kiểm, nên `--strict` tính (TM-68).
+    pub imports_unchecked: Vec<(String, Lang, usize)>,
+    /// Như trên, nhưng người đã khai nhận bằng `unchecked … because "…"`:
+    /// component, ngôn ngữ, số file, lý do. Vẫn in, `--strict` không tính (TM-70).
+    pub imports_accepted: Vec<(String, Lang, usize, String)>,
+    /// `unchecked` có hiệu lực mà lần kiểm cả repo không thấy file nào của
+    /// ngôn ngữ đó trong component đã vào diện kiểm: `(component, ngôn ngữ,
+    /// dòng trong file luật)`. Khai nhận lạc hậu, `--strict` tính.
+    pub unchecked_unused: Vec<(String, String, usize)>,
     /// Service có `runs` mà không biết nó khởi chạy mã nào: `runs` khi đó chỉ
     /// được kiểm theo cạnh import, không theo điểm vào.
     pub entry_unknown: Vec<(String, String)>,
@@ -292,6 +311,14 @@ pub fn proto_files(root: &Path, extra_ignores: &[String]) -> Vec<String> {
     files
 }
 
+/// `dvc.yaml` của repo.
+pub fn pipeline_files(root: &Path, extra_ignores: &[String]) -> Vec<String> {
+    let mut files = Vec::new();
+    walk(root, "", extra_ignores, &mut files);
+    files.retain(|f| scan::pipeline::is_dvc_file(f));
+    files
+}
+
 /// File cấu hình triển khai của sản phẩm trong repo.
 pub fn deploy_files(root: &Path, extra_ignores: &[String]) -> Vec<String> {
     let mut files = Vec::new();
@@ -359,6 +386,10 @@ fn check_with(
     let mut rpc_serves: Vec<RpcSite> = Vec::new();
     let mut rpc_impls: Vec<RpcSite> = Vec::new();
     let mut queue_sites: Vec<QueueSite> = Vec::new();
+    // Java: lớp cài đặt server kèm tên lớp, và lớp được `addService(new X())`.
+    let mut java_impls: Vec<(RpcSite, String)> = Vec::new();
+    let mut java_registered: HashSet<String> = HashSet::new();
+    let mut graphs: Vec<(String, scan::pipeline::Graph)> = Vec::new();
     // Tên máy viết thẳng trong mã: chỉ cần khi luật có `service` (TM-32).
     let mut code_hosts: Vec<(String, String, scan::hosts::CodeHost)> = Vec::new();
     let mut ffi_provides: std::collections::BTreeMap<String, String> =
@@ -383,6 +414,13 @@ fn check_with(
         }
         let Some(from) = owners.first() else {
             report.files_unmapped += 1;
+            // Đồ thị nối bước của các component khác dù chính file đồ thị không
+            // thuộc component nào (`dags/` của Airflow, `main.py` ở gốc).
+            if lang == Lang::Python
+                && let Some(g) = unmapped_graph(root, path, &mut report)
+            {
+                graphs.push((path.clone(), g));
+            }
             continue;
         };
 
@@ -398,6 +436,19 @@ fn check_with(
             continue;
         }
         symbol_scanned += 1;
+        if lang == Lang::Java && report.checked.contains(from) {
+            if let Some(u) = doc.unchecked(from, lang.name()) {
+                match report.imports_accepted.iter_mut().find(|(c, l, ..)| c == from && *l == lang) {
+                    Some((_, _, n, _)) => *n += 1,
+                    None => report.imports_accepted.push((from.clone(), lang, 1, u.reason.clone())),
+                }
+            } else {
+                match report.imports_unchecked.iter_mut().find(|(c, l, _)| c == from && *l == lang) {
+                    Some((_, _, n)) => *n += 1,
+                    None => report.imports_unchecked.push((from.clone(), lang, 1)),
+                }
+            }
+        }
         let src = scan::source_view(path, &src);
         let scan = lang.scan_all(&src, &needle_set, &as_refs(&table_needles));
         for import in &scan.imports {
@@ -456,6 +507,12 @@ fn check_with(
             rpc_calls.extend(scan.rpc.calls.iter().map(site));
             rpc_serves.extend(scan.rpc.serves.iter().map(site));
             rpc_impls.extend(scan.rpc.implements.iter().map(site));
+            for (s, class) in scan.rpc.implements.iter().zip(&scan.rpc.java_classes) {
+                if !class.is_empty() {
+                    java_impls.push((site(s), class.clone()));
+                }
+            }
+            java_registered.extend(scan.rpc.java_registered.iter().cloned());
         }
         queue_sites.extend(scan.queues.sites.iter().map(|s| QueueSite {
             from: from.clone(),
@@ -463,6 +520,9 @@ fn check_with(
             lang,
             site: s.clone(),
         }));
+        if !scan.pipeline.is_empty() {
+            graphs.push((path.clone(), scan.pipeline.clone()));
+        }
         if scan.queues.cut {
             report.unresolved.push(Unresolved {
                 file: path.clone(),
@@ -524,6 +584,16 @@ fn check_with(
         .unresolved
         .retain(|u| !paired.contains(&(u.file.as_str(), u.line, u.spec.as_str())));
     judge_expectations(&expectations, &sightings, symbol_scanned, &mut report);
+    // Java đăng ký lớp cài đặt ở file khác (`Server.java`: `addService(new
+    // AdServiceImpl())`): ghép theo tên lớp. Trong hook, tìm chỗ đăng ký ở các
+    // file Java chưa quét.
+    // Lớp mà file trong hook đăng ký nhưng cài đặt ở file khác: phải đi tìm.
+    let implemented: HashSet<&String> = java_impls.iter().map(|(_, c)| c).collect();
+    let want_classes: HashSet<String> = if partial {
+        java_registered.iter().filter(|c| !implemented.contains(c)).cloned().collect()
+    } else {
+        HashSet::new()
+    };
     let rpc_links = judge_grpc(
         root,
         doc,
@@ -532,6 +602,7 @@ fn check_with(
         rpc_calls,
         rpc_serves,
         rpc_impls,
+        JavaRegs { registered: java_registered, want_classes, impls: java_impls },
         &mut report,
     );
     // Tên topic đọc từ biến môi trường: cần cấu hình triển khai để lần ra.
@@ -572,6 +643,21 @@ fn check_with(
         queue_other_side(root, doc, files, &crate::read_ignores(root), &mut queue_sites, &mut report);
     }
     let queue_links = judge_queues(doc, queue_sites, &mut report);
+    // dvc ghép stage của mọi `dvc.yaml`: hook sửa một file thì đọc lại hết.
+    let changed_dvc: Vec<&String> = files.iter().filter(|f| scan::pipeline::is_dvc_file(f)).collect();
+    let dvc_files: Vec<String> = if !partial || !changed_dvc.is_empty() {
+        let mut all = pipeline_files(root, &crate::read_ignores(root));
+        // File hook đưa thẳng vào (kể cả symlink, để báo ra) cũng xét.
+        for f in changed_dvc {
+            if !all.contains(f) {
+                all.push(f.clone());
+            }
+        }
+        all
+    } else {
+        Vec::new()
+    };
+    judge_pipelines(root, doc, &resolver, graphs, &dvc_files, &mut report);
     if let Some(loaded) = loaded {
         let mut seen = rpc_links;
         seen.extend(queue_links);
@@ -584,6 +670,16 @@ fn check_with(
 
     counts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     report.by_lang = counts;
+    // Hook chỉ thấy file vừa sửa, nên chỉ lần kiểm cả repo mới kết luận được
+    // một khai nhận không còn ứng với file nào.
+    if !partial {
+        for u in doc.uncheckeds.iter().filter(|u| u.meta.status.is_enforced()) {
+            let used = report.imports_accepted.iter().any(|(c, l, ..)| *c == u.component && l.name().eq_ignore_ascii_case(&u.lang));
+            if !used {
+                report.unchecked_unused.push((u.component.clone(), u.lang.clone(), u.meta.line));
+            }
+        }
+    }
 
     report
         .violations
@@ -681,6 +777,30 @@ struct RpcSite {
 /// Trần byte đọc thêm khi tìm phía bên kia của lời gọi gRPC trong hook (TM-13).
 const MAX_RPC_SEARCH_BYTES: usize = 64 << 20;
 
+/// Lớp được đăng ký (`addService(new X())`) ở các file Java chưa quét, cho
+/// hook. Chỉ lex file có chữ `addService`, trong cùng ngân sách đọc với phần
+/// tìm phía bên kia của gRPC (TM-13).
+/// Trả về lớp tìm được, và có chạm trần đọc không.
+fn java_registrations(root: &Path, scanned: &[String], budget: &mut usize) -> (HashSet<String>, bool) {
+    let scanned: HashSet<&str> = scanned.iter().map(String::as_str).collect();
+    let mut out = HashSet::new();
+    for f in source_files(root, &crate::read_ignores(root)) {
+        if Lang::for_path(&f) != Some(Lang::Java) || scanned.contains(f.as_str()) {
+            continue;
+        }
+        let Ok(text) = deploy::read_in(root, &f, MAX_FILE_BYTES) else { continue };
+        if text.len() > *budget {
+            *budget = 0;
+            return (out, true);
+        }
+        *budget -= text.len();
+        if text.contains("addService") {
+            out.extend(grpc::scan(&Lang::Java.tokens(&text), Lang::Java).java_registered);
+        }
+    }
+    (out, false)
+}
+
 /// Cạnh gRPC: ghép chỗ gọi với chỗ đăng ký theo `package.Service`, rồi xét
 /// `allow` giữa component và, khi file luật đã khai `service`, `link` giữa
 /// service. Trả các cặp service có lời gọi gRPC, để `link` của chúng không bị
@@ -688,6 +808,15 @@ const MAX_RPC_SEARCH_BYTES: usize = 64 << 20;
 ///
 /// Lời gọi không có server nào trong repo (collector của OpenTelemetry, API
 /// của Google) được coi như import gói ngoài: không vi phạm, không cảnh báo.
+#[allow(clippy::too_many_arguments)]
+/// Chỗ đăng ký lớp Java (`package:Lớp`) đã biết, lớp mà file trong hook đăng ký
+/// nhưng cài đặt ở file khác, và lớp cài đặt (kèm khoá) trong các file đã quét.
+struct JavaRegs {
+    registered: HashSet<String>,
+    want_classes: HashSet<String>,
+    impls: Vec<(RpcSite, String)>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn judge_grpc(
     root: &Path,
@@ -697,9 +826,10 @@ fn judge_grpc(
     mut calls: Vec<RpcSite>,
     mut serves: Vec<RpcSite>,
     impls: Vec<RpcSite>,
+    mut java: JavaRegs,
     report: &mut Report,
 ) -> std::collections::BTreeSet<(String, String)> {
-    if calls.is_empty() && serves.is_empty() && impls.is_empty() {
+    if calls.is_empty() && serves.is_empty() && impls.is_empty() && java.want_classes.is_empty() {
         return std::collections::BTreeSet::new();
     }
     let ignores = crate::read_ignores(root);
@@ -738,13 +868,39 @@ fn judge_grpc(
         .into_iter()
         .filter(|s| !matches!(key_of(&s.site), grpc::Key::NotRpc))
         .collect();
-    if partial && !(calls.is_empty() && serves.is_empty() && impls.is_empty()) {
+    // Ngân sách đọc dùng chung cho chỗ đăng ký Java và phía bên kia (TM-13, TM-69).
+    let mut budget = MAX_RPC_SEARCH_BYTES;
+    let java_impl_live = java.impls.iter().any(|(s, _)| !matches!(key_of(&s.site), grpc::Key::NotRpc));
+    // Trong hook, chỗ đăng ký lớp Java có thể ở file khác: chỉ tìm khi có lời
+    // gọi gRPC thật, lớp cài đặt Java, hay lớp cần tìm.
+    if partial && (!calls.is_empty() || java_impl_live || !java.want_classes.is_empty()) {
+        let (regs, cut) = java_registrations(root, files, &mut budget);
+        java.registered.extend(regs);
+        if cut {
+            report.unresolved.push(Unresolved {
+                file: ".".into(),
+                line: 0,
+                spec: format!("tìm chỗ đăng ký lớp Java dừng ở trần {} MB", MAX_RPC_SEARCH_BYTES >> 20),
+                lang: Lang::Java,
+                reason: UnresolvedReason::Rpc,
+            });
+        }
+    }
+    for (s, class) in std::mem::take(&mut java.impls) {
+        if java.registered.contains(&class) && !matches!(key_of(&s.site), grpc::Key::NotRpc) {
+            let shown = format!("addService(new {}())", class.rsplit(':').next().unwrap_or(&class));
+            serves.push(RpcSite { site: grpc::Site { shown, ..s.site.clone() }, ..s });
+        }
+    }
+    if partial && !(calls.is_empty() && serves.is_empty() && impls.is_empty() && java.want_classes.is_empty()) {
         other_side(
             root,
             doc,
             files,
             &ignores,
             &impls,
+            &java,
+            &mut budget,
             &mut calls,
             &mut serves,
             report,
@@ -860,15 +1016,15 @@ fn judge_grpc(
     judge_cross_links(doc, &hops, Via::Rpc, report)
 }
 
-/// Một cạnh giữa hai component qua gRPC hay hàng đợi, để xét `link`.
-struct Hop {
-    from: String,
-    file: String,
-    line: usize,
-    shown: String,
-    to: String,
+/// Một cạnh giữa hai component qua gRPC, hàng đợi hay pipeline.
+pub(crate) struct Hop {
+    pub(crate) from: String,
+    pub(crate) file: String,
+    pub(crate) line: usize,
+    pub(crate) shown: String,
+    pub(crate) to: String,
     /// `package.Service` hay `kafka:orders`.
-    key: String,
+    pub(crate) key: String,
 }
 
 /// Một chỗ gửi hay nhận qua hàng đợi, kèm component và file của nó.
@@ -1006,6 +1162,393 @@ fn judge_queues(
         });
     }
     judge_cross_links(doc, &hops, Via::Queue, report)
+}
+
+/// Chữ cho thấy file có thể dựng đồ thị pipeline: điều kiện để lex một file
+/// không thuộc component nào, như cổng của [`scan::pipeline::scan`].
+const PIPELINE_HINTS: &[&str] = &["langgraph", "airflow", "StateGraph", "MessageGraph", "DAG", "Operator", "Sensor"];
+
+/// Đồ thị pipeline của một file Python không thuộc component nào. Chỉ lex
+/// khi file có nhắc tới thư viện đồ thị. File quá cỡ mà có nhắc thì báo quá
+/// lớn, như file thuộc component: độn file không phải lối lách (TM-62).
+fn unmapped_graph(root: &Path, path: &str, report: &mut Report) -> Option<scan::pipeline::Graph> {
+    let size = std::fs::metadata(root.join(path)).ok()?.len();
+    if size > MAX_FILE_BYTES {
+        if let Ok((head, _)) = deploy::read_head(root, path, MAX_FILE_BYTES)
+            && PIPELINE_HINTS.iter().any(|h| head.contains(h))
+        {
+            report.oversized.push((path.to_string(), size));
+        }
+        return None;
+    }
+    let bytes = std::fs::read(root.join(path)).ok()?;
+    let src = String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+    if !PIPELINE_HINTS.iter().any(|h| src.contains(h)) {
+        return None;
+    }
+    let src = scan::source_view(path, &src);
+    let toks = Lang::Python.tokens(&src);
+    let imports = Lang::Python.imports(&src);
+    let g = scan::pipeline::scan(&src, &toks, &imports);
+    (!g.is_empty()).then_some(g)
+}
+
+/// Trần cạnh pipeline xét trong một lần kiểm (TM-62).
+const MAX_PIPELINE_HOPS: usize = 200_000;
+/// Lần qua file chỉ nhập lại tên (`__init__.py`) tối đa bấy nhiêu tầng.
+const MAX_REEXPORT: usize = 4;
+
+/// File chứa hàm của các bước, có nhớ kết quả.
+pub struct StepFiles<'a> {
+    root: &'a Path,
+    resolver: &'a Resolver,
+    found: HashMap<(String, scan::pipeline::Step), Vec<String>>,
+    /// (file, tên) → tên đó được file nhập lại từ đâu.
+    reexports: HashMap<(String, String), Option<scan::pipeline::Step>>,
+}
+
+impl<'a> StepFiles<'a> {
+    pub fn new(root: &'a Path, resolver: &'a Resolver) -> Self {
+        StepFiles { root, resolver, found: HashMap::new(), reexports: HashMap::new() }
+    }
+
+    /// File chứa hàm của một bước: chính file đồ thị, hay file mà import của
+    /// nó trỏ tới, lần qua file chỉ nhập lại tên. Lời gọi bọc
+    /// (`traceable(f)`) là file của hàm bọc khi nó là mã của repo, không thì
+    /// file của các đối số. Gói ngoài, import không phân giải được thì không
+    /// có file nào (import đó đã được báo ở phần import).
+    pub fn of(&mut self, importer: &str, step: &scan::pipeline::Step) -> Vec<String> {
+        use scan::pipeline::Step;
+        let key = (importer.to_string(), step.clone());
+        if let Some(f) = self.found.get(&key) {
+            return f.clone();
+        }
+        let out = match step {
+            Step::Here => vec![importer.to_string()],
+            Step::Imported { module, path } => self.imported(importer, module, path, 0).into_iter().collect(),
+            Step::Call { head, args, .. } => {
+                let h = self.of(importer, head);
+                if h.is_empty() {
+                    let mut all: Vec<String> = args.iter().flat_map(|a| self.of(importer, a)).collect();
+                    all.sort();
+                    all.dedup();
+                    all
+                } else {
+                    h
+                }
+            }
+        };
+        self.found.insert(key, out.clone());
+        out
+    }
+
+    /// Thử tên dài nhất là module trước: `rag.llm.generate` rồi `rag.llm`,
+    /// rồi `rag`. Tên còn lại mà file tìm ra chỉ nhập lại từ chỗ khác thì lần
+    /// tiếp.
+    fn imported(&mut self, importer: &str, module: &str, path: &[String], hops: usize) -> Option<String> {
+        let join = |k: usize| {
+            if k == 0 {
+                return module.to_string();
+            }
+            let sep = if module.ends_with('.') { "" } else { "." };
+            format!("{module}{sep}{}", path[..k].join("."))
+        };
+        for k in (0..=path.len()).rev() {
+            let import = scan::Import { spec: join(k), line: 0, system: false, names: Vec::new() };
+            match self.resolver.resolve(Lang::Python, importer, &import) {
+                Resolved::Path(p) if Lang::for_path(&p).is_some() => {
+                    if k < path.len()
+                        && hops < MAX_REEXPORT
+                        && let Some(scan::pipeline::Step::Imported { module: m2, path: mut p2 }) = self.reexport(&p, &path[k])
+                    {
+                        p2.extend(path[k + 1..].iter().cloned());
+                        if let Some(f) = self.imported(&p, &m2, &p2, hops + 1) {
+                            return Some(f);
+                        }
+                    }
+                    return Some(p);
+                }
+                // Chỉ chính module được nhập mới có thể là gói ngoài.
+                _ if k > 0 => {}
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    fn reexport(&mut self, file: &str, name: &str) -> Option<scan::pipeline::Step> {
+        let key = (file.to_string(), name.to_string());
+        if let Some(r) = self.reexports.get(&key) {
+            return r.clone();
+        }
+        let r = deploy::read_in(self.root, file, MAX_FILE_BYTES).ok().and_then(|text| {
+            let src = scan::source_view(file, &text);
+            scan::pipeline::module_binding(&src, &Lang::Python.tokens(&src), name)
+        });
+        self.reexports.insert(key, r.clone());
+        r
+    }
+}
+
+/// Lệnh trong `cmd` có URL hay thông tin đăng nhập: không in nguyên văn (TM-66).
+fn shown_launch(p: &str) -> String {
+    if p.contains("://") || p.contains('@') {
+        "<URL>".to_string()
+    } else {
+        scan::pipeline::clean(p)
+    }
+}
+
+/// Chương trình trong `cmd` của dvc không chạy mã của repo: không cần lần.
+const NOT_CODE: &[&str] = &[
+    "cd", "pushd", "popd", "mkdir", "rm", "rmdir", "cp", "mv", "ln", "echo", "printf", "touch", "cat", "ls",
+    "tar", "gzip", "gunzip", "unzip", "zip", "wget", "curl", "dvc", "git", "export", "set", "unset", "true",
+    "false", "sleep", "test", "[", "find", "sort", "head", "tail", "wc", "tee", "chmod", "date", "env",
+];
+
+/// File mã mà `cmd` của một stage chạy, và chỗ không lần ra.
+fn stage_scripts(root: &Path, resolver: &Resolver, stage: &scan::pipeline::Stage) -> (Vec<String>, Vec<String>) {
+    use scan::command::Launch;
+    let (mut files, mut unread) = (Vec::new(), Vec::new());
+    let Some(dir) = &stage.dir else { return (files, unread) };
+    for cmd in &stage.cmds {
+        for l in scan::command::launches_in_shell(cmd) {
+            match l {
+                Launch::Script(p) => {
+                    let Some(r) = deploy::within(dir, &p) else {
+                        unread.push(format!("stage `{}` chạy `{}` ngoài repo", stage.name, shown_launch(&p)));
+                        continue;
+                    };
+                    let r = shown_launch(&r);
+                    if p.ends_with(".sh") || p.ends_with(".bash") {
+                        unread.push(format!("stage `{}` chạy script shell `{r}`, chưa đọc tiếp", stage.name));
+                    } else if Lang::for_path(&r).is_some() && deploy::kind_in(root, &r) == Some(deploy::Kind::File) {
+                        files.push(r);
+                    } else {
+                        unread.push(format!("stage `{}`: không thấy file `{r}` (hay có symlink trên đường dẫn)", stage.name));
+                    }
+                }
+                Launch::Module { name, main, dir: d } => {
+                    let roots: Vec<String> = deploy::within(dir, d.as_deref().unwrap_or("."))
+                        .into_iter()
+                        .filter(|r| r.is_empty() || deploy::kind_in(root, r) == Some(deploy::Kind::Dir))
+                        .collect();
+                    let found = entry_files(root, resolver, &[deploy::Entry::Module { name: name.clone(), roots, main }]);
+                    if found.is_empty() {
+                        unread.push(format!("stage `{}`: không lần ra module `{}`", stage.name, scan::pipeline::clean(&name)));
+                    }
+                    files.extend(found);
+                }
+                Launch::Opaque(why) => unread.push(format!("stage `{}`: {why}", stage.name)),
+                _ => {}
+            }
+        }
+    }
+    // `python -c "…"`, `make train`, `papermill nb.ipynb`: có cạnh mà không biết
+    // mã nào chạy, kể cả khi lệnh khác của stage đã ra file. Chỉ in tên chương
+    // trình, không in `cmd`: nó có thể mang token.
+    for cmd in &stage.cmds {
+        for seg in scan::command::segments(cmd) {
+            let launches = scan::command::launches_in_shell(&seg);
+            let code = launches.iter().any(|l| matches!(l, Launch::Script(_) | Launch::Module { .. } | Launch::Opaque(_)));
+            if code {
+                continue;
+            }
+            let words = scan::dockerfile::shell_words(&seg);
+            let Some(prog) = words.iter().find(|w| !w.contains('=')) else { continue };
+            let base = prog.rsplit('/').next().unwrap_or(prog);
+            if !NOT_CODE.contains(&base) {
+                unread.push(format!(
+                    "stage `{}`: lệnh `{}` không trỏ tới file mã nào archctl lần được",
+                    stage.name,
+                    shown_launch(base)
+                ));
+            }
+        }
+    }
+    files.sort();
+    files.dedup();
+    (files, unread)
+}
+
+/// Cạnh qua bước pipeline: hàm của hai bước nằm ở hai component thì cần
+/// `allow` như một import. Không cần `link`: các bước thường chạy chung một
+/// process (LangGraph), hay do bộ lập lịch điều phối (Airflow, dvc).
+fn judge_pipelines(
+    root: &Path,
+    doc: &Document,
+    resolver: &Resolver,
+    graphs: Vec<(String, scan::pipeline::Graph)>,
+    dvc_files: &[String],
+    report: &mut Report,
+) {
+    let comp = |f: &str| owners_of(doc, f).into_iter().next();
+    let hops = pipeline_hops(root, resolver, graphs, dvc_files, &comp, report);
+    for h in &hops {
+        let Some((reason, rule, status)) = judge(doc, &h.from, &h.to) else { continue };
+        report.violations.push(Violation {
+            from: h.from.clone(),
+            to: h.to.clone(),
+            file: h.file.clone(),
+            line: h.line,
+            spec: format!("{} ({})", h.shown, h.key),
+            via: Via::Pipeline,
+            count: 1,
+            reason,
+            rule,
+            status,
+            hint: hint_for(doc, &h.from, &h.to, reason, Via::Pipeline),
+        });
+    }
+}
+
+/// Cạnh giữa component qua đồ thị pipeline, cùng một luật cho `check` và bản
+/// nháp của `init`. Chỗ không đọc được ghi vào `report`.
+///
+/// File test hay mock: cạnh vẫn tính (đồ thị test nối bước thật của các
+/// component), nhưng chỗ không đọc được của nó không báo, như bên gửi của
+/// hàng đợi. `dvc` dựng một đồ thị chung cho mọi `dvc.yaml`, nên stage của mọi
+/// file được ghép với nhau.
+pub(crate) fn pipeline_hops(
+    root: &Path,
+    resolver: &Resolver,
+    graphs: Vec<(String, scan::pipeline::Graph)>,
+    dvc_files: &[String],
+    comp: &dyn Fn(&str) -> Option<String>,
+    report: &mut Report,
+) -> Vec<Hop> {
+    use scan::pipeline;
+    let mut hops: Vec<Hop> = Vec::new();
+    let mut seen: HashSet<(String, String, String, usize)> = HashSet::new();
+    let mut cut = false;
+    let mut push = |hops: &mut Vec<Hop>, h: Hop| {
+        if hops.len() >= MAX_PIPELINE_HOPS {
+            cut = true;
+        } else if seen.insert((h.from.clone(), h.to.clone(), h.file.clone(), h.line)) {
+            hops.push(h);
+        }
+    };
+    let mut files = StepFiles::new(root, resolver);
+    for (file, g) in graphs {
+        if !grpc::fake_server_path(&file) {
+            for u in &g.unread {
+                report.unresolved.push(Unresolved {
+                    file: file.clone(),
+                    line: u.line,
+                    spec: format!("{}: {}", u.tool.as_str(), u.why),
+                    lang: Lang::Python,
+                    reason: UnresolvedReason::Pipeline,
+                });
+            }
+            if g.cut {
+                report.unresolved.push(Unresolved {
+                    file: file.clone(),
+                    line: 0,
+                    spec: format!(
+                        "đồ thị pipeline chạm trần ({} cạnh, {} bước xét); phần sau không xét",
+                        pipeline::MAX_EDGES,
+                        pipeline::MAX_WORK
+                    ),
+                    lang: Lang::Python,
+                    reason: UnresolvedReason::Pipeline,
+                });
+            }
+        }
+        let mut lost_said: HashSet<usize> = HashSet::new();
+        for e in &g.edges {
+            let a = files.of(&file, &e.from_step);
+            let b = files.of(&file, &e.to_step);
+            // Bước là lời gọi bọc của gói ngoài mà hàm được bọc không lần ra:
+            // cạnh mất, nên báo (`ToolNode(tools)` với `tools` là tham số).
+            for (f, step, name) in [(&a, &e.from_step, &e.from), (&b, &e.to_step, &e.to)] {
+                if f.is_empty()
+                    && matches!(step, pipeline::Step::Call { lost: true, .. })
+                    && !grpc::fake_server_path(&file)
+                    && lost_said.insert(e.line)
+                {
+                    report.unresolved.push(Unresolved {
+                        file: file.clone(),
+                        line: e.line,
+                        spec: format!("{}: không lần được hàm mà bước `{name}` bọc", e.tool.as_str()),
+                        lang: Lang::Python,
+                        reason: UnresolvedReason::Pipeline,
+                    });
+                }
+            }
+            for fa in &a {
+                for fb in &b {
+                    let (Some(from), Some(to)) = (comp(fa), comp(fb)) else { continue };
+                    if from != to {
+                        let shown = format!("{} → {}", e.from, e.to);
+                        push(&mut hops, Hop { from, file: file.clone(), line: e.line, shown, to, key: e.tool.as_str().into() });
+                    }
+                }
+            }
+        }
+    }
+    let mut stages: Vec<pipeline::Stage> = Vec::new();
+    for file in dvc_files {
+        if deploy::kind_in(root, file) != Some(deploy::Kind::File) {
+            report.deploy_unread.push(deploy::Unread { file: file.clone(), why: "có symlink trên đường dẫn, hay không phải file thường".into() });
+            continue;
+        }
+        let text = match deploy::read_in(root, file, MAX_FILE_BYTES) {
+            Ok(t) => t,
+            Err(why) => {
+                report.deploy_unread.push(deploy::Unread { file: file.clone(), why });
+                continue;
+            }
+        };
+        let d = pipeline::dvc(&text, file);
+        for u in &d.unread {
+            report.deploy_unread.push(deploy::Unread { file: file.clone(), why: format!("dòng {}: {}", u.line, u.why) });
+        }
+        stages.extend(d.stages);
+    }
+    let (edges, edges_cut) = pipeline::dvc_edges(&stages);
+    if edges_cut {
+        report.deploy_unread.push(deploy::Unread {
+            file: dvc_files.first().cloned().unwrap_or_default(),
+            why: format!("quá {} cạnh hay {} bước xét giữa các stage dvc; phần sau không xét", pipeline::MAX_EDGES, pipeline::MAX_WORK),
+        });
+    }
+    // Chỉ lần script của stage có cạnh: stage đứng riêng không đưa dữ liệu cho
+    // ai, chỗ không lần ra của nó không giấu cạnh nào.
+    let mut scripts: HashMap<usize, Vec<String>> = HashMap::new();
+    for e in &edges {
+        for s in [e.from, e.to] {
+            if let std::collections::hash_map::Entry::Vacant(slot) = scripts.entry(s) {
+                let st = &stages[s];
+                let (found, unread) = stage_scripts(root, resolver, st);
+                for why in unread {
+                    report.deploy_unread.push(deploy::Unread { file: st.file.clone(), why: format!("dòng {}: {why}", st.line) });
+                }
+                slot.insert(found);
+            }
+        }
+    }
+    for e in &edges {
+        for a in &scripts[&e.from] {
+            for b in &scripts[&e.to] {
+                let (Some(from), Some(to)) = (comp(a), comp(b)) else { continue };
+                if from != to {
+                    let shown = format!("stage {} → {} qua {}", stages[e.from].name, stages[e.to].name, scan::pipeline::clean(&e.path));
+                    push(&mut hops, Hop { from, file: stages[e.to].file.clone(), line: e.line, shown, to, key: "dvc".into() });
+                }
+            }
+        }
+    }
+    if cut {
+        report.unresolved.push(Unresolved {
+            file: ".".into(),
+            line: 0,
+            spec: format!("quá {MAX_PIPELINE_HOPS} cạnh pipeline; phần sau không xét"),
+            lang: Lang::Python,
+            reason: UnresolvedReason::Pipeline,
+        });
+    }
+    report.deploy_unread.dedup_by(|a, b| a.file == b.file && a.why == b.why);
+    hops
 }
 
 /// `q:VAR` của RabbitMQ: tiền tố và tên biến.
@@ -1220,7 +1763,9 @@ fn queue_other_side(
 /// Trong hook chỉ có vài file: phía bên kia của lời gọi gRPC nằm ở file khác.
 /// Tìm nhắm một lượt: đọc file Python, Go (trần byte), quét định danh một lượt
 /// mỗi file và tra bảng băm (`add_XServicer_to_server`, `RegisterXServer`,
-/// `X_ServiceDesc`, `XStub`, `NewXClient`), chỉ lex file khớp (TM-13).
+/// `X_ServiceDesc`, `XStub`, `NewXClient`, `XGrpc`, `XImplBase`), chỉ lex file
+/// khớp (TM-13). Java đăng ký lớp cài đặt ở file khác, nên lớp được đăng ký
+/// cũng được tìm theo tên.
 #[allow(clippy::too_many_arguments)]
 fn other_side(
     root: &Path,
@@ -1228,6 +1773,8 @@ fn other_side(
     files: &[String],
     ignores: &[String],
     impls: &[RpcSite],
+    java: &JavaRegs,
+    budget: &mut usize,
     calls: &mut Vec<RpcSite>,
     serves: &mut Vec<RpcSite>,
     report: &mut Report,
@@ -1241,8 +1788,37 @@ fn other_side(
         .collect();
     let want_callers: HashSet<String> =
         serves.iter().map(|s| grpc::norm(&s.site.service)).collect();
+    // Lượt đầu: server của service được gọi, client của service được phục vụ,
+    // và lớp Java mà file trong hook đăng ký. Lớp đó cài đặt service nào thì chỉ
+    // biết khi đọc xong, nên client của service đó tìm ở lượt sau.
+    let found = other_side_pass(root, doc, files, ignores, java, &want_servers, &want_callers, budget, calls, serves, report);
+    let more: HashSet<String> = found.into_iter().filter(|s| !want_callers.contains(s)).collect();
+    if !more.is_empty() && *budget > 0 {
+        let none = JavaRegs { registered: HashSet::new(), want_classes: HashSet::new(), impls: Vec::new() };
+        other_side_pass(root, doc, files, ignores, &none, &HashSet::new(), &more, budget, calls, serves, report);
+    }
+}
+
+/// Một lượt qua các file chưa quét. Trả về service của những server Java tìm
+/// ra nhờ lớp được đăng ký.
+#[allow(clippy::too_many_arguments)]
+fn other_side_pass(
+    root: &Path,
+    doc: &Document,
+    files: &[String],
+    ignores: &[String],
+    java: &JavaRegs,
+    want_servers: &HashSet<String>,
+    want_callers: &HashSet<String>,
+    budget: &mut usize,
+    calls: &mut Vec<RpcSite>,
+    serves: &mut Vec<RpcSite>,
+    report: &mut Report,
+) -> HashSet<String> {
     let scanned: HashSet<&str> = files.iter().map(String::as_str).collect();
-    let mut budget = MAX_RPC_SEARCH_BYTES;
+    // `package:Lớp` → tên lớp, để lọc nhanh theo chữ `class Lớp`.
+    let wanted_names: Vec<&str> = java.want_classes.iter().map(|c| c.rsplit(':').next().unwrap_or(c)).collect();
+    let mut found_services = HashSet::new();
     for f in source_files(root, ignores) {
         let Some(lang) = Lang::for_path(&f) else {
             continue;
@@ -1256,7 +1832,7 @@ fn other_side(
         let Ok(text) = deploy::read_in(root, &f, MAX_FILE_BYTES) else {
             continue;
         };
-        if text.len() > budget {
+        if text.len() > *budget {
             report.unresolved.push(Unresolved {
                 file: f.clone(),
                 line: 0,
@@ -1267,10 +1843,13 @@ fn other_side(
                 lang,
                 reason: UnresolvedReason::Rpc,
             });
-            return;
+            *budget = 0;
+            return found_services;
         }
-        budget -= text.len();
-        if grpc::generated_stub_path(&f) || !mentions(&text, &want_servers, &want_callers) {
+        *budget -= text.len();
+        let class_hit = lang == Lang::Java
+            && wanted_names.iter().any(|n| ["class", "record", "enum"].iter().any(|k| text.contains(&format!("{k} {n}"))));
+        if grpc::generated_stub_path(&f) || !(class_hit || mentions(&text, want_servers, want_callers)) {
             continue;
         }
         let found = grpc::scan(&lang.tokens(&scan::source_view(&f, &text)), lang);
@@ -1294,7 +1873,19 @@ fn other_side(
                 .filter(|s| want_callers.contains(&grpc::norm(&s.service)))
                 .map(site),
         );
+        // Lớp Java cài đặt ở đây, đăng ký ở file khác (`addService(new X())`).
+        for (s, class) in found.implements.iter().zip(&found.java_classes) {
+            let needed = want_servers.contains(&grpc::norm(&s.service)) || java.want_classes.contains(class);
+            if !class.is_empty() && needed && (java.registered.contains(class) || found.java_registered.contains(class)) {
+                let shown = format!("addService(new {}())", class.rsplit(':').next().unwrap_or(class));
+                serves.push(RpcSite { site: grpc::Site { shown, ..s.clone() }, ..site(s) });
+                if java.want_classes.contains(class) {
+                    found_services.insert(grpc::norm(&s.service));
+                }
+            }
+        }
     }
+    found_services
 }
 
 /// Mã chạy trong service `a` có thể gọi mã chạy trong `b`: có `allow` giữa
@@ -1345,6 +1936,9 @@ fn mentions(text: &str, servers: &HashSet<String>, callers: &HashSet<String>) ->
                 cut("", "_ServiceDesc"),
                 cut("", "Server"),
                 cut("", "Service"),
+                // Java: `XGrpc.XImplBase`, `XGrpc.AsyncService`.
+                cut("", "ImplBase"),
+                cut("", "Grpc"),
                 Some(grpc::norm(w)),
             ]
             .into_iter()
@@ -1354,6 +1948,8 @@ fn mentions(text: &str, servers: &HashSet<String>, callers: &HashSet<String>) ->
                     cut("", "Stub"),
                     cut("New", "Client"),
                     cut("", "Client"),
+                    // Java: `XGrpc.newBlockingStub`.
+                    cut("", "Grpc"),
                     Some(grpc::norm(w)),
                 ]
                 .into_iter()
@@ -1790,7 +2386,7 @@ fn hint_for(doc: &Document, from: &str, to: &str, reason: Reason, via: Via) -> S
     {
         return match via {
             Via::Import => format!("gọi {only} thay vì truy cập thẳng {to}"),
-            Via::Symbol | Via::Table | Via::Ffi | Via::Network | Via::Entry | Via::Rpc | Via::Queue => {
+            Via::Symbol | Via::Table | Via::Ffi | Via::Network | Via::Entry | Via::Rpc | Via::Queue | Via::Pipeline => {
                 format!("chỉ {only} được dùng {to}")
             }
         };

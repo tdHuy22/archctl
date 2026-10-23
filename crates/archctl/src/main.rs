@@ -21,11 +21,18 @@ mod setup;
 ///
 /// `println!` panic khi stdout đóng sớm, nên `archctl check | head` làm chương
 /// trình vỡ. Một công cụ dòng lệnh không được phép như vậy.
+///
+/// Chữ in ra đi qua [`term_safe`]: tên lấy từ file của repo không được điều
+/// khiển terminal (TM-67).
 #[macro_export]
 macro_rules! say {
+    () => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout());
+    }};
     ($($arg:tt)*) => {{
         use std::io::Write as _;
-        let _ = writeln!(std::io::stdout(), $($arg)*);
+        let _ = writeln!(std::io::stdout(), "{}", $crate::term_safe(&format!($($arg)*)));
     }};
 }
 
@@ -34,8 +41,35 @@ macro_rules! say {
 macro_rules! say_inline {
     ($($arg:tt)*) => {{
         use std::io::Write as _;
-        let _ = write!(std::io::stdout(), $($arg)*);
+        let _ = write!(std::io::stdout(), "{}", $crate::term_safe(&format!($($arg)*)));
     }};
+}
+
+/// Như [`say!`] nhưng ra stderr.
+#[macro_export]
+macro_rules! say_err {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), "{}", $crate::term_safe(&format!($($arg)*)));
+    }};
+}
+
+/// Ký tự điều khiển (C0, C1, DEL; trừ xuống dòng và tab) và ký tự đổi hướng
+/// chữ thành `?`. Tên service, spec import, tên stage… lấy từ file do agent
+/// viết, và bộ đọc đã giải mã `"\e"`, `'\x1b'`: in thẳng thì `\e[2K\r` xoá
+/// dòng vi phạm, `\e[8m` ẩn phần sau, U+202E đảo thứ tự chữ (TM-67).
+/// `json::string` thoát đúng các ký tự này thành `\uXXXX`, nên lọc không đổi
+/// gì ở JSON.
+pub fn term_safe(s: &str) -> std::borrow::Cow<'_, str> {
+    let bad = |c: char| {
+        (c.is_control() && c != '\n' && c != '\t')
+            || matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    };
+    if s.chars().any(bad) {
+        std::borrow::Cow::Owned(s.chars().map(|c| if bad(c) { '?' } else { c }).collect())
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
 }
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -85,7 +119,7 @@ fn main() -> ExitCode {
             ExitCode::from(exit::OK)
         }
         other => {
-            eprintln!("archctl: lệnh không nhận ra: `{other}`\n");
+            crate::say_err!("archctl: lệnh không nhận ra: `{other}`\n");
             print_usage();
             ExitCode::from(exit::USAGE)
         }
@@ -162,7 +196,7 @@ fn load_arch(root: &Path, as_json: bool) -> Option<(Document, String, Vec<Diag>)
     let src = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("archctl: không đọc được `{}`: {e}", path.display());
+            crate::say_err!("archctl: không đọc được `{}`: {e}", path.display());
             return None;
         }
     };
@@ -218,12 +252,12 @@ fn cmd_check(args: &[String]) -> ExitCode {
                     i += 1;
                 }
                 None => {
-                    eprintln!("archctl check: `--root` thiếu đường dẫn");
+                    crate::say_err!("archctl check: `--root` thiếu đường dẫn");
                     return ExitCode::from(exit::USAGE);
                 }
             },
             other if other.starts_with('-') => {
-                eprintln!("archctl check: tham số không nhận ra: `{other}`");
+                crate::say_err!("archctl check: tham số không nhận ra: `{other}`");
                 return ExitCode::from(exit::USAGE);
             }
             // Đường dẫn cho thẳng: hook đã biết file nào vừa đổi, nên không
@@ -235,7 +269,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
 
     let start = root_arg.unwrap_or_else(|| PathBuf::from("."));
     let Some(root) = arch_core::find_root(&start) else {
-        eprintln!(
+        crate::say_err!(
             "archctl: không tìm thấy `{}` ở `{}` hay thư mục cha nào.\n\
              → chạy trong dự án đã có .arch/, hoặc dùng `--root <dir>`",
             arch_core::ARCH_FILE,
@@ -288,6 +322,8 @@ fn cmd_check(args: &[String]) -> ExitCode {
         + report.oversized.len()
         + report.unproven.len()
         + report.deploy_unread.len()
+        + report.imports_unchecked.len()
+        + report.unchecked_unused.len()
         + report.entry_unknown.len()
         + report.links_unseen.len()
         + report.links_blocked.len()
@@ -409,6 +445,7 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
             Via::Network | Via::Entry => crate::say!("  {}:{}  {}", v.file, v.line, v.spec),
             Via::Rpc => crate::say!("  {}:{}  gọi gRPC `{}`", v.file, v.line, v.spec),
             Via::Queue => crate::say!("  {}:{}  gửi qua hàng đợi `{}`", v.file, v.line, v.spec),
+            Via::Pipeline => crate::say!("  {}:{}  bước pipeline `{}`", v.file, v.line, v.spec),
         }
         crate::say!("  luật: {}", v.rule);
         crate::say!("  → {}", v.hint);
@@ -539,6 +576,25 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
     for u in report.deploy_unread.iter().take(MAX_LISTED) {
         crate::say!("⚠ CHƯA ĐỌC ĐƯỢC  {} — {}\n", u.file, u.why);
     }
+    for (component, lang, n) in report.imports_unchecked.iter().take(MAX_LISTED) {
+        crate::say!("⚠ IMPORT {} CHƯA KIỂM  component {component} ({n} file)", lang.name().to_uppercase());
+        crate::say!("  → archctl chỉ đọc lời gọi gRPC trong mã {}; phụ thuộc qua import của nó không được kiểm", lang.name());
+        crate::say!(
+            "  → chấp nhận được thì đề xuất: archctl propose 'unchecked {component} imports {} because \"<lý do>\"' --reason \"<vì sao>\"\n",
+            lang.name().to_lowercase()
+        );
+    }
+    // Đã khai nhận: vẫn nói ra, vì phần mã đó vẫn không được kiểm.
+    for (component, lang, n, reason) in report.imports_accepted.iter().take(MAX_LISTED) {
+        crate::say!("ℹ IMPORT {} CHƯA KIỂM, ĐÃ KHAI NHẬN  component {component} ({n} file) — {reason}\n", lang.name().to_uppercase());
+    }
+    for (component, lang, line) in report.unchecked_unused.iter().take(MAX_LISTED) {
+        crate::say!("⚠ KHAI NHẬN LẠC HẬU  unchecked {component} imports {lang}");
+        crate::say!(
+            "  {}:{line}  — {component} không còn file {lang} nào trong diện kiểm; bỏ dòng này\n",
+            arch_core::ARCH_FILE
+        );
+    }
     for (service, why) in report.entry_unknown.iter().take(MAX_LISTED) {
         crate::say!("⚠ KHÔNG RÕ ĐIỂM VÀO  service {service} — {why}");
         crate::say!("  → `runs` của nó chỉ được kiểm theo cạnh import\n");
@@ -565,6 +621,9 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
         ("mẫu chồng nhau", MAX_LISTED, report.ambiguous.len()),
         ("cách kiểm chưa chứng minh", MAX_LISTED, report.unproven.len()),
         ("file triển khai chưa đọc được", MAX_LISTED, report.deploy_unread.len()),
+        ("component có import chưa kiểm", MAX_LISTED, report.imports_unchecked.len()),
+        ("component có import đã khai nhận", MAX_LISTED, report.imports_accepted.len()),
+        ("khai nhận lạc hậu", MAX_LISTED, report.unchecked_unused.len()),
         ("service không rõ điểm vào", MAX_LISTED, report.entry_unknown.len()),
         ("link không thấy trong cấu hình", MAX_LISTED, report.links_unseen.len()),
         ("link bị NetworkPolicy chặn", MAX_LISTED, report.links_blocked.len()),
@@ -627,6 +686,8 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
         + report.unresolved.len()
         + report.ambiguous.len()
         + report.deploy_unread.len()
+        + report.imports_unchecked.len()
+        + report.unchecked_unused.len()
         + report.entry_unknown.len()
         + report.links_unseen.len()
         + report.links_blocked.len()
@@ -660,6 +721,7 @@ fn print_json(hash: &str, report: &Report, law: &[Diag]) {
                     Via::Entry => "entry",
                     Via::Rpc => "rpc",
                     Via::Queue => "queue",
+                    Via::Pipeline => "pipeline",
                 }),
                 v.count,
                 json::string(match v.reason {
@@ -772,6 +834,35 @@ fn print_json(hash: &str, report: &Report, law: &[Diag]) {
         .iter()
         .map(|u| format!(r#"{{"file":{},"why":{}}}"#, json::string(&u.file), json::string(&u.why)))
         .collect();
+    let imports_unchecked: Vec<String> = report
+        .imports_unchecked
+        .iter()
+        .map(|(c, l, n)| format!(r#"{{"component":{},"lang":{},"files":{n}}}"#, json::string(c), json::string(l.name())))
+        .collect();
+    let imports_accepted: Vec<String> = report
+        .imports_accepted
+        .iter()
+        .map(|(c, l, n, why)| {
+            format!(
+                r#"{{"component":{},"lang":{},"files":{n},"reason":{}}}"#,
+                json::string(c),
+                json::string(l.name()),
+                json::string(why)
+            )
+        })
+        .collect();
+    let unchecked_unused: Vec<String> = report
+        .unchecked_unused
+        .iter()
+        .map(|(c, l, line)| {
+            // Cùng cách viết với `importsUnchecked`, `importsAccepted` (`Lang::name`).
+            let mut lang = l.clone();
+            if let Some(first) = lang.get_mut(..1) {
+                first.make_ascii_uppercase();
+            }
+            format!(r#"{{"component":{},"lang":{},"line":{line}}}"#, json::string(c), json::string(&lang))
+        })
+        .collect();
     let entry_unknown: Vec<String> = report
         .entry_unknown
         .iter()
@@ -800,7 +891,7 @@ fn print_json(hash: &str, report: &Report, law: &[Diag]) {
         .collect();
 
     crate::say!(
-        r#"{{"archHash":{},"filesScanned":{},"filesUnmapped":{},"checked":{},"unchecked":{},"violations":[{}],"unresolved":[{}],"missing":[{}],"vacuous":[{}],"unproven":[{}],"oversized":[{}],"ambiguous":[{}],"deployUnread":[{}],"entryUnknown":[{}],"servicesUndeclared":[{}],"linksUnseen":[{}],"linksBlocked":[{}],"lawWarnings":[{}]}}"#,
+        r#"{{"archHash":{},"filesScanned":{},"filesUnmapped":{},"checked":{},"unchecked":{},"violations":[{}],"unresolved":[{}],"missing":[{}],"vacuous":[{}],"unproven":[{}],"oversized":[{}],"ambiguous":[{}],"deployUnread":[{}],"importsUnchecked":[{}],"importsAccepted":[{}],"uncheckedUnused":[{}],"entryUnknown":[{}],"servicesUndeclared":[{}],"linksUnseen":[{}],"linksBlocked":[{}],"lawWarnings":[{}]}}"#,
         json::string(hash),
         report.files_scanned,
         report.files_unmapped,
@@ -814,6 +905,9 @@ fn print_json(hash: &str, report: &Report, law: &[Diag]) {
         oversized.join(","),
         ambiguous.join(","),
         deploy_unread.join(","),
+        imports_unchecked.join(","),
+        imports_accepted.join(","),
+        unchecked_unused.join(","),
         entry_unknown.join(","),
         undeclared.join(","),
         unseen.join(","),
@@ -834,12 +928,12 @@ fn cmd_diff(args: &[String]) -> ExitCode {
                     i += 1;
                 }
                 None => {
-                    eprintln!("archctl diff: `--root` thiếu đường dẫn");
+                    crate::say_err!("archctl diff: `--root` thiếu đường dẫn");
                     return ExitCode::from(exit::USAGE);
                 }
             },
             other if other.starts_with('-') => {
-                eprintln!("archctl diff: tham số không nhận ra: `{other}`");
+                crate::say_err!("archctl diff: tham số không nhận ra: `{other}`");
                 return ExitCode::from(exit::USAGE);
             }
             other => git_ref = other.to_string(),
@@ -849,19 +943,19 @@ fn cmd_diff(args: &[String]) -> ExitCode {
 
     let start = root_arg.unwrap_or_else(|| PathBuf::from("."));
     let Some(root) = arch_core::find_root(&start) else {
-        eprintln!("archctl: không tìm thấy `{}`", arch_core::ARCH_FILE);
+        crate::say_err!("archctl: không tìm thấy `{}`", arch_core::ARCH_FILE);
         return ExitCode::from(exit::USAGE);
     };
 
     let head_src = match std::fs::read_to_string(root.join(arch_core::ARCH_FILE)) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("archctl: không đọc được file luật: {e}");
+            crate::say_err!("archctl: không đọc được file luật: {e}");
             return ExitCode::from(exit::USAGE);
         }
     };
     let Some(base_src) = git_show(&root, &git_ref) else {
-        eprintln!(
+        crate::say_err!(
             "archctl: không lấy được `{}:{}` từ git.\n\
              → kiểm tra ref, hoặc dự án chưa commit file luật lần nào",
             git_ref,
@@ -874,7 +968,7 @@ fn cmd_diff(args: &[String]) -> ExitCode {
     let (head, head_diags) = arch_core::load(&head_src);
     for (label, diags) in [("bản trước", &base_diags), ("bản hiện tại", &head_diags)] {
         if diag::has_errors(diags) {
-            eprintln!("archctl: {label} có lỗi cú pháp, không so sánh được");
+            crate::say_err!("archctl: {label} có lỗi cú pháp, không so sánh được");
             return ExitCode::from(exit::DSL_INVALID);
         }
     }
@@ -957,12 +1051,12 @@ fn cmd_scan(args: &[String]) -> ExitCode {
                     i += 1;
                 }
                 None => {
-                    eprintln!("archctl scan: `--root` thiếu đường dẫn");
+                    crate::say_err!("archctl scan: `--root` thiếu đường dẫn");
                     return ExitCode::from(exit::USAGE);
                 }
             },
             other if other.starts_with('-') => {
-                eprintln!("archctl scan: tham số không nhận ra: `{other}`");
+                crate::say_err!("archctl scan: tham số không nhận ra: `{other}`");
                 return ExitCode::from(exit::USAGE);
             }
             other => only.push(other.to_string()),
@@ -977,7 +1071,12 @@ fn cmd_scan(args: &[String]) -> ExitCode {
     } else {
         relative_to(&root, &only)
             .into_iter()
-            .filter(|f| scan::is_supported(f) || scan::deploy::touches_deploy(f) || f.ends_with(".proto"))
+            .filter(|f| {
+                scan::is_supported(f)
+                    || scan::deploy::touches_deploy(f)
+                    || f.ends_with(".proto")
+                    || scan::pipeline::is_dvc_file(f)
+            })
             .collect()
     };
     // Cho thẳng tên file thì đọc cả file trong thư mục test hay ví dụ: người
@@ -1000,6 +1099,7 @@ fn cmd_scan(args: &[String]) -> ExitCode {
     };
 
     let resolver = Resolver::new(&root);
+    let mut step_files = arch_core::check::StepFiles::new(&root, &resolver);
     // Bảng tra `.proto`: chỗ dò ra mà không phải gRPC (`QuantStub()` không có
     // `.proto` nào khai `Quant`) thì không in.
     let mut proto_index = scan::grpc::ProtoIndex::default();
@@ -1127,6 +1227,22 @@ fn cmd_scan(args: &[String]) -> ExitCode {
             if scanned.queues.cut {
                 say!("         quá {} chỗ gửi, nhận qua hàng đợi; phần sau không xét", scan::queue::MAX_PER_FILE);
             }
+            for e in &scanned.pipeline.edges {
+                let mut at = |s: &scan::pipeline::Step| {
+                    let f = step_files.of(file, s);
+                    if f.is_empty() { "ngoài repo".to_string() } else { f.join(", ") }
+                };
+                say!(
+                    "  {:>5}  {} → {}  → bước {} ({}) đưa dữ liệu cho {} ({})",
+                    e.line, e.from, e.to, e.tool.as_str(), at(&e.from_step), e.to, at(&e.to_step)
+                );
+            }
+            for u in &scanned.pipeline.unread {
+                say!("  {:>5}  ? {}: {}", u.line, u.tool.as_str(), u.why);
+            }
+            if scanned.pipeline.cut {
+                say!("         quá {} cạnh pipeline; phần sau không xét", scan::pipeline::MAX_EDGES);
+            }
             // Tên máy trong chuỗi: chỉ tên và cổng, không bao giờ chuỗi gốc (TM-33).
             let skipped = if scan::hosts::skipped_path(file) { " (file test, ví dụ: không xét)" } else { "" };
             for h in scanned.hosts.hosts.iter().filter(|h| shown_host(h)) {
@@ -1159,6 +1275,7 @@ fn cmd_scan(args: &[String]) -> ExitCode {
                             scan::grpc::Origin::GoName(v) => ("goName", v.as_str()),
                             scan::grpc::Origin::Rust => ("rust", ""),
                             scan::grpc::Origin::Suffix(v) => ("packageSuffix", v.as_str()),
+                            scan::grpc::Origin::JavaPackage(v) => ("javaPackage", v.as_str()),
                         };
                         format!(
                             r#"{{"line":{},"service":{},"origin":{},"from":{},"shown":{}}}"#,
@@ -1199,8 +1316,59 @@ fn cmd_scan(args: &[String]) -> ExitCode {
                 })
                 .collect::<Vec<_>>()
                 .join(",");
+            fn step_json(s: &scan::pipeline::Step) -> String {
+                match s {
+                    scan::pipeline::Step::Here => r#"{"here":true}"#.to_string(),
+                    scan::pipeline::Step::Imported { module, path } => format!(
+                        r#"{{"module":{},"path":{}}}"#,
+                        json::string(module),
+                        json::strings(path.iter().map(String::as_str))
+                    ),
+                    scan::pipeline::Step::Call { head, args, lost } => format!(
+                        r#"{{"call":{},"args":[{}],"lost":{lost}}}"#,
+                        step_json(head),
+                        args.iter().map(step_json).collect::<Vec<_>>().join(",")
+                    ),
+                }
+            }
+            let mut step = |s: &scan::pipeline::Step| {
+                let files = step_files.of(file, s);
+                let j = step_json(s);
+                format!("{},\"files\":{}}}", &j[..j.len() - 1], json::strings(files.iter().map(String::as_str)))
+            };
+            let pipeline = format!(
+                r#"{{"cut":{},"edges":[{}],"unread":[{}]}}"#,
+                scanned.pipeline.cut,
+                scanned
+                    .pipeline
+                    .edges
+                    .iter()
+                    .map(|e| format!(
+                        r#"{{"line":{},"tool":{},"from":{},"to":{},"fromStep":{},"toStep":{}}}"#,
+                        e.line,
+                        json::string(e.tool.as_str()),
+                        json::string(&e.from),
+                        json::string(&e.to),
+                        step(&e.from_step),
+                        step(&e.to_step)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                scanned
+                    .pipeline
+                    .unread
+                    .iter()
+                    .map(|u| format!(
+                        r#"{{"line":{},"tool":{},"why":{}}}"#,
+                        u.line,
+                        json::string(u.tool.as_str()),
+                        json::string(&u.why)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
             json_files.push(format!(
-                r#"{{"file":{},"lang":{},"imports":[{}],"crossings":{{"calls":[{}],"provides":[{}]}},"rpc":{{"calls":[{}],"serves":[{}],"implements":[{}]}},"queues":{{"cut":{},"sites":[{}]}},"hosts":{{"skipped":{},"cut":{},"found":[{}]}}}}"#,
+                r#"{{"file":{},"lang":{},"imports":[{}],"crossings":{{"calls":[{}],"provides":[{}]}},"rpc":{{"calls":[{}],"serves":[{}],"implements":[{}]}},"queues":{{"cut":{},"sites":[{}]}},"pipeline":{},"hosts":{{"skipped":{},"cut":{},"found":[{}]}}}}"#,
                 json::string(file),
                 json::string(lang.name()),
                 items.join(","),
@@ -1211,6 +1379,7 @@ fn cmd_scan(args: &[String]) -> ExitCode {
                 sites(&rpc_impls),
                 scanned.queues.cut,
                 queues,
+                pipeline,
                 scan::hosts::skipped_path(file),
                 scanned.hosts.cut,
                 scanned
@@ -1236,7 +1405,7 @@ fn cmd_scan(args: &[String]) -> ExitCode {
         let src = std::fs::read_to_string(root.join(arch_core::ARCH_FILE)).unwrap_or_default();
         let names = arch_core::check::deploy_options(&arch_core::load(&src).0).plan_verifies;
         if names.is_empty() {
-            eprintln!(
+            crate::say_err!(
                 "archctl scan: `--plan` mà {} không có `verify` nào ghi `.arch/tf-plan`: in như không có cờ",
                 arch_core::ARCH_FILE
             );
@@ -1252,14 +1421,94 @@ fn cmd_scan(args: &[String]) -> ExitCode {
         files.iter().filter(|f| f.ends_with(".proto")).cloned().collect()
     };
     let protos = scan_protos(&root, &proto_files, as_json);
+    let dvc_files: Vec<String> = if only.is_empty() {
+        arch_core::check::pipeline_files(&root, &arch_core::read_ignores(&root))
+    } else {
+        files.iter().filter(|f| scan::pipeline::is_dvc_file(f)).cloned().collect()
+    };
+    let dvc = scan_dvc(&root, &dvc_files, as_json);
     if as_json {
         say!(
-            r#"{{"root":{},"files":[{}],"deploy":{deploy},"protos":[{protos}]}}"#,
+            r#"{{"root":{},"files":[{}],"deploy":{deploy},"protos":[{protos}],"dvc":[{dvc}]}}"#,
             json::string(&root.to_string_lossy()),
             json_files.join(",")
         );
     }
     ExitCode::from(exit::OK)
+}
+
+/// Stage và cạnh dữ liệu của các `dvc.yaml`. Không in `cmd`: lệnh có thể
+/// mang token (TM-66).
+fn scan_dvc(root: &Path, files: &[String], as_json: bool) -> String {
+    use arch_core::scan::pipeline;
+    let mut out: Vec<String> = Vec::new();
+    for file in files {
+        let text = match arch_core::scan::deploy::read_in(root, file, arch_core::check::MAX_FILE_BYTES) {
+            Ok(t) => t,
+            Err(why) => {
+                if as_json {
+                    out.push(format!(r#"{{"file":{},"error":{}}}"#, json::string(file), json::string(&why)));
+                } else {
+                    say!("{file} (dvc): không đọc được — {why}");
+                }
+                continue;
+            }
+        };
+        let d = pipeline::dvc(&text, file);
+        let (edges, cut) = pipeline::dvc_edges(&d.stages);
+        if !as_json {
+            say!("{file} (dvc)");
+            for e in &edges {
+                say!(
+                    "  {:>5}  stage {} → {} qua {}",
+                    e.line, d.stages[e.from].name, d.stages[e.to].name, e.path
+                );
+            }
+            for u in &d.unread {
+                say!("  {:>5}  ? {}", u.line, u.why);
+            }
+            if cut {
+                say!("         quá {} cạnh; phần sau không xét", pipeline::MAX_EDGES);
+            }
+            continue;
+        }
+        let paths = |list: &[(String, usize)]| {
+            list.iter().map(|(p, l)| format!("[{},{l}]", json::string(p))).collect::<Vec<_>>().join(",")
+        };
+        out.push(format!(
+            r#"{{"file":{},"cut":{cut},"stages":[{}],"edges":[{}],"unread":[{}]}}"#,
+            json::string(file),
+            d.stages
+                .iter()
+                .map(|s| format!(
+                    r#"{{"name":{},"line":{},"dir":{},"deps":[{}],"outs":[{}]}}"#,
+                    json::string(&s.name),
+                    s.line,
+                    s.dir.as_deref().map_or_else(|| "null".to_string(), json::string),
+                    paths(&s.deps),
+                    paths(&s.outs)
+                ))
+                .collect::<Vec<_>>()
+                .join(","),
+            edges
+                .iter()
+                .map(|e| format!(
+                    r#"{{"from":{},"to":{},"path":{},"line":{}}}"#,
+                    json::string(&d.stages[e.from].name),
+                    json::string(&d.stages[e.to].name),
+                    json::string(&e.path),
+                    e.line
+                ))
+                .collect::<Vec<_>>()
+                .join(","),
+            d.unread
+                .iter()
+                .map(|u| format!(r#"{{"line":{},"why":{}}}"#, u.line, json::string(&u.why)))
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    out.join(",")
 }
 
 /// Tên của chỗ gửi, nhận qua hàng đợi, để in.
@@ -1284,6 +1533,7 @@ fn origin_text(origin: &arch_core::scan::grpc::Origin) -> String {
         arch_core::scan::grpc::Origin::GoName(p) => format!(" (từ package {p}?)"),
         arch_core::scan::grpc::Origin::Rust => " (tonic, so tên không phân biệt hoa thường)".to_string(),
         arch_core::scan::grpc::Origin::Suffix(p) => format!(" (package …{p})"),
+        arch_core::scan::grpc::Origin::JavaPackage(p) => format!(" (package Java {p})"),
     }
 }
 
@@ -2045,14 +2295,14 @@ fn git_show(root: &Path, git_ref: &str) -> Option<String> {
 
 fn cmd_parse(args: &[String]) -> ExitCode {
     let Some(path) = args.first() else {
-        eprintln!("archctl parse: thiếu đường dẫn file");
+        crate::say_err!("archctl parse: thiếu đường dẫn file");
         return ExitCode::from(exit::USAGE);
     };
 
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("archctl: không đọc được `{path}`: {e}");
+            crate::say_err!("archctl: không đọc được `{path}`: {e}");
             return ExitCode::from(exit::USAGE);
         }
     };

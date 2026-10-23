@@ -1,0 +1,5 @@
+syntax = "proto3";
+package hipstershop;
+service AdService { rpc GetAds(AdRequest) returns (AdResponse) {} }
+message AdRequest {}
+message AdResponse {}

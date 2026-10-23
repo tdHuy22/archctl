@@ -81,6 +81,8 @@ sys.path.insert(0, str(HERE))
 
 import bench  # noqa: E402
 import code_hosts  # noqa: E402
+import java_truth  # noqa: E402
+import pipeline_truth  # noqa: E402
 import queue_truth  # noqa: E402
 
 EXAMPLES = 5
@@ -371,7 +373,12 @@ def clang_rows(dump):
 INCLUDE_SPEC = re.compile(r'#\s*include\s*([<"])([^>"\n]+)[>"]')
 
 
+SCAN_DVC = {}
+SCAN_PROTOS = {}
+
+
 def archctl_scan(archctl, root):
+    """Mục `files` của `scan --json`; mục `dvc` để ở `SCAN_DVC[root]`."""
     try:
         p = subprocess.run([archctl, "scan", "--json", "--all-hosts", "--root", str(root)],
                            capture_output=True, text=True, timeout=900)
@@ -380,7 +387,10 @@ def archctl_scan(archctl, root):
     if p.returncode != 0:
         bench.die(f"archctl scan ở {root} thoát {p.returncode}: {p.stderr.strip()[:300]}")
     try:
-        return [f for f in json.loads(p.stdout)["files"] if "skipped" not in f]
+        rep = json.loads(p.stdout)
+        SCAN_DVC[str(root)] = rep.get("dvc", [])
+        SCAN_PROTOS[str(root)] = rep.get("protos", [])
+        return [f for f in rep["files"] if "skipped" not in f]
     except (ValueError, KeyError) as e:
         bench.die(f"archctl scan ở {root}: JSON hỏng ({e})")
 
@@ -1381,6 +1391,60 @@ def deploy_truth(python, root, files):
     return out
 
 
+def compare_pipelines(tally, python, root, by_lang, by_file):
+    """Đồ thị pipeline: Python theo `ast` (ngay trong tiến trình này), `dvc.yaml`
+    theo PyYAML trong venv `python` (bỏ qua nếu không có venv)."""
+    for file in by_lang["Python"]:
+        if not file.endswith(PY_EXTS):
+            continue
+        want = pipeline_truth.python_truth(root / file)
+        have_p = pipeline_truth.have(by_file[file])
+        if want is None:
+            tally.unparsed += 1
+        elif want or have_p:
+            check_lines(tally, file, want, have_p)
+    entries = {e["file"]: e for e in SCAN_DVC.get(str(root), [])}
+    if not entries or not python:
+        return
+    p = subprocess.run([python, "-I", str(HERE / "pipeline_truth.py")],
+                       input="".join(f"{root}\t{f}\n" for f in sorted(entries)),
+                       capture_output=True, text=True, timeout=600)
+    if p.returncode != 0:
+        bench.die(f"thước đo pipeline hỏng: {p.stderr.strip()[-400:]}")
+    for line in p.stdout.splitlines():
+        file, res = line.split("\t", 1)
+        entry = entries[file]
+        if res.startswith("ERR") or "error" in entry:
+            if res.startswith("ERR") != ("error" in entry):
+                tally.note(f"{file}: archctl {'lỗi' if 'error' in entry else 'đọc được'}, PyYAML {res[:80]}")
+            continue
+        want = collections.Counter((l, k) for l, k in json.loads(res))
+        check_lines(tally, file, want, pipeline_truth.dvc_have(entry))
+
+
+def compare_java(tally, python, root, by_lang, by_file):
+    """Chỗ gọi, cài đặt, đăng ký gRPC trong file `.java` theo tree-sitter-java
+    (`java_truth.py`), chỉ service có trong `.proto` của repo như `scan` lọc."""
+    files = sorted(f for f in by_lang["Java"])
+    if not files or not python:
+        return
+    services = {s["name"] for p in SCAN_PROTOS.get(str(root), []) for s in p.get("services", [])}
+    p = subprocess.run([python, "-I", str(HERE / "java_truth.py")],
+                       input="".join(f"{root}\t{f}\n" for f in files),
+                       capture_output=True, text=True, timeout=600)
+    if p.returncode != 0:
+        bench.die(f"thước đo Java hỏng: {p.stderr.strip()[-400:]}")
+    for line in p.stdout.splitlines():
+        file, res = line.split("\t", 1)
+        if res.startswith("ERR"):
+            tally.note(f"{file}: tree-sitter {res[:80]}")
+            continue
+        want = collections.Counter((l, k) for l, k in json.loads(res) if k.split()[1] in services)
+        have = java_truth.have(by_file[file], services)
+        if want or have:
+            check_lines(tally, file, want, have)
+
+
 def yaml_files(root):
     """File YAML mà git theo dõi và có trên đĩa: ứng viên manifest Kubernetes,
     `skaffold.yaml`, `kustomization.yaml`, `Chart.yaml`."""
@@ -1503,6 +1567,7 @@ def k8s_truth(python, root, files, helm_json=None, skip_edges=()):
 
 
 PROTO_REQUIREMENTS = HERE / "proto-requirements.txt"
+JAVA_REQUIREMENTS = HERE / "java-requirements.txt"
 
 
 def proto_version():
@@ -1612,7 +1677,7 @@ class Tally:
 
     def line(self, repo):
         unit = {"Binding": "đầu cạnh", "Hạ tầng": "dữ kiện", "Proto": "dữ kiện", "K8s": "dữ kiện", "Helm": "dữ kiện",
-                "Tên máy": "tên máy"}.get(self.label, "import")
+                "Tên máy": "tên máy", "Pipeline": "dữ kiện", "gRPC Java": "chỗ gRPC"}.get(self.label, "import")
         head = f"  {repo:22} {self.label:8} {self.files:5} file, {self.imports:6} {unit}"
         tail = f", {self.unparsed} không parse được" if self.unparsed else ""
         if self.in_macro:
@@ -1666,7 +1731,7 @@ def main():
     have_go = shutil.which("go") is not None
     strip_ts = have_node and node_can_strip_types()
     required = args.require.split(",")
-    unknown = set(filter(None, required)) - {"clang", "node", "go", "syn", "ipython", "deploy", "proto", "helm", "kustomize", "terraform"}
+    unknown = set(filter(None, required)) - {"clang", "node", "go", "syn", "ipython", "deploy", "proto", "helm", "kustomize", "terraform", "java"}
     if unknown:
         bench.die(f"`--require` không biết: {', '.join(sorted(unknown))}")
     for tool, ok in [("clang", have_clang), ("node", have_node), ("go", have_go)]:
@@ -1692,9 +1757,11 @@ def main():
     helm_v = HELM_VERSION if use_helm else "BỎ QUA: cần tải helm, bật bằng --require helm"
     kust_v = KUSTOMIZE_VERSION if use_kustomize else "BỎ QUA: cần tải kustomize, bật bằng --require kustomize"
     tf_v = f"OpenTofu {TOFU_VERSION}" if use_tf else "BỎ QUA: cần tải OpenTofu, bật bằng --require terraform"
+    use_java = "java" in required
+    java_v = "tree-sitter-java 0.23.5" if use_java else "BỎ QUA: cần tải gói, bật bằng --require java"
     print(f"python {sys.version.split()[0]} · clang: {clang_v} · node: {node_v} · go: {go_v} · syn: {syn_v}"
           f" · ipython: {ipy_v} · hạ tầng: {dep_v} · proto: {proto_v} · helm: {helm_v} · kustomize: {kust_v}"
-          f" · terraform: {tf_v}"
+          f" · terraform: {tf_v} · java: {java_v}"
           + ("" if strip_ts or not have_node else " (không gỡ được kiểu TS: BỎ QUA .ts)"))
 
     missing_repos = [r for r in repos if not (Path(args.cache) / "repos" / r).is_dir()]
@@ -1713,6 +1780,7 @@ def main():
     kustomize = build_kustomize(args.cache) if use_kustomize else None
     tofu, tf_mirror = build_tofu(args.cache) if use_tf else (None, None)
     tf_python = build_venv(args.cache, "tf-oracle", TF_REQUIREMENTS, "Terraform") if use_tf else None
+    java_python = build_venv(args.cache, "java-oracle", JAVA_REQUIREMENTS, "Java") if use_java else None
 
     bad = 0
     for repo in repos:
@@ -1840,6 +1908,18 @@ def main():
                     check_lines(queues, file, want, have_q)
         if queues.files:
             tallies.append(queues)
+
+        # Đồ thị pipeline: LangGraph, Airflow theo `ast`, `dvc.yaml` theo PyYAML.
+        pipes = Tally("Pipeline")
+        compare_pipelines(pipes, dep_python, root, by_lang, by_file)
+        if pipes.files:
+            tallies.append(pipes)
+
+        # gRPC Java: chỗ gọi stub, lớp cài đặt, chỗ đăng ký theo tree-sitter-java.
+        jt = Tally("gRPC Java")
+        compare_java(jt, java_python, root, by_lang, by_file)
+        if jt.files:
+            tallies.append(jt)
 
         if syn_helper and by_lang["Rust"]:
             rs = Tally("Rust")
@@ -2108,6 +2188,38 @@ def main():
         for e in qt.examples:
             print(f"      {e}")
         bad += qt.bad
+
+    # Mẫu đồ thị pipeline trong `bench/fixtures/pipelines`: repo thật của bộ đo
+    # không có LangGraph, Airflow, dvc.
+    if not args.only:
+        fx = HERE / "fixtures" / "pipelines"
+        files = archctl_scan(archctl, fx)
+        by_file = {f["file"]: f for f in files}
+        fx_lang = collections.defaultdict(list)
+        for f in files:
+            fx_lang[f["lang"]].append(f["file"])
+        pt = Tally("Pipeline")
+        compare_pipelines(pt, dep_python, fx, fx_lang, by_file)
+        print(pt.line(fx.name))
+        for e in pt.examples:
+            print(f"      {e}")
+        bad += pt.bad
+
+    # Mẫu gRPC Java trong `bench/fixtures/java-grpc`: tên viết tách dòng, nhập
+    # tĩnh, text block và chú thích chứa lời gọi giả, `java_package` khác `package`.
+    if not args.only and java_python:
+        fx = HERE / "fixtures" / "java-grpc"
+        files = archctl_scan(archctl, fx)
+        by_file = {f["file"]: f for f in files}
+        fx_lang = collections.defaultdict(list)
+        for f in files:
+            fx_lang[f["lang"]].append(f["file"])
+        jt = Tally("gRPC Java")
+        compare_java(jt, java_python, fx, fx_lang, by_file)
+        print(jt.line(fx.name))
+        for e in jt.examples:
+            print(f"      {e}")
+        bad += jt.bad
 
     print(f"\n{'khớp hết' if not bad else f'{bad} chỗ lệch so với parser chuẩn'}")
     sys.exit(1 if bad else 0)

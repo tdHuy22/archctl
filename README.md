@@ -47,6 +47,7 @@ kiến trúc c8bd3bd9 · 15 file quét (5 Rust, 4 C/C++, 4 Python, 2 Go) · 7/8 
 | `service ... runs`, `link` — triển khai và mạng | đọc docker-compose, Dockerfile, manifest Kubernetes và Terraform: lệnh khởi chạy dẫn tới mã nào, `depends_on`, tên service hay Service Kubernetes trong biến môi trường hay viết thẳng trong mã (`"http://payment:80"`, `host="redis"`), tham chiếu Terraform trong biến môi trường (`aws_db_instance.main.address`) |
 | cạnh gRPC (`allow`, và `link` khi đã khai service) | chỗ gọi stub (`XStub`, `NewXClient`) ghép với chỗ đăng ký server theo `package.Service` của `.proto`; Python và Go |
 | cạnh qua hàng đợi (`allow`, và `link` khi đã khai service) | chỗ gửi ghép với chỗ nhận cùng topic Kafka, queue hay exchange RabbitMQ, kênh Redis, task Celery; tên từ env lần qua compose, manifest; Python, Go, Node |
+| cạnh qua bước pipeline (`allow`) | bước trước đưa dữ liệu cho bước sau: `add_edge` của LangGraph, `>>` và `python_callable` của Airflow, stage `dvc.yaml` ghi file mà stage sau đọc; hàm của bước lần về file qua import của file đồ thị |
 | trạng thái `#draft`…`#locked` | quyết định luật nào đang có hiệu lực |
 
 Bốn khai báo cuối bắt đúng chế độ hỏng hay gặp nhất khi làm việc với agent:
@@ -177,8 +178,12 @@ https://claude.ai/code/artifact/2b26df5d-d6b0-40d0-a398-7e574c7d1387
   Chart Helm được tự dựng từ `values.yaml`, overlay Kustomize được tự dựng
   như `kustomize build` (tập con; ngoài tập con thì báo chưa đọc); Terraform
   được đọc tĩnh (ECS, Lambda, Cloud Run; module registry, `for_each` không
-  hằng thì báo chưa đọc). gRPC của Java, C# thì chưa; cạnh mạng chỉ có lúc chạy (tên máy ghép trong mã,
+  hằng thì báo chưa đọc). gRPC của Java đọc được (chỉ phần gRPC; import Java chưa kiểm và được báo, người duyệt khai nhận được bằng `unchecked`), C# thì chưa; cạnh mạng chỉ có lúc chạy (tên máy ghép trong mã,
   service discovery) thì không thấy — xem [docs/infra.md](docs/infra.md).
+- **Đồ thị pipeline chỉ đọc phần khai tĩnh** của LangGraph, Airflow, dvc: tên
+  bước từ biến, đồ thị dựng trong vòng lặp, nhánh rẽ bằng `Command`/`Send` thì
+  báo chưa đọc; thứ tự bước và nhánh rẽ chụp bằng `verify` — xem
+  [docs/ml.md](docs/ml.md#đồ-thị-pipeline-langgraph-airflow-dvc).
 - **File trên 4 MB không được dò**, và được báo ra. Bộ dò giữ cả dãy token
   trong bộ nhớ, nên một bundle đã minify 32 MB ngốn hơn một gigabyte.
 - **Thứ tự bước trong `flow` chưa kiểm.** Bộ quét không phân biệt được lời gọi

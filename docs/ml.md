@@ -7,7 +7,7 @@ chạy. Phần đó phải chạy thật mới biết, nên nó đi qua `verify`
 
 Mọi công thức dưới đây có trong [`examples/ml`](../examples/ml), mỗi công thức
 cài sẵn đúng một vi phạm, cộng một vi phạm trong notebook. Test
-`crates/arch-core/tests/ml.rs` đòi đủ bảy vi phạm đó, nên tài liệu này không
+`crates/arch-core/tests/ml.rs` đòi đủ tám vi phạm đó, nên tài liệu này không
 lặng lẽ sai đi được.
 
 | Tầng | archctl | Bằng gì |
@@ -16,10 +16,12 @@ lặng lẽ sai đi được.
 | Python gọi C++, CUDA, Rust | kiểm được | [cạnh liên ngôn ngữ](check.md#python-gọi-mã-native) |
 | Hàm nguy hiểm như `pickle` | kiểm được | [`api`](api.md) |
 | Lỗi của nhà cung cấp LLM lọt ra tầng ngoài | kiểm được | `boundary … contain` |
+| Bước của đồ thị LangGraph, DAG Airflow, stage `dvc.yaml` đưa dữ liệu cho nhau | kiểm được | [cạnh pipeline](#đồ-thị-pipeline-langgraph-airflow-dvc) cần `allow` |
+| Hình dạng đồ thị (thứ tự bước, nhánh rẽ) | chạy thật rồi so | `verify` |
 | Kiến trúc mô hình theo layer | chạy thật rồi so | `verify` |
-| Process, GPU, hàng đợi, đồ thị agent lúc chạy | không | trace lúc chạy |
+| Process, GPU, đồ thị dựng lúc chạy | không | trace lúc chạy |
 
-## Sáu công thức
+## Bảy công thức
 
 Các ví dụ dùng bộ component của `examples/ml`: `Data`, `Features`, `Models`,
 `Ops` (lớp bọc op C++), `Kernels` (`csrc/`), `Train`, `Serve`, `LLM` (cổng gọi
@@ -125,6 +127,27 @@ Ghép được khi namespace viết thẳng trong `TORCH_LIBRARY(mlapp_ops, m)`.
 mở rộng PyO3, pybind11, nanobind cũng vậy. Giới hạn nằm ở
 [check.md](check.md#python-gọi-mã-native).
 
+### 7. Log người dùng không vào thẳng huấn luyện
+
+```
+deny Web -> Train
+```
+
+Log câu hỏi phải qua `Data` để lọc dữ liệu cá nhân trước khi thành dữ liệu huấn
+luyện. Trong `examples/ml`, `dvc.yaml` có stage `export_feedback` chạy
+`python -m mlapp.web.export` ghi `data/feedback.jsonl`, và stage `train` đọc
+đúng file đó rồi chạy `python -m mlapp.train.loop`. Không file nào import file
+nào; cạnh nằm ở chỗ stage sau đọc file stage trước ghi:
+
+```
+✗ VI PHẠM  Web -> Train  (bị cấm, #accepted)
+  dvc.yaml:9  bước pipeline `stage export_feedback → train qua data/feedback.jsonl (dvc)`
+```
+
+Đồ thị LangGraph của RAG trong cùng ví dụ (`mlapp/rag/graph.py`: bước
+`retrieve` của Rag rồi bước `generate` là cổng LLM) là đường hợp lệ: có `allow
+Rag -> LLM` nên không báo.
+
 ## Kiến trúc mô hình: chụp khi chạy thật
 
 `Net` dựng `Block` trong một vòng lặp, và số tầng lấy từ tham số hay file cấu
@@ -176,6 +199,78 @@ CI của repo này chạy đúng lệnh đó ở job `kiến trúc mô hình` ([
 Lệnh chụp là gì cũng được (`repr`, đồ thị của `torch.export`, bảng tóm tắt của
 torchinfo), miễn nó thoát khác 0 khi kiến trúc khác bản đã duyệt.
 
+## Đồ thị pipeline: LangGraph, Airflow, dvc
+
+Các bước của một pipeline nối với nhau bằng lời gọi hàm hay file cấu hình,
+không bằng import. `rag/graph.py` import cả `retrieve` lẫn `generate` rồi
+`add_edge("retrieve", "generate")`; hai file của hai bước thì không import
+nhau. archctl đọc các lời gọi đó (không chạy gì), lần hàm của mỗi bước về file
+qua import của chính file đồ thị, và coi "bước A đưa dữ liệu cho bước B" là một
+cạnh từ component chứa A tới component chứa B: cần `allow`, bị `deny` chặn, như
+một import. Không cần `link`: các bước thường chạy chung một process (LangGraph)
+hay do bộ lập lịch điều phối. File đồ thị không cần thuộc component nào
+(`dags/` của Airflow, `main.py` ở gốc). `init --from-code` sinh `allow` cho cạnh
+này.
+
+Tên được tra như Python: theo phạm vi (`def`, `class`, biết nhờ thụt lề) và lần
+gán hay import gần nhất trước dòng dùng. Hai hàm cùng dựng đồ thị vào biến
+`workflow` là hai đồ thị, gán lại `g = StateGraph()` là đồ thị mới, tham số `g`
+của một hàm khác là builder khác; phương thức `generate` của một lớp không che
+`from rag.llm import generate`; `generate = traceable(generate)` bọc
+`generate` của import. Trong Airflow, chỉ thân hàm `@dag`, `@task_group` và khối
+`with DAG` là chỗ nối đồ thị: thân một `@task`, hay hàm làm `python_callable`,
+là mã chạy lúc thực thi. Hàm nhập qua `__init__.py` chỉ nhập lại tên thì được
+lần tới file định nghĩa nó. Lời gọi bọc (`traceable(generate)`, `partial(f)`,
+`ToolNode([search, fetch])`) là cạnh tới hàm được bọc khi hàm bọc là của gói
+ngoài; `lambda s: generate(s)` là cạnh tới `generate`.
+
+| Công cụ | Đọc được | Báo "chưa đọc được" |
+| --- | --- | --- |
+| LangGraph (file import `langgraph`, hay gọi `StateGraph(`) | `add_node("tên", hàm)`, `add_node(hàm)`, `add_sequence([...])`, `add_edge` (cả danh sách nguồn), `add_conditional_edges` với `path_map` (dict, list, biến gán dict), với hàm rẽ có kiểu trả về `Literal[...]`, với `tools_condition`; hàm là tên nhập, `module.hàm`, lời gọi bọc, `lambda`, phương thức `self.x`, biến gán từ những thứ đó | tên bước từ biến hay f-string, `add_node` trong vòng lặp, `add_edge` gọi qua biến (`edge = g.add_edge`), cạnh tới bước mà builder đó không `add_node`, rẽ nhánh không `path_map` và không `Literal`, `Command(goto=…)` (cả khi nhập với tên khác), `Send(…)`, hàm của bước là tham số hay biến không gán trong file |
+| Airflow (file import `airflow`, hay gọi `DAG(`, `…Operator(`) | operator, sensor có `python_callable` (cả `.partial(…).expand(…)`), task TaskFlow (`extract()`, `f.override(…)()`), `a >> b`, `a << b`, danh sách, nhóm `with TaskGroup(…) as tg` (cạnh tới mọi task gán trong khối), `set_downstream`, `set_upstream`, `chain`, `chain_linear`, `cross_downstream` của Airflow (cả khi nhập với tên khác); trong `@dag` hay `with DAG(…)`, TaskFlow truyền qua đối số (`load(transform(extract()))`) | task lấy qua chỉ số (`tasks[0]`), task không gán trong file, `dag.get_task(…)`, `set_dependency`, `>>` nằm trong biểu thức khác (`log(a >> b)`), `BashOperator` chạy script của repo, `chain` hai danh sách khác độ dài |
+| dvc (mọi `dvc.yaml` của repo, ghép chung một đồ thị như dvc) | stage ghi file (`outs`, `metrics`, `plots`) mà stage sau đọc (`deps`), so theo đoạn đường dẫn (`data/a` khớp `data/a/x.csv`, không khớp `data/ab`), `wdir`; script trong `cmd` (`python x.py`, `python -m m`, `cd d && …`) | `foreach`, `matrix`, `${…}`, `wdir` ra ngoài repo, script shell, script không có trong repo, `cmd` không trỏ tới file mã nào (`python -c`, `make`, `papermill`) |
+
+Không kiểm thứ tự bước hay điều kiện rẽ. Operator không chạy mã của repo
+(`BashOperator` chạy `echo`) không có đầu cạnh nào. Đồ thị trong file test, mock
+vẫn cho cạnh (nó nối bước thật của các component), nhưng chỗ không đọc được của
+nó không báo. Builder lấy từ hàm của module khác (`g = new_graph()` trong file
+không import LangGraph, không gọi `StateGraph(`) thì không thấy; code trong file
+không thuộc component nào (hàm `def` ngay trong `dags/x.py` ngoài mọi
+component) không có component để gắn cạnh. `cmd` của dvc, nội dung chuỗi và đối
+số của operator không bao giờ được in: lệnh có thể mang token. Mỗi file có trần
+(10 000 cạnh, 2 000 000 bước xét); chạm trần thì báo chưa đọc.
+
+Thứ tự bước, nhánh rẽ và đồ thị dựng lúc chạy thì chụp khi chạy thật rồi so với
+bản đã duyệt, như kiến trúc mô hình ở trên. Công thức cho LangGraph (cần cài
+`langgraph` trong môi trường chạy `verify`; repo này không chạy nó trong CI):
+
+```
+verify rag_graph runs "python3 -m pytest -q tests/test_graph_shape.py"
+```
+
+```python
+# tests/test_graph_shape.py
+import os
+from pathlib import Path
+
+from rag.graph import graph  # đồ thị đã `compile()`
+
+APPROVED = Path(__file__).with_name("graph_shape.mmd")
+
+
+def test_hinh_dang_do_thi_khop_ban_da_duyet():
+    shape = graph.get_graph().draw_mermaid()
+    if os.environ.get("UPDATE_GRAPH"):
+        APPROVED.write_text(shape)
+    assert shape == APPROVED.read_text(), "đồ thị khác bản đã duyệt: UPDATE_GRAPH=1 rồi duyệt diff"
+```
+
+Với Airflow, so `{t.task_id: sorted(t.downstream_task_ids) for t in dag.tasks}`
+của DAG nạp bằng `DagBag(include_examples=False)`; với dvc, so đầu ra của `dvc
+dag --md`. Lệnh nào cũng được, miễn nó thoát khác 0 khi đồ thị khác bản đã
+duyệt. Bộ đo đối chiếu phần đọc tĩnh với `ast` và PyYAML trên langgraph,
+airflow, example-get-started ([bench/README.md](../bench/README.md)).
+
 ## Notebook
 
 `.ipynb` được quét như Python, và chỉ ô code được tính: ô markdown, output và
@@ -213,6 +308,7 @@ là quá lớn. Xoá output trước khi commit (`jupyter nbconvert --clear-outp
 
 ## Chưa làm
 
-- **Đồ thị lúc chạy:** process và GPU worker, hàng đợi, đồ thị của LangGraph,
-  DAG của `dvc.yaml` hay Airflow. Những thứ đó được khai báo bằng lời gọi hàm
-  hay file cấu hình, không bằng import.
+- **Đồ thị lúc chạy:** process và GPU worker, đồ thị dựng trong vòng lặp hay
+  từ file cấu hình, nhánh rẽ bằng `Command`/`Send`. Phần khai tĩnh của
+  LangGraph, Airflow, dvc đã được đọc (mục trên); phần còn lại được báo
+  "chưa đọc được" và chụp bằng `verify`. Prefect, Kubeflow, Dagster chưa đọc.

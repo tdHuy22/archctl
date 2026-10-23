@@ -348,3 +348,31 @@ fn ky_tu_chu_thich_trong_chuoi_khong_bi_cat() {
     let doc = ok("verify w runs \"curl http://x/#frag\"");
     assert_eq!(doc.verifies[0].command, "curl http://x/#frag");
 }
+
+/// `unchecked <Component> imports java because "<lý do>"` (TM-70).
+#[test]
+fn unchecked_doc_dung_va_bao_loi_ro() {
+    let d = ok("component Ads at ads/**\nunchecked Ads imports java because \"chỉ gọi qua \\\"gRPC\\\"\" #proposed\n");
+    assert_eq!(d.uncheckeds.len(), 1);
+    let u = &d.uncheckeds[0];
+    assert_eq!((u.component.as_str(), u.lang.as_str(), u.reason.as_str()), ("Ads", "java", "chỉ gọi qua \"gRPC\""));
+    assert_eq!(u.meta.status, Status::Proposed);
+
+    let c = "component Ads at ads/**\nexternal Lib\n";
+    for (line, want) in [
+        ("unchecked Ads imports java", "thiếu `because"),
+        ("unchecked Ads because \"x\"", "thiếu `imports"),
+        ("unchecked Ads imports python because \"x\"", "archctl có đọc import"),
+        ("unchecked Ads imports java because x", "dấu nháy kép"),
+        ("unchecked Ads imports java because \"  \"", "lý do rỗng"),
+        ("unchecked Ads imports java because \"\" \" \"", "chưa thoát"),
+        ("unchecked Ads imports JAVA because \"x\"", "archctl có đọc import"),
+        ("unchecked Nope imports java because \"x\"", "chưa khai báo"),
+        ("unchecked Lib imports java because \"x\"", "external"),
+    ] {
+        let errs = errors(&format!("{c}{line}\n"));
+        assert!(errs.iter().any(|e| e.starts_with("3:") && e.contains(want)), "{line}: {errs:?}");
+    }
+    let errs = errors(&format!("{c}unchecked Ads imports java because \"a\"\nunchecked Ads imports java because \"b\"\n"));
+    assert!(errs.iter().any(|e| e.starts_with("4:") && e.contains("đã khai ở dòng 3")), "{errs:?}");
+}

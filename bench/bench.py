@@ -339,7 +339,7 @@ def report(results):
 
     for r in results:
         lines = r["problems"] + [f"luồng: {x}" for x in r["flows_failed"]]
-        notes = r["flows_notes"]
+        notes = r.get("notes", []) + r["flows_notes"]
         if lines or notes:
             print(f"\n{r['repo']}:")
             for l in lines:

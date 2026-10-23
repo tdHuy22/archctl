@@ -493,3 +493,177 @@ fn cpp_client_server() {
     let v = rpc(&r.partial(&["native/server.cc"]));
     assert!(v.contains(&"NoAllow Client -> Native app/client/c.py:4".to_string()), "{v:?}");
 }
+
+/// Bộ quét Java chỉ dò gRPC: component đã vào diện kiểm có file Java được báo
+/// "import Java chưa kiểm" (`--strict` tính); component chưa có `allow` thì
+/// không, như mọi phần chưa khai báo (TM-68).
+#[test]
+fn java_import_chua_kiem_duoc_bao() {
+    let r = Repo::new("java-unchecked");
+    r.write("ads/src/main/java/hipstershop/AdService.java", "package hipstershop;\nimport hipstershop.Demo;\nclass AdService {}\n")
+        .write("ads/src/main/java/hipstershop/Util.java", "package hipstershop;\nclass Util {}\n")
+        .write("other/src/X.java", "class X {}\n")
+        .write("web/main.go", "package main\n")
+        .write(".arch/system.arch", "component Ads at ads/**\ncomponent Other at other/**\ncomponent Web at web/**\nallow Ads -> Web\n");
+    let rep = r.report();
+    assert_eq!(rep.imports_unchecked, [("Ads".to_string(), arch_core::scan::Lang::Java, 2)]);
+    assert!(rep.unresolved.is_empty() && rep.violations.is_empty(), "{:?} {:?}", rep.unresolved, rep.violations);
+    assert_eq!(rep.files_scanned, 4);
+}
+
+/// `unchecked … imports java because "…"` (TM-70): người khai nhận thì cảnh
+/// báo chuyển sang `imports_accepted` (`--strict` không tính); `#proposed`
+/// chưa có hiệu lực; khai nhận không còn ứng với file nào thì lần kiểm cả repo
+/// báo lạc hậu, còn hook (chỉ thấy file vừa sửa) thì không kết luận.
+#[test]
+fn java_khai_nhan_import_chua_kiem() {
+    let r = Repo::new("java-accepted");
+    let law = "component Ads at ads/**\ncomponent Web at web/**\nallow Ads -> Web\n";
+    r.write("ads/src/AdService.java", "package hipstershop;\nclass AdService {}\n")
+        .write("web/main.go", "package main\n")
+        .write(".arch/system.arch", &format!("{law}unchecked Ads imports java because \"chỉ gọi qua gRPC\"\n"));
+    let rep = r.report();
+    assert!(rep.imports_unchecked.is_empty(), "{:?}", rep.imports_unchecked);
+    assert_eq!(
+        rep.imports_accepted,
+        [("Ads".to_string(), arch_core::scan::Lang::Java, 1, "chỉ gọi qua gRPC".to_string())]
+    );
+    assert!(rep.unchecked_unused.is_empty());
+
+    r.write(".arch/system.arch", &format!("{law}unchecked Ads imports java because \"x\" #proposed\n"));
+    let rep = r.report();
+    assert_eq!(rep.imports_unchecked.len(), 1, "#proposed chưa có hiệu lực");
+    assert!(rep.imports_accepted.is_empty() && rep.unchecked_unused.is_empty());
+
+    r.write(".arch/system.arch", &format!("{law}unchecked Ads imports java because \"x\"\n"))
+        .remove_file("ads/src/AdService.java")
+        .write("ads/src/ads.go", "package ads\n");
+    assert_eq!(r.report().unchecked_unused, [("Ads".to_string(), "java".to_string(), 4)]);
+    assert!(r.partial(&["ads/src/ads.go"]).unchecked_unused.is_empty(), "hook không kết luận lạc hậu");
+}
+
+/// gRPC Java (việc 15.2): client Go gọi server Java đăng ký bằng
+/// `.addService(` cùng file; client Java (`import`, `java_package` khác
+/// `package`) gọi server Go. Thiếu `allow` là vi phạm như mọi cạnh gRPC.
+#[test]
+fn grpc_java_hai_chieu_voi_go() {
+    let r = Repo::new("java-grpc");
+    r.write("protos/demo.proto", "syntax = \"proto3\";\npackage hipstershop;\noption go_package = \"example.com/demo/genproto\";\noption java_package = \"com.acme.demo\";\nservice AdService { rpc GetAds(A) returns (A); }\nservice CartService { rpc Get(A) returns (A); }\n")
+        .write("frontend/go.mod", "module example.com/frontend\n")
+        .write("frontend/rpc.go", "package main\nimport pb \"example.com/demo/genproto\"\nfunc f(c int) { _ = pb.NewAdServiceClient(c) }\n")
+        .write("cart/main.go", "package main\nimport pb \"example.com/demo/genproto\"\nfunc main() { pb.RegisterCartServiceServer(nil, nil) }\n")
+        .write(
+            "ads/src/main/java/com/acme/ads/AdService.java",
+            "package com.acme.ads;\nimport com.acme.demo.AdServiceGrpc;\nimport com.acme.demo.CartServiceGrpc;\nclass AdService {\n  void start(io.grpc.ServerBuilder<?> b) { b.addService(new Impl()); }\n  static class Impl extends AdServiceGrpc.AdServiceImplBase {}\n  void cart(Object ch) { CartServiceGrpc.newBlockingStub(ch); }\n}\n",
+        )
+        .write(".arch/system.arch", "component Frontend at frontend/**\ncomponent Cart at cart/**\ncomponent Ads at ads/**\nallow Frontend -> Frontend\nallow Ads -> Ads\n");
+    let rep = r.report();
+    assert_eq!(
+        rpc(&rep),
+        ["NoAllow Ads -> Cart ads/src/main/java/com/acme/ads/AdService.java:7", "NoAllow Frontend -> Ads frontend/rpc.go:3"],
+        "{:?}",
+        rep.unresolved
+    );
+    assert_eq!(rep.imports_unchecked, [("Ads".to_string(), arch_core::scan::Lang::Java, 1)]);
+}
+
+/// Java đăng ký lớp cài đặt ở file khác (`Server.java`: `addService(new
+/// CartImpl())`): ghép theo tên lớp, không báo "server bị giấu"; cả trong hook
+/// chỉ sửa file cài đặt. Lớp vô danh `new XGrpc.XImplBase() {…}` trong
+/// `addService(` cùng file cũng là server.
+#[test]
+fn grpc_java_dang_ky_o_file_khac() {
+    let r = Repo::new("java-reg");
+    r.write("protos/demo.proto", "syntax = \"proto3\";\npackage shop;\noption go_package = \"example.com/gen\";\nservice CartService { rpc Get(A) returns (A); }\nservice AdService { rpc Get(A) returns (A); }\n")
+        .write("web/go.mod", "module example.com/web\n")
+        .write("web/main.go", "package main\nimport pb \"example.com/gen\"\nfunc f(c int) { _ = pb.NewCartServiceClient(c); _ = pb.NewAdServiceClient(c) }\n")
+        .write("cart/src/shop/CartImpl.java", "package shop;\nclass CartImpl extends CartServiceGrpc.CartServiceImplBase {}\n")
+        .write("cart/src/shop/Server.java", "package shop;\nclass Server {\n  void run(io.grpc.ServerBuilder<?> b) {\n    b.addService(new CartImpl())\n     .addService(new AdServiceGrpc.AdServiceImplBase() {});\n  }\n}\n")
+        .write(".arch/system.arch", "component Web at web/**\ncomponent Cart at cart/**\nallow Web -> Web\n");
+    let rep = r.report();
+    assert_eq!(rpc(&rep), ["NoAllow Web -> Cart web/main.go:3", "NoAllow Web -> Cart web/main.go:3"]);
+    assert!(rep.unresolved.is_empty(), "{:?}", rep.unresolved);
+    let hook = r.partial(&["cart/src/shop/CartImpl.java"]);
+    assert!(hook.unresolved.is_empty(), "{:?}", hook.unresolved);
+}
+
+/// Review Java (2026-10-23), lỗi 1: hook phải thấy cạnh gRPC tới hay từ server
+/// Java dù chỉ sửa một phía. Bốn kịch bản a–d của reviewer.
+#[test]
+fn grpc_java_trong_hook() {
+    let r = Repo::new("java-hook");
+    r.write("protos/demo.proto", "syntax = \"proto3\";\npackage shop;\noption go_package = \"example.com/gen\";\nservice CartService { rpc Get(A) returns (A); }\nservice AdService { rpc Get(A) returns (A); }\n")
+        .write("web/go.mod", "module example.com/web\n")
+        .write("web/main.go", "package main\nimport pb \"example.com/gen\"\nfunc f(c int) { _ = pb.NewCartServiceClient(c); _ = pb.NewAdServiceClient(c) }\n")
+        .write("cart/src/shop/CartImpl.java", "package shop;\nclass CartImpl extends CartServiceGrpc.CartServiceImplBase {}\n")
+        .write("cart/src/shop/Server.java", "package shop;\nclass Server {\n  void run(io.grpc.ServerBuilder<?> b) { b.addService(new CartImpl()); }\n}\n")
+        .write("ads/src/shop/Main.java", "package shop;\nclass Main {\n  void run(io.grpc.ServerBuilder<?> b) { b.addService(new Impl()); }\n  static class Impl extends AdServiceGrpc.AdServiceImplBase {}\n}\n")
+        .write("cli/src/C.java", "package cli;\nclass C { void f(Object ch) { shop.AdServiceGrpc.newBlockingStub(ch); } }\n")
+        .write(".arch/system.arch", "component Web at web/**\ncomponent Cart at cart/**\ncomponent Ads at ads/**\ncomponent Cli at cli/**\nallow Web -> Web\nallow Cli -> Cli\n");
+    let full = rpc(&r.report());
+    assert_eq!(
+        full,
+        ["NoAllow Cli -> Ads cli/src/C.java:2", "NoAllow Web -> Cart web/main.go:3", "NoAllow Web -> Ads web/main.go:3"]
+    );
+    // a, b: hook chỉ sửa client Go.
+    assert_eq!(rpc(&r.partial(&["web/main.go"])), ["NoAllow Web -> Cart web/main.go:3", "NoAllow Web -> Ads web/main.go:3"]);
+    // c: hook chỉ sửa client Java, và chỉ sửa file server Java.
+    assert_eq!(rpc(&r.partial(&["cli/src/C.java"])), ["NoAllow Cli -> Ads cli/src/C.java:2"]);
+    assert_eq!(rpc(&r.partial(&["ads/src/shop/Main.java"])), ["NoAllow Cli -> Ads cli/src/C.java:2", "NoAllow Web -> Ads web/main.go:3"]);
+    // d: hook chỉ sửa chỗ đăng ký, lớp cài đặt ở file khác.
+    assert_eq!(rpc(&r.partial(&["cart/src/shop/Server.java"])), ["NoAllow Web -> Cart web/main.go:3"]);
+}
+
+/// Lỗi 3: ghép đăng ký theo `package:Lớp`, không theo tên lớp trần; lỗi 4:
+/// `import static …Grpc.*`; cận kiểu tham số không phải chỗ cài đặt.
+#[test]
+fn grpc_java_ten_lop_trung_va_nhap_tinh_wildcard() {
+    let r = Repo::new("java-collide");
+    r.write("protos/demo.proto", "syntax = \"proto3\";\npackage shop;\noption go_package = \"example.com/gen\";\nservice CartService { rpc Get(A) returns (A); }\nservice AdService { rpc Get(A) returns (A); }\n")
+        .write("web/go.mod", "module example.com/web\n")
+        .write("web/main.go", "package main\nimport pb \"example.com/gen\"\nfunc f(c int) { _ = pb.NewCartServiceClient(c) }\nfunc main() { pb.RegisterCartServiceServer(nil, nil) }\n")
+        .write("ads/src/ads/ServiceImpl.java", "package ads;\nclass ServiceImpl extends shop.AdServiceGrpc.AdServiceImplBase {}\n")
+        .write("ads/src/ads/Server.java", "package ads;\nclass Server { void run(io.grpc.ServerBuilder<?> b) { b.addService(new ServiceImpl()); } }\n")
+        .write("legacy/src/legacy/ServiceImpl.java", "package legacy;\nclass ServiceImpl extends shop.CartServiceGrpc.CartServiceImplBase {}\nclass Box<S extends shop.AdServiceGrpc.AdServiceImplBase> {}\n")
+        .write("cli/src/W.java", "package cli;\nimport static shop.AdServiceGrpc.*;\nclass W { void f(Object ch) { newBlockingStub(ch); } }\n")
+        .write(".arch/system.arch", "component Web at web/**\ncomponent Ads at ads/**\ncomponent Legacy at legacy/**\ncomponent Cli at cli/**\nallow Web -> Web\nallow Cli -> Cli\n");
+    let rep = r.report();
+    assert_eq!(rpc(&rep), ["NoAllow Cli -> Ads cli/src/W.java:3"], "không có Web -> Legacy");
+    assert!(!rep.unresolved.iter().any(|u| u.line == 3), "cận kiểu tham số: {:?}", rep.unresolved);
+}
+
+/// Lỗi 2 (TM-69): `b.addService(` lặp nhiều lần, ngoặc không đóng, không treo.
+#[test]
+fn grpc_java_addservice_doi_khang_khong_treo() {
+    let src = format!("class X {{ void f() {{ {}", "b.addService(".repeat(300_000));
+    let clock = testclock::Clock::start();
+    let rpc = arch_core::scan::grpc::scan(&arch_core::scan::Lang::Java.tokens(&src), arch_core::scan::Lang::Java);
+    assert!(rpc.serves.is_empty());
+    assert!(clock.elapsed() < std::time::Duration::from_secs(5), "{:?}", clock.elapsed());
+}
+
+/// Review sonnet (2026-10-23): đăng ký qua `import impl.*;` hay import lớp lồng
+/// vẫn ghép được; `record R(int x) implements XGrpc.AsyncService` là chỗ cài
+/// đặt; `interface I extends XGrpc.AsyncService` thì không (như tree-sitter).
+#[test]
+fn grpc_java_import_wildcard_lop_long_record() {
+    let r = Repo::new("java-wild");
+    r.write("protos/demo.proto", "syntax = \"proto3\";\npackage shop;\noption go_package = \"example.com/gen\";\nservice CartService { rpc Get(A) returns (A); }\nservice AdService { rpc Get(A) returns (A); }\nservice LogService { rpc Get(A) returns (A); }\nservice OrderService { rpc Get(A) returns (A); }\n")
+        .write("web/go.mod", "module example.com/web\n")
+        .write("web/main.go", "package main\nimport pb \"example.com/gen\"\nfunc f(c int) { _ = pb.NewCartServiceClient(c); _ = pb.NewAdServiceClient(c); _ = pb.NewLogServiceClient(c) }\n")
+        .write("srv/src/impl/CartImpl.java", "package impl;\nclass CartImpl extends shop.CartServiceGrpc.CartServiceImplBase {}\n")
+        .write("srv/src/impl/Impls.java", "package impl;\nclass Impls {\n  static class AdImpl extends shop.AdServiceGrpc.AdServiceImplBase {}\n}\n")
+        .write("srv/src/impl/Log.java", "package impl;\nrecord Log(int x) implements shop.LogServiceGrpc.AsyncService {}\n")
+        .write("srv/src/impl/I.java", "package impl;\ninterface I extends shop.OrderServiceGrpc.AsyncService {}\n")
+        .write(
+            "srv/src/app/Server.java",
+            "package app;\nimport impl.*;\nimport impl.Impls.AdImpl;\nclass Server {\n  void run(io.grpc.ServerBuilder<?> b) { b.addService(new CartImpl()).addService(new AdImpl()).addService(new Log(1)); }\n}\n",
+        )
+        .write(".arch/system.arch", "component Web at web/**\ncomponent Srv at srv/**\nallow Web -> Web\n");
+    let rep = r.report();
+    assert_eq!(rpc(&rep), ["NoAllow Web -> Srv web/main.go:3"; 3]);
+    assert!(rep.unresolved.is_empty(), "{:?}", rep.unresolved);
+    assert_eq!(rpc(&r.partial(&["web/main.go"])), ["NoAllow Web -> Srv web/main.go:3"; 3]);
+    // Hook chỉ sửa chỗ đăng ký: lớp cài đặt (cả `record`) ở file khác.
+    assert_eq!(rpc(&r.partial(&["srv/src/app/Server.java"])), ["NoAllow Web -> Srv web/main.go:3"; 3]);
+}

@@ -208,6 +208,7 @@ server, rồi ghép theo tên đầy đủ `package.Service` đọc từ `.proto
 | Go | `pb.NewXClient(conn)` (`pb` là alias import, tên package trong `go_package`, hay gọi không tiền tố trong package sinh ra hoặc qua dot-import); `conn.Invoke(ctx, "/pkg.X/M", …)` | `pb.RegisterXServer(s, impl)`; `s.RegisterService(&pb.X_ServiceDesc, impl)` |
 | Node (JS, TS) | `new proto.pkg.X(addr, creds)` khi nạp `.proto` lúc chạy qua `@grpc/proto-loader`; `new svc.XClient(addr, creds)` của mã sinh grpc-tools | `server.addService(proto.pkg.X.service, impl)`; `server.addService(svc.XService, impl)` |
 | Rust (tonic) | `x_client::XClient`, kể cả `use pb::x_client::{XClient}` rồi `XClient::connect` | `x_server::XServer`, kể cả `use pb::x_server::{X, XServer}` rồi `XServer::new`; `impl X for S` với `X` lấy từ `x_server` là chỗ cài đặt |
+| Java | `XGrpc.newBlockingStub(ch)` (cả `newStub`, `newFutureStub`, `newBlockingV2Stub`; tên đầy đủ, `import`, `import static`, viết tách dòng) | lớp `extends XGrpc.XImplBase`, `implements XGrpc.AsyncService` hay lớp vô danh `new XGrpc.XImplBase() {…}` là chỗ cài đặt; `.addService(` trong cùng file là chỗ đăng ký cho mọi service cài đặt ở đó, và `addService(new XImpl())` ở file khác đăng ký lớp `XImpl` theo package và tên lớp (package từ tên đầy đủ, `import`, hay `package` của file); `import static …XGrpc.*` khi chỉ có một lớp như vậy |
 | C++ | `pkg::X::NewStub(channel)` | lớp kế thừa `pkg::X::Service` (cả `AsyncService`, `CallbackService`) là chỗ cài đặt; `builder.RegisterService(&impl)` trong cùng file là chỗ đăng ký cho mọi service cài đặt ở đó (tham số là biến, không mang tên service) |
 
 Chỗ nhắc tới cũng tính, không chỉ chỗ gọi: `S = kv_pb2_grpc.KVStub` rồi `S(ch)`
@@ -217,7 +218,9 @@ chỉ tính khi một `.proto` trong repo khai service đó; chuỗi thuộc tí
 là biến gán giữa chừng (`const shop = load(def).shop`). Một chữ trần chỉ tính
 khi có đuôi `Client` (`new Foo()` là lớp thường). tonic viết tên service theo UpperCamel
 (`KV` thành `KvServer`), nên Rust ghép không phân biệt hoa thường, và module
-phải cùng tên với struct (`kv_server::KvServer`). File sinh ra
+phải cùng tên với struct (`kv_server::KvServer`). Java ghép package Java của
+lớp `XGrpc` (tên đầy đủ, `import`, hay `package` của file) với `option
+java_package` của `.proto`, không có thì với `package`. File sinh ra
 (`*_grpc_pb.js`, `*.grpc.pb.h`, `*.grpc.pb.cc`; Rust khai `mod x_server` và
 dùng `tonic::codegen`) không phải chỗ dùng. Namespace C++ đứng trước tên
 service (`shop::v1::KV`) là package viết bằng `::`, thu hẹp như chuỗi thuộc
@@ -841,7 +844,10 @@ trong các ngôn ngữ archctl chưa đọc (Java, C#, Ruby); đối số đầu
   định); Kafka subscribe theo regex
   (báo "không ghép được"); routing key của exchange `topic`, `direct` (mọi
   queue gắn vào exchange đều coi là bên nhận).
-- gRPC của Java, C#: archctl chưa đọc hai ngôn ngữ đó. Node qua
+- gRPC của C#: archctl chưa đọc C#. Java: lớp cài đặt đăng ký qua biến
+  (`var impl = new X(); b.addService(impl)`), qua `bindService()`, hay qua
+  framework (Spring `@GrpcService`) thì báo "cài đặt server mà không thấy chỗ
+  đăng ký". Lớp cài đặt qua interface riêng (`interface I extends XGrpc.AsyncService`, rồi `class C implements I`) không thấy. Node qua
   `makeGenericClientConstructor`, nice-grpc, ts-proto; client Node gán vào biến
   rồi mới `new`.
 - Cổng trong NetworkPolicy, policy của CNI riêng (Cilium, Calico).
