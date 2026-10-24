@@ -275,3 +275,7 @@ Cách phân loại thay đổi trong `archctl diff` lấy ý tưởng từ
 [tt-a1i/archify](https://github.com/tt-a1i/archify) (MIT). Hai dự án bổ sung
 cho nhau: archify biến một spec thành sơ đồ đẹp, archctl đối chiếu spec với mã.
 Không có dòng code nào được sao chép.
+
+## Giấy phép
+
+Apache-2.0, xem [LICENSE](LICENSE).
