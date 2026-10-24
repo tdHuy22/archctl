@@ -8,3 +8,4 @@ target/
 # venv tạo theo docs/ml.md; Python dưới 3.13 không tự sinh .gitignore trong đó
 .venv/
 **/.arch/tf-plan*
+__pycache__/
