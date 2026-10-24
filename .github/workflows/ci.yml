@@ -161,7 +161,7 @@ jobs:
       - name: dựng archctl
         run: cargo build --release --locked
 
-      # Tải ba mươi lăm repo ở đúng commit ghim trong `bench/repos.tsv`, rồi chạy hai
+      # Tải ba mươi sáu repo ở đúng commit ghim trong `bench/repos.tsv`, rồi chạy hai
       # phép thử. Luật do `init --from-code` sinh ra, nâng lên `#accepted`,
       # kiểm lại chính mã đó thì phải ra 0 vi phạm — mỗi vi phạm là một chỗ bộ
       # khám phá và bộ kiểm chứng nhìn khác nhau. Và mọi lệnh phải chạy được
@@ -173,7 +173,7 @@ jobs:
         run: python3 bench/bench.py --archctl target/release/archctl --rounds 1
 
       # Bộ đo bắt được lỗi chỉ khi từng phép kiểm của nó đổ được. Bước này phá
-      # archctl sáu mươi chín kiểu và đòi bộ đo bắt đúng từng kiểu — nếu một lần sửa sau
+      # archctl bảy mươi bốn kiểu và đòi bộ đo bắt đúng từng kiểu — nếu một lần sửa sau
       # này vô tình làm một phép kiểm luôn đạt, nó đỏ ở đây.
       #
       # `--rust-repo` phá thêm phần Rust của bước đối chiếu bên dưới, phần dùng

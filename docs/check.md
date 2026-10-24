@@ -11,7 +11,7 @@ Hiện kiểm **luật phụ thuộc giữa component** cho năm ngôn ngữ.
 | C, C++ | `.c .h .cc .cpp .cxx .hpp .hh .hxx .inl`, CUDA `.cu .cuh` | `#include "x"`, `#include <x>` | **thư mục `-I` đọc từ build**; `"…"` ưu tiên thư mục file gọi; không có build thì khớp tên **duy nhất** trong repo |
 | Rust | `.rs` | `use`, `pub use`, cây `use a::{b::{c, d as e}, self}`, `use {a, b}`, `extern crate` | theo cây module; **gốc crate của từng file** (thư viện, binary, test, đường dẫn khai trong `Cargo.toml`); nhìn xuyên re-export ở gốc; các crate anh em trong workspace |
 | Go | `.go` | `import "x"`, khối `import ( … )` | đọc `module` trong mọi `go.mod` tới độ sâu 4 (trừ `testdata/`, `vendor/`, thư mục ẩn) để tách nội bộ với bên ngoài; module dài nhất thắng |
-| Java | `.java` | **chỉ để dò gRPC**: import Java chưa đọc | không có. Component đã vào diện kiểm mà có file Java nhận cảnh báo `⚠ IMPORT JAVA CHƯA KIỂM`, và `--strict` tính nó: phụ thuộc qua import của các file đó không được kiểm. Chấp nhận được thì khai nhận bằng `unchecked` (xem [Khai nhận phần không kiểm được](#khai-nhận-phần-không-kiểm-được)). Nhóm `api`, tên bảng dữ liệu và tên trong `flow`, `contract` thì vẫn dò trong file Java như mọi ngôn ngữ (dò định danh và chuỗi, không cần import) |
+| Java | `.java` | `import a.b.C;`, `import a.b.*;`, `import static a.b.C.m;`; **lớp dùng không qua import**: tên đầy đủ viết trong mã (`com.acme.Util.f()`, kể cả viết tách dòng) và tên trần của lớp cùng package (package tách đôi giữa hai module) | file `a/b/C.java` **khai đúng `package a.b;`** dưới gốc nguồn bất kỳ (`src/main/java`, `src`, …); `a.b.*` là thư mục của package; có ở nhiều module thì ưu tiên module của file gọi, gốc test của module khác chỉ khi không còn bản nào khác, các bản cùng một component (biến thể `src/debug`, `src/release`) là một đích, vẫn nhiều thì báo chưa phân giải; không có trong repo là gói ngoài, `external` khớp theo tiền tố package (`external Guava at com.google.common`). Tên trần thử lớp cùng package rồi từng `import p.*` (JLS 6.4.1); `\uXXXX` được giải trước như javac. Tham chiếu không qua import thành cạnh khi ra file trong repo, hay khi tên đầy đủ khớp `external`; ra nhiều module thì báo như import. Không thấy: `Class.forName("…")` và reflection |
 
 Mọi ngôn ngữ dùng chung một lexer cấu hình được. Nó biết bỏ qua chú thích,
 chuỗi, char literal, raw string, docstring và regex theo từng ngôn ngữ — đó là
@@ -223,13 +223,30 @@ Chỗ dễ sai là phía gọi, và luật ở đó chặt:
   sẽ báo thiếu ở đó.
 - **Import của module đã ghép được không còn bị báo "chưa phân giải".** Nó
   không ra file Python nào, nhưng nơi định nghĩa nó đã tìm thấy.
+- **Python nạp thư viện dùng chung lúc chạy.** `ctypes.CDLL("libfast.so")`,
+  `ctypes.CDLL(os.path.join(d, "libfast.so"))`, `cdll.LoadLibrary(…)`,
+  `ctypes.cdll.fast`, `np.ctypeslib.load_library("libfast", d)`,
+  `ffi.dlopen(…)` của cffi ghép với thư viện mà build của repo dựng:
+  `add_library(fast SHARED|MODULE …)` của CMake, `-o libfast.so` hay đích
+  `libfast.so:` của Makefile (cả `go build -buildmode=c-shared`), `crate-type =
+  ["cdylib"]` của Cargo. Tên ghép bỏ thư mục, tiền tố `lib` và đuôi (`.so.1`,
+  `.dylib`, `.dll`). Thư viện không do repo dựng (`libc`, `libcuda`) không sinh
+  cạnh. Tên không viết thẳng (`ctypes.CDLL(so_file)`) thì báo chưa đọc được,
+  nhưng chỉ khi repo có dựng thư viện dùng chung; không thì đó là thư viện hệ
+  thống; tên lấy từ chuỗi chỉ khi chuỗi trông như thư viện hay là trọn một đối số
+  (`CDLL(os.environ["X"])` là chưa đọc được). Thư viện repo dựng ở hai
+  component, hay từ file build ngoài mọi component, thì lời nạp tới nó báo chưa
+  phân giải. File build đọc tới độ sâu 3, tối đa 96 file. Bộ đo so phía Python
+  với `ast` (`bench/ffi_truth.py`).
 
 ### Vẫn còn vô hình
 
 - **Liên kết động** — `dlopen` cộng tên hàm dựng lúc chạy
 - **Con trỏ hàm và vtable**
-- **`ctypes` và `cffi` của Python** — tên hàm nằm trong chuỗi, và thư viện
-  được chọn lúc chạy
+- **`ctypes` và `cffi` của Python ở mức hàm** — cạnh tới thư viện thì có
+  (xem trên), nhưng hàm nào của thư viện được gọi thì không; tên thư viện tính
+  lúc chạy chỉ được báo, tên đặt qua `set_target_properties(… OUTPUT_NAME …)`
+  của CMake không đọc
 - **Op PyTorch qua biến trung gian** (`ops = torch.ops._C; ops.x()`), qua
   `getattr`, hay có namespace là macro mà `setup.py` không cho biết giá trị;
   op đăng ký bằng Python (`torch.library`)
@@ -264,32 +281,6 @@ mô tả cả repo trước khi có được giá trị nào.
 
 Ngoại lệ: **`deny` luôn có hiệu lực**, kể cả với component chưa vào diện kiểm.
 Luật cấm không nên phải chờ ai bật.
-
-## Khai nhận phần không kiểm được
-
-archctl không đọc import Java, nên component có file Java nhận cảnh báo
-`⚠ IMPORT JAVA CHƯA KIỂM` và `--strict` chặn. Nếu người duyệt chấp nhận khoảng
-trống đó cho một component, ghi nó vào file luật kèm lý do:
-
-```
-unchecked Adservice imports java because "Adservice chỉ gọi ra ngoài qua gRPC"
-```
-
-Từ đó cảnh báo đổi thành `ℹ IMPORT JAVA CHƯA KIỂM, ĐÃ KHAI NHẬN` kèm lý do, vẫn
-in ra (phần mã đó vẫn không được kiểm), nhưng `--strict` không tính nữa. JSON
-đưa nó vào `importsAccepted` thay vì `importsUnchecked`.
-
-- Chỉ khai được cho ngôn ngữ mà archctl không đọc import: hiện là `java`.
-- Lý do bắt buộc, trong nháy kép. Component phải đã khai và không phải
-  `external`. Mỗi cặp component, ngôn ngữ chỉ khai một lần.
-- Như mọi luật, chỉ có hiệu lực từ `#accepted`. Agent không ghi `system.arch`:
-  nó chạy `archctl propose 'unchecked … because "…"' --reason "…"` rồi chờ người
-  `accept`.
-- `archctl diff` đánh dấu `!` (nới lỏng) khi thêm một khai nhận có hiệu lực hay
-  nâng nó từ `#proposed` lên.
-- Lần kiểm cả repo mà component không còn file Java nào trong diện kiểm thì báo
-  `⚠ KHAI NHẬN LẠC HẬU` (JSON `uncheckedUnused`), và `--strict` tính. Hook chỉ
-  thấy file vừa sửa nên không kết luận điều này.
 
 ## Thứ tự xét
 

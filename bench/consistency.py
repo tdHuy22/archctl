@@ -73,6 +73,12 @@ RPC = {
 # Airflow, của pipeline dvc nằm cùng file hay cùng thư mục, nên không cạnh nào
 # nối hai component và không component nào vào diện kiểm. Chỉ phép đó được
 # miễn; số file, luồng lệnh, cảnh báo luật vẫn xét như mọi repo.
+# Import Java giữa các module: `extensions/*` và `examples` nhập
+# `com.google.inject.*` của `core/src`; bố cục không theo Maven, nên chỉ phép
+# phân giải theo câu `package` thấy cạnh.
+IMPORTS = {
+    "guice": [("Extensions", "Core"), ("Examples", "Core")],
+}
 PIPELINE_ONLY = {
     "airflow": "DAG mẫu gọi hàm định nghĩa ngay trong file",
     "example-get-started": "cả pipeline nằm trong một thư mục `src/`",
@@ -233,6 +239,7 @@ def analyse(archctl: str, name: str, src: Path, work: Path, expected: int,
     crossings(archctl, name, law, root, out)
     crossings(archctl, name, law, root, out, table=RPC, via="rpc", what="cạnh gRPC")
     crossings(archctl, name, law, root, out, table=QUEUE, via="queue", what="cạnh qua hàng đợi")
+    crossings(archctl, name, law, root, out, table=IMPORTS, via="import", what="cạnh import Java")
     deploy(archctl, name, law, root, rep, out)
 
     out["check_ms"] = round(_median_ms(archctl, ["check", *root], rounds))

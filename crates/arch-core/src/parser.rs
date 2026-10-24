@@ -83,10 +83,6 @@ pub fn parse(src: &str) -> (Document, Vec<Diag>) {
                 parse_link(rest, meta, line.no, &mut doc, &mut diags);
                 i += 1;
             }
-            "unchecked" => {
-                parse_unchecked(rest, meta, line.no, &mut doc, &mut diags);
-                i += 1;
-            }
             "invariant" => {
                 parse_invariant(rest, meta, line.no, &mut doc, &mut diags);
                 i += 1;
@@ -112,7 +108,7 @@ pub fn parse(src: &str) -> (Document, Vec<Diag>) {
                     Diag::error(line.no, format!("từ khoá không nhận ra: `{other}`")).with_hint(
                         "từ khoá hợp lệ: component, external, store, allow, deny, \
                          flow, contract, boundary, invariant, view, api, verify, \
-                         service, link, unchecked",
+                         service, link",
                     ),
                 );
                 i += 1;
@@ -665,61 +661,6 @@ fn parse_link(rest: &str, meta: Meta, no: usize, doc: &mut Document, diags: &mut
     doc.links.push(Link {
         from: from.to_string(),
         to,
-        meta,
-    });
-}
-
-/// Ngôn ngữ mà archctl không đọc import, nên có thể khai nhận `unchecked`.
-const UNCHECKED_LANGS: &[&str] = &["java"];
-
-fn parse_unchecked(rest: &str, meta: Meta, no: usize, doc: &mut Document, diags: &mut Vec<Diag>) {
-    const FORM: &str = "dạng đúng: unchecked <Component> imports java because \"<lý do>\"";
-    let Some((head, reason)) = rest.split_once(" because ") else {
-        diags.push(Diag::error(no, "`unchecked` thiếu `because \"<lý do>\"`").with_hint(FORM));
-        return;
-    };
-    let Some((component, lang)) = head.split_once(" imports ") else {
-        diags.push(Diag::error(no, "`unchecked` thiếu `imports <ngôn ngữ>`").with_hint(FORM));
-        return;
-    };
-    let (component, lang) = (component.trim(), lang.trim());
-    if !check_ident(component, "tên component trong unchecked", no, diags) {
-        return;
-    }
-    if !UNCHECKED_LANGS.contains(&lang) {
-        diags.push(
-            Diag::error(no, format!("`unchecked … imports {lang}`: archctl có đọc import của `{lang}`, hoặc không biết ngôn ngữ này"))
-                .with_hint("chỉ khai nhận được ngôn ngữ mà archctl không đọc import: java"),
-        );
-        return;
-    }
-    let reason = reason.trim();
-    let Some(reason) = reason.strip_prefix('"').and_then(|r| r.strip_suffix('"')) else {
-        diags.push(Diag::error(no, "lý do phải nằm trong dấu nháy kép").with_hint(FORM));
-        return;
-    };
-    // `because "" " "` hay `"x" "y"`: nháy chưa thoát ở giữa là hai chuỗi, không phải một lý do.
-    let mut escaped = false;
-    for c in reason.chars() {
-        match c {
-            _ if escaped => escaped = false,
-            '\\' => escaped = true,
-            '"' => {
-                diags.push(Diag::error(no, "lý do có dấu nháy kép chưa thoát").with_hint("viết \\\" bên trong lý do"));
-                return;
-            }
-            _ => {}
-        }
-    }
-    // Người duyệt cần biết vì sao chấp nhận: lý do rỗng là khai nhận không ai đọc được.
-    if reason.trim().is_empty() {
-        diags.push(Diag::error(no, "`unchecked` có lý do rỗng").with_hint(FORM));
-        return;
-    }
-    doc.uncheckeds.push(Unchecked {
-        component: component.to_string(),
-        lang: lang.to_string(),
-        reason: unescape_quotes(reason),
         meta,
     });
 }

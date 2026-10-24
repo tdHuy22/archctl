@@ -4,7 +4,7 @@
 python3 bench/bench.py
 ```
 
-Một lệnh: dựng archctl bản release, tải ba mươi lăm repo ở đúng commit đã ghim
+Một lệnh: dựng archctl bản release, tải ba mươi sáu repo ở đúng commit đã ghim
 trong [repos.tsv](repos.tsv), rồi chạy hai phép thử trên từng repo. Chỉ cần
 Python 3 và git, không gói Python nào ngoài thư viện chuẩn.
 
@@ -202,7 +202,16 @@ bộ trích, nên một lỗi trong bộ trích làm cả hai sai giống nhau m
   `getenv`, vế sau `or`) lấy từ `ast` và `go/ast`; chuỗi ghép ngầm `'a' 'b'`
   tách theo `tokenize`, vì `ast` gộp chúng còn mọi lexer thì không; luật đổi
   chuỗi thành tên máy viết lại theo đặc tả trong `scan/hosts.rs`. Go cần
-  `--require go` như phần import. JS/TS chưa có thước đo.
+  `--require go` như phần import. File Java: chuỗi và khoá (khai báo, phép
+  gán, lời gọi đọc cấu hình, `? :`, phần tử annotation) lấy từ cây của
+  tree-sitter-java trong `java_truth.py` (`literals`), cùng luật đổi chuỗi của
+  `code_hosts.py`, khi `--require java`; bộ mẫu `fixtures/java-grpc/hosts`.
+  JS/TS chưa có thước đo.
+- `ctypes`, `cffi`: `(dòng, lib:tên)` của lời nạp thư viện native trong file
+  Python, và `(dòng, ?)` cho lời nạp không đọc được tên, mà `scan --json` in ở
+  mục `crossings`, được tính lại bằng [ffi_truth.py](ffi_truth.py) theo `ast`
+  và đặc tả `scan/foreign.rs`; bộ mẫu `fixtures/ctypes` (chỉ khi không có
+  `--only`), repo thật vllm và apex (chỉ nạp thư viện hệ thống).
 - Hàng đợi: `(dòng, hệ, vai, loại, tên)` của chỗ gửi, nhận mà `scan --json` in
   (mục `queues`) được tính lại bằng [queue_truth.py](queue_truth.py) từ `ast`
   và `go/ast`, theo đặc tả trong `scan/queue.rs` (lời gọi nào là gửi, nhận;
@@ -235,6 +244,13 @@ bộ trích, nên một lỗi trong bộ trích làm cả hai sai giống nhau m
   file. Bộ mẫu `fixtures/java-grpc` phủ tên viết tách dòng, text block và chú
   thích chứa lời gọi giả, `java_package` khác `package`, kiểu generic
   `Map<…, XGrpc.AsyncService>`, dịch vụ Health; chỉ so khi không có `--only`.
+  Cùng thước đo tính lại import (`import`, `import static`, `.*`) và tham
+  chiếu không qua import (tên đầy đủ trong mã, ghép qua khoảng trắng và chú
+  thích; tên trần cùng package) theo đặc tả `scan/java.rs`, so với mục
+  `imports`, `refs` của `scan --json`; bộ mẫu `fixtures/java-grpc/imports` phủ
+  câu import viết tách dòng, chữ giống import trong chuỗi, text block, chú
+  thích, số có hậu tố (`42L`), `@interface`, `record`. Repo guice là Java nhiều
+  module không theo bố cục Maven.
 
 Python, notebook, binding, hạ tầng, tên máy, hàng đợi, pipeline, gRPC Java, C/C++, Go và Rust đòi khớp cả tên lẫn số dòng: thiếu, thừa hay lệch dòng đều
 là lệch. Thiếu clang, Node hay Go thì phần đó in `BỎ QUA`; `--require
@@ -335,7 +351,7 @@ kiểu `java-*` phá mục `rpc` của file `.java` trên microservices-demo (m�
 dòng), đối chiếu bằng `java_truth.py`. CI chạy
 bước này sau bộ đo, với `--rust-repo ripgrep
 --notebook-repo matplotlib --deploy-repo example-voting-app --k8s-repo
-microservices-demo --proto-repo vllm --tf-repo terraform-docs-samples`: sáu mươi chín kiểu phá.
+microservices-demo --proto-repo vllm --tf-repo terraform-docs-samples`: bảy mươi bốn kiểu phá.
 
 Nó có mặt vì bộ đo này từng nằm ngoài git, và lúc đưa vào, đọc lại thì bốn
 phép kiểm không kiểm gì: một cái chỉ xét file có tồn tại vì vế sau của `or`

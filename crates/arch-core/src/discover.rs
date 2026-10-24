@@ -631,15 +631,23 @@ fn scan_files(root: &Path, files: &[String], wanted: impl Fn(&str) -> bool) -> V
             pipeline: scan.pipeline,
             hosts: if crate::scan::hosts::skipped_path(file) { Vec::new() } else { scan.hosts.hosts },
         };
-        for import in scan.imports {
+        for import in &scan.imports {
             // Cùng các đích như `check` thấy.
-            let base = resolver.resolve(lang, file, &import);
-            let (targets, natives) = resolver.import_targets(lang, file, &import, &base);
+            let base = resolver.resolve(lang, file, import);
+            let (targets, natives) = resolver.import_targets(lang, file, import, &base);
             s.targets.extend(targets);
             if let Resolved::Path(target) = base {
                 s.targets.push(target);
             }
             s.natives.extend(natives);
+        }
+        // Java: lớp dùng không qua `import`, như `check` (TM-71).
+        for r in &scan.refs {
+            if let Some(spec) = resolver.java_ref(file, r)
+                && let Resolved::Path(target) = resolver.resolve(lang, file, &r.import(&spec))
+            {
+                s.targets.push(target);
+            }
         }
         out.push(s);
     }
@@ -770,6 +778,20 @@ fn observe_edges(root: &Path, scans: &[Scanned], owners: &Owners) -> Vec<(String
             {
                 edges.push((from.clone(), to.clone()));
             }
+        }
+    }
+    // Thư viện dùng chung mà build dựng, cho `ctypes`/`cffi`, như `check`.
+    if ffi_calls.iter().any(|(_, k)| k.starts_with("lib:")) {
+        for (key, at) in crate::cbuild::shared_libraries(root) {
+            let Some(owner) = owners.of_file(&at) else { continue };
+            ffi_provides
+                .entry(key)
+                .and_modify(|o| {
+                    if o != owner {
+                        o.clear();
+                    }
+                })
+                .or_insert_with(|| owner.clone());
         }
     }
     for (from, key) in ffi_calls {

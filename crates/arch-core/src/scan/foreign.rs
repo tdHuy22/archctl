@@ -59,11 +59,14 @@ pub struct Foreign {
     /// Tên file này đưa ra cho ngôn ngữ khác gọi: định nghĩa hàm trong C,
     /// `pub extern "C" fn x` của Rust, module mở rộng và op PyTorch.
     pub provides: Vec<Crossing>,
+    /// Python nạp thư viện native lúc chạy (`ctypes.CDLL(path)`) mà tên
+    /// không viết thẳng: `symbol` rỗng, `shown` là hàm nạp.
+    pub unread: Vec<Crossing>,
 }
 
 impl Foreign {
     fn is_empty(&self) -> bool {
-        self.calls.is_empty() && self.provides.is_empty()
+        self.calls.is_empty() && self.provides.is_empty() && self.unread.is_empty()
     }
 }
 
@@ -262,8 +265,117 @@ fn go(toks: &[Token]) -> Foreign {
 ///
 /// Gán `ops = torch.ops._C` rồi gọi `ops.x` thì không nhận ra: bỏ sót, chứ
 /// không đoán.
+/// Khoá ghép của một thư viện dùng chung, từ đường dẫn hay tên nạp:
+/// `build/libfoo.so.1`, `foo.dll`, `libfoo.dylib`, `foo` → `lib:foo`. Phía
+/// build đặt tên theo cùng luật ([`crate::cbuild::shared_libraries`]).
+pub fn library_key(path: &str) -> Option<String> {
+    let base = path.rsplit(['/', '\\']).next()?;
+    let stem = base.split('.').next()?;
+    let stem = match stem.strip_prefix("lib") {
+        Some(rest) if !rest.is_empty() => rest,
+        _ => stem,
+    };
+    let ok = !stem.is_empty() && stem.len() <= 128 && stem.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'+'));
+    ok.then(|| format!("lib:{stem}"))
+}
+
+/// Hàm nạp thư viện native của Python và số đối số tối đa xét. Chỉ khi file
+/// có nhắc `ctypes` (hay `cffi`, `FFI` với `dlopen`): `CDLL` trần cũng có thể
+/// là tên khác.
+const CTYPES_LOADERS: &[&str] = &["CDLL", "PyDLL", "WinDLL", "OleDLL", "LoadLibrary", "load_library"];
+/// `ctypes.cdll.foo`: nạp `foo` qua thuộc tính.
+const CTYPES_ATTRS: &[&str] = &["cdll", "pydll", "windll", "oledll"];
+/// Số token tối đa của phần đối số một lời gọi nạp.
+const MAX_LOAD_ARGS: usize = 128;
+
+/// `ctypes.CDLL("libfoo.so")`, `ctypes.CDLL(os.path.join(d, "libfoo.so"))`,
+/// `cdll.LoadLibrary(…)`, `np.ctypeslib.load_library("libfoo", d)`,
+/// `ctypes.cdll.foo`, `ffi.dlopen("libfoo.so")` của cffi. Tên thư viện là
+/// chuỗi viết trong đối số; không có chuỗi nào (biến, `__file__`) thì không
+/// đọc được tên. `CDLL(None)` nạp chính tiến trình: bỏ qua.
+fn library_loads(toks: &[Token], out: &mut Foreign) {
+    let mentions = |needle: &str| toks.iter().any(|t| matches!(&t.tok, Tok::Word(w) if w.split('.').any(|p| p == needle)));
+    let ctypes = mentions("ctypes") || mentions("ctypeslib");
+    let cffi = mentions("cffi") || mentions("FFI");
+    if !ctypes && !cffi {
+        return;
+    }
+    for (i, t) in toks.iter().enumerate() {
+        let Tok::Word(w) = &t.tok else { continue };
+        let segs: Vec<&str> = w.split('.').collect();
+        let last = segs[segs.len() - 1];
+        // `ctypes.cdll.foo`, `cdll.foo` (không phải `cdll.LoadLibrary`).
+        if ctypes && segs.len() >= 2 && CTYPES_ATTRS.contains(&segs[segs.len() - 2]) && !CTYPES_LOADERS.contains(&last) {
+            if let Some(key) = library_key(last) {
+                out.calls.push(Crossing { symbol: key, shown: w.clone(), line: t.line });
+            }
+            continue;
+        }
+        let loader = (ctypes && CTYPES_LOADERS.contains(&last)) || (cffi && last == "dlopen" && segs.len() >= 2);
+        if !loader || !matches!(toks.get(i + 1).map(|t| &t.tok), Some(Tok::Punct('('))) {
+            continue;
+        }
+        // Đối số tới `)` khớp, có trần. Chuỗi là tên thư viện khi nó trông như
+        // thư viện (`lib…`, `.so`, `.dylib`, `.dll`), hay khi nó là trọn một
+        // đối số (`CDLL("fast")`). `os.environ["X"]`, `join(d, "build", name)`
+        // thì chuỗi không phải tên: chưa đọc được (TM-74).
+        let mut depth = 0usize;
+        let mut strings: Vec<(&str, bool)> = Vec::new();
+        // Đối số đầu là một chuỗi đứng riêng: `load_library("libfoo", d)`.
+        let mut first_arg: Option<&str> = None;
+        let mut first_none = false;
+        let mut closed = false;
+        let args = &toks[i + 1..];
+        for (k, a) in args.iter().enumerate().take(MAX_LOAD_ARGS) {
+            match &a.tok {
+                Tok::Punct('(' | '[' | '{') => depth += 1,
+                Tok::Punct(')' | ']' | '}') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        closed = true;
+                        break;
+                    }
+                }
+                Tok::Str(s) => {
+                    let alone = depth == 1
+                        && matches!(args.get(k - 1).map(|t| &t.tok), Some(Tok::Punct('(' | ',')))
+                        && matches!(args.get(k + 1).map(|t| &t.tok), Some(Tok::Punct(')' | ',')));
+                    if alone && k == 1 {
+                        first_arg = Some(s);
+                    }
+                    strings.push((s, alone));
+                }
+                Tok::Word(n) if k == 1 && n == "None" => first_none = true,
+                _ => {}
+            }
+        }
+        if first_none {
+            continue;
+        }
+        let base_of = |s: &str| s.rsplit(['/', '\\']).next().unwrap_or(s).to_string();
+        let libish = |s: &str| {
+            let base = base_of(s);
+            base.starts_with("lib") || [".so", ".dylib", ".dll", ".pyd"].iter().any(|e| base.contains(e))
+        };
+        // `load_library("libfoo", d)`: tên là đối số đầu, viết thẳng.
+        let name = if !closed {
+            None
+        } else if last == "load_library" {
+            first_arg
+        } else {
+            strings.iter().rev().find(|(s, alone)| libish(s) || *alone).map(|(s, _)| *s)
+        };
+        let base = name.map(base_of);
+        match base.as_deref().filter(|b| !b.contains('\0')).and_then(library_key) {
+            Some(key) => out.calls.push(Crossing { symbol: key, shown: format!("{w} {}", base.as_deref().unwrap_or("")), line: t.line }),
+            None => out.unread.push(Crossing { symbol: String::new(), shown: w.clone(), line: t.line }),
+        }
+    }
+}
+
 fn python(toks: &[Token]) -> Foreign {
     let mut out = Foreign::default();
+    library_loads(toks, &mut out);
     for t in toks {
         let Tok::Word(w) = &t.tok else { continue };
         let Some(rest) = w.strip_prefix("torch.ops.") else { continue };

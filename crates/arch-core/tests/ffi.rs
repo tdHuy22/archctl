@@ -649,3 +649,74 @@ fn schema_co_dau_noi_dong_van_doc_dung_ten_op() {
     .write("app/k.py", "import torch\ntorch.ops.mylib.eight(x)\n");
     assert_eq!(repo.edges(), ["App -> Native qua torch.ops.mylib.eight"]);
 }
+
+/// Python nạp thư viện dùng chung lúc chạy (TM-74): `ctypes.CDLL`, `cdll`,
+/// `np.ctypeslib.load_library`, `ffi.dlopen` của cffi, ghép với thư viện mà
+/// build dựng (CMake `add_library(… SHARED)`, Makefile `-o libx.so`, Cargo
+/// `cdylib`). Thư viện hệ thống (`libc`) không có trong repo: không cạnh.
+#[test]
+fn python_nap_thu_vien_bang_ctypes_va_cffi() {
+    let r = Repo::new("ctypes");
+    r.write("native/CMakeLists.txt", "add_library(fast SHARED src/fast.c)\nadd_library(helper STATIC h.c)\n")
+        .write("native/src/fast.c", "int f(void) { return 1; }\n")
+        .write("native/go/Makefile", "LIB = libgoext.so\nall:\n\tgo build -buildmode=c-shared -o $(LIB) .\n")
+        .write("native/rs/Cargo.toml", "[package]\nname = \"rs-ext\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n")
+        .write(
+            "app/load.py",
+            "import ctypes, os\nimport numpy as np\nfrom cffi import FFI\nffi = FFI()\n\
+             a = ctypes.CDLL(os.path.join(os.path.dirname(__file__), \"libfast.so\"))\n\
+             b = ctypes.cdll.LoadLibrary(\"libgoext.so\")\n\
+             c = np.ctypeslib.load_library(\"librs_ext\", \".\")\n\
+             d = ffi.dlopen(\"libfast.dylib\")\n\
+             e = ctypes.CDLL(\"libc.so.6\")\n\
+             f = ctypes.CDLL(None)\n\
+             g = ctypes.cdll.helper\n",
+        );
+    assert_eq!(
+        r.edges(),
+        [
+            "App -> Native qua ctypes.CDLL libfast.so",
+            "App -> Native qua ctypes.cdll.LoadLibrary libgoext.so",
+            "App -> Native qua ffi.dlopen libfast.dylib",
+            "App -> Native qua np.ctypeslib.load_library librs_ext",
+        ],
+        "`helper` là thư viện tĩnh, `libc` không do repo dựng"
+    );
+}
+
+/// Tên thư viện không viết thẳng: báo chưa đọc được khi repo có dựng thư viện
+/// dùng chung; không có thì là thư viện hệ thống, không báo (TM-74).
+#[test]
+fn ten_thu_vien_khong_doc_duoc() {
+    let r = Repo::new("ctypes-unread");
+    r.write("app/load.py", "import ctypes\nlib = ctypes.CDLL(so_file)\n");
+    let doc = |r: &Repo| arch_core::load(&std::fs::read_to_string(r.0.join(arch_core::ARCH_FILE)).unwrap()).0;
+    assert!(check(&r.0, &doc(&r), &[]).unresolved.is_empty());
+    r.write("native/CMakeLists.txt", "add_library(fast MODULE fast.c)\n");
+    let rep = check(&r.0, &doc(&r), &[]);
+    assert_eq!(rep.unresolved.len(), 1, "{:?}", rep.unresolved);
+    assert_eq!(rep.unresolved[0].reason, arch_core::check::UnresolvedReason::Ffi);
+    assert_eq!((rep.unresolved[0].line, rep.unresolved[0].spec.as_str()), (2, "ctypes.CDLL"));
+}
+
+/// Bản dựng mồi cùng tên ở component khác, hay thư viện dựng từ file build
+/// ngoài mọi component, không được xoá cạnh trong im lặng (TM-74); `SHARED
+/// IMPORTED` là thư viện dựng sẵn, không phải của repo.
+#[test]
+fn thu_vien_trung_ten_hay_khong_chu() {
+    let r = Repo::new("ctypes-decoy");
+    let doc = |r: &Repo| arch_core::load(&std::fs::read_to_string(r.0.join(arch_core::ARCH_FILE)).unwrap()).0;
+    r.write("native/CMakeLists.txt", "add_library(fast SHARED fast.c)\nadd_library(cudart SHARED IMPORTED)\n")
+        .write("native/fast.c", "int f(void) { return 0; }\n")
+        .write("app/load.py", "import ctypes\na = ctypes.CDLL(\"libfast.so\")\nb = ctypes.CDLL(\"libcudart.so\")\n");
+    assert_eq!(r.edges(), ["App -> Native qua ctypes.CDLL libfast.so"]);
+    r.write("o/CMakeLists.txt", "add_library(fast SHARED decoy.c)\n");
+    let rep = check(&r.0, &doc(&r), &[]);
+    assert!(rep.violations.iter().all(|v| v.via != Via::Ffi), "{:?}", rep.violations);
+    assert_eq!(rep.unresolved.len(), 1, "{:?}", rep.unresolved);
+    assert_eq!((rep.unresolved[0].line, rep.unresolved[0].reason), (2, arch_core::check::UnresolvedReason::Ffi));
+    std::fs::remove_file(r.0.join("o/CMakeLists.txt")).unwrap();
+    std::fs::remove_file(r.0.join("native/CMakeLists.txt")).unwrap();
+    r.write("CMakeLists.txt", "add_library(fast SHARED ${SRCS})\n");
+    assert_eq!(check(&r.0, &doc(&r), &[]).unresolved.len(), 1, "thư viện dựng ở gốc, ngoài mọi component");
+}

@@ -127,18 +127,3 @@ fn khong_doi_gi_thi_khong_bao_gi() {
     assert_eq!(d.moved, 0);
     assert!(d.unchanged > 0);
 }
-
-/// Khai nhận `unchecked` làm `--strict` bỏ qua một phần mã, nên thêm nó hay
-/// bật nó từ `#proposed` lên là nới lỏng; gỡ nó thì không.
-#[test]
-fn them_unchecked_la_noi_long() {
-    let line = "unchecked Web imports java because \"chỉ gọi gRPC\"";
-    let base = doc(BASE);
-    let added = doc(&format!("{BASE}{line}\n"));
-    let keys = |a: &Document, b: &Document| -> Vec<String> { diff(a, b).loosenings().map(|c| c.key.clone()).collect() };
-    assert_eq!(keys(&base, &added), ["Web imports java"]);
-    assert!(keys(&added, &base).is_empty(), "gỡ khai nhận là siết lại");
-    let proposed = doc(&format!("{BASE}{line} #proposed\n"));
-    assert!(keys(&base, &proposed).is_empty(), "#proposed chưa có hiệu lực");
-    assert_eq!(keys(&proposed, &added), ["Web imports java"]);
-}

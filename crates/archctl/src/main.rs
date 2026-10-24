@@ -322,8 +322,6 @@ fn cmd_check(args: &[String]) -> ExitCode {
         + report.oversized.len()
         + report.unproven.len()
         + report.deploy_unread.len()
-        + report.imports_unchecked.len()
-        + report.unchecked_unused.len()
         + report.entry_unknown.len()
         + report.links_unseen.len()
         + report.links_blocked.len()
@@ -576,25 +574,6 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
     for u in report.deploy_unread.iter().take(MAX_LISTED) {
         crate::say!("⚠ CHƯA ĐỌC ĐƯỢC  {} — {}\n", u.file, u.why);
     }
-    for (component, lang, n) in report.imports_unchecked.iter().take(MAX_LISTED) {
-        crate::say!("⚠ IMPORT {} CHƯA KIỂM  component {component} ({n} file)", lang.name().to_uppercase());
-        crate::say!("  → archctl chỉ đọc lời gọi gRPC trong mã {}; phụ thuộc qua import của nó không được kiểm", lang.name());
-        crate::say!(
-            "  → chấp nhận được thì đề xuất: archctl propose 'unchecked {component} imports {} because \"<lý do>\"' --reason \"<vì sao>\"\n",
-            lang.name().to_lowercase()
-        );
-    }
-    // Đã khai nhận: vẫn nói ra, vì phần mã đó vẫn không được kiểm.
-    for (component, lang, n, reason) in report.imports_accepted.iter().take(MAX_LISTED) {
-        crate::say!("ℹ IMPORT {} CHƯA KIỂM, ĐÃ KHAI NHẬN  component {component} ({n} file) — {reason}\n", lang.name().to_uppercase());
-    }
-    for (component, lang, line) in report.unchecked_unused.iter().take(MAX_LISTED) {
-        crate::say!("⚠ KHAI NHẬN LẠC HẬU  unchecked {component} imports {lang}");
-        crate::say!(
-            "  {}:{line}  — {component} không còn file {lang} nào trong diện kiểm; bỏ dòng này\n",
-            arch_core::ARCH_FILE
-        );
-    }
     for (service, why) in report.entry_unknown.iter().take(MAX_LISTED) {
         crate::say!("⚠ KHÔNG RÕ ĐIỂM VÀO  service {service} — {why}");
         crate::say!("  → `runs` của nó chỉ được kiểm theo cạnh import\n");
@@ -621,9 +600,6 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
         ("mẫu chồng nhau", MAX_LISTED, report.ambiguous.len()),
         ("cách kiểm chưa chứng minh", MAX_LISTED, report.unproven.len()),
         ("file triển khai chưa đọc được", MAX_LISTED, report.deploy_unread.len()),
-        ("component có import chưa kiểm", MAX_LISTED, report.imports_unchecked.len()),
-        ("component có import đã khai nhận", MAX_LISTED, report.imports_accepted.len()),
-        ("khai nhận lạc hậu", MAX_LISTED, report.unchecked_unused.len()),
         ("service không rõ điểm vào", MAX_LISTED, report.entry_unknown.len()),
         ("link không thấy trong cấu hình", MAX_LISTED, report.links_unseen.len()),
         ("link bị NetworkPolicy chặn", MAX_LISTED, report.links_blocked.len()),
@@ -686,8 +662,6 @@ fn print_human(hash: &str, report: &Report, memory: &Memory, law_warnings: usize
         + report.unresolved.len()
         + report.ambiguous.len()
         + report.deploy_unread.len()
-        + report.imports_unchecked.len()
-        + report.unchecked_unused.len()
         + report.entry_unknown.len()
         + report.links_unseen.len()
         + report.links_blocked.len()
@@ -834,35 +808,6 @@ fn print_json(hash: &str, report: &Report, law: &[Diag]) {
         .iter()
         .map(|u| format!(r#"{{"file":{},"why":{}}}"#, json::string(&u.file), json::string(&u.why)))
         .collect();
-    let imports_unchecked: Vec<String> = report
-        .imports_unchecked
-        .iter()
-        .map(|(c, l, n)| format!(r#"{{"component":{},"lang":{},"files":{n}}}"#, json::string(c), json::string(l.name())))
-        .collect();
-    let imports_accepted: Vec<String> = report
-        .imports_accepted
-        .iter()
-        .map(|(c, l, n, why)| {
-            format!(
-                r#"{{"component":{},"lang":{},"files":{n},"reason":{}}}"#,
-                json::string(c),
-                json::string(l.name()),
-                json::string(why)
-            )
-        })
-        .collect();
-    let unchecked_unused: Vec<String> = report
-        .unchecked_unused
-        .iter()
-        .map(|(c, l, line)| {
-            // Cùng cách viết với `importsUnchecked`, `importsAccepted` (`Lang::name`).
-            let mut lang = l.clone();
-            if let Some(first) = lang.get_mut(..1) {
-                first.make_ascii_uppercase();
-            }
-            format!(r#"{{"component":{},"lang":{},"line":{line}}}"#, json::string(c), json::string(&lang))
-        })
-        .collect();
     let entry_unknown: Vec<String> = report
         .entry_unknown
         .iter()
@@ -891,7 +836,7 @@ fn print_json(hash: &str, report: &Report, law: &[Diag]) {
         .collect();
 
     crate::say!(
-        r#"{{"archHash":{},"filesScanned":{},"filesUnmapped":{},"checked":{},"unchecked":{},"violations":[{}],"unresolved":[{}],"missing":[{}],"vacuous":[{}],"unproven":[{}],"oversized":[{}],"ambiguous":[{}],"deployUnread":[{}],"importsUnchecked":[{}],"importsAccepted":[{}],"uncheckedUnused":[{}],"entryUnknown":[{}],"servicesUndeclared":[{}],"linksUnseen":[{}],"linksBlocked":[{}],"lawWarnings":[{}]}}"#,
+        r#"{{"archHash":{},"filesScanned":{},"filesUnmapped":{},"checked":{},"unchecked":{},"violations":[{}],"unresolved":[{}],"missing":[{}],"vacuous":[{}],"unproven":[{}],"oversized":[{}],"ambiguous":[{}],"deployUnread":[{}],"entryUnknown":[{}],"servicesUndeclared":[{}],"linksUnseen":[{}],"linksBlocked":[{}],"lawWarnings":[{}]}}"#,
         json::string(hash),
         report.files_scanned,
         report.files_unmapped,
@@ -905,9 +850,6 @@ fn print_json(hash: &str, report: &Report, law: &[Diag]) {
         oversized.join(","),
         ambiguous.join(","),
         deploy_unread.join(","),
-        imports_unchecked.join(","),
-        imports_accepted.join(","),
-        unchecked_unused.join(","),
         entry_unknown.join(","),
         undeclared.join(","),
         unseen.join(","),
@@ -1196,6 +1138,31 @@ fn cmd_scan(args: &[String]) -> ExitCode {
                 }
             }
         }
+        // Java: lớp dùng không qua `import`. `check` chỉ lấy cái ra file trong
+        // repo; ở đây in cả ứng viên (JSON) để bộ đo so với tree-sitter.
+        let mut refs: Vec<String> = Vec::new();
+        for r in &scanned.refs {
+            let spec = resolver.java_ref(file, r);
+            let target = spec.as_deref().map(|s| resolver.resolve(lang, file, &r.import(s)));
+            let target = match &target {
+                Some(Resolved::Path(p)) => Some(p.clone()),
+                Some(Resolved::Package(p)) => Some(format!("gói ngoài {p}")),
+                _ => None,
+            };
+            if as_json {
+                refs.push(format!(
+                    r#"{{"line":{},"specs":{},"qualified":{},"target":{}}}"#,
+                    r.line,
+                    json::strings(r.specs.iter().map(String::as_str)),
+                    r.qualified,
+                    target.as_deref().map_or_else(|| "null".to_string(), json::string),
+                ));
+            } else if let (Some(spec), Some(p)) = (&spec, &target)
+                && !p.starts_with("gói ngoài")
+            {
+                say!("  {:>5}  {spec}  → {p} (không qua import)", r.line);
+            }
+        }
         // Cạnh liên ngôn ngữ, khoá thô như bộ quét thấy: `TORCH_EXTENSION_NAME`
         // còn là `@ext`, chưa thay bằng tên trong `setup.py`.
         let foreign = &scanned.foreign;
@@ -1207,6 +1174,9 @@ fn cmd_scan(args: &[String]) -> ExitCode {
             }
             for c in &foreign.provides {
                 say!("  {:>5}  cung cấp {} cho ngôn ngữ khác", c.line, c.symbol);
+            }
+            for c in &foreign.unread {
+                say!("  {:>5}  {}  → nạp thư viện native, không đọc được tên", c.line, c.shown);
             }
             for c in &rpc_calls {
                 say!("  {:>5}  {}  → gọi gRPC service {}{}", c.line, c.shown, c.service, origin_text(&c.origin));
@@ -1368,12 +1338,14 @@ fn cmd_scan(args: &[String]) -> ExitCode {
                     .join(",")
             );
             json_files.push(format!(
-                r#"{{"file":{},"lang":{},"imports":[{}],"crossings":{{"calls":[{}],"provides":[{}]}},"rpc":{{"calls":[{}],"serves":[{}],"implements":[{}]}},"queues":{{"cut":{},"sites":[{}]}},"pipeline":{},"hosts":{{"skipped":{},"cut":{},"found":[{}]}}}}"#,
+                r#"{{"file":{},"lang":{},"imports":[{}],"refs":[{}],"crossings":{{"calls":[{}],"provides":[{}],"unread":[{}]}},"rpc":{{"calls":[{}],"serves":[{}],"implements":[{}]}},"queues":{{"cut":{},"sites":[{}]}},"pipeline":{},"hosts":{{"skipped":{},"cut":{},"found":[{}]}}}}"#,
                 json::string(file),
                 json::string(lang.name()),
                 items.join(","),
+                refs.join(","),
                 crossings(&foreign.calls),
                 crossings(&foreign.provides),
+                crossings(&foreign.unread),
                 sites(&rpc_calls),
                 sites(&rpc_serves),
                 sites(&rpc_impls),

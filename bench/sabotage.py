@@ -63,9 +63,14 @@ file Python (mất, lệch dòng, thêm giả), đối chiếu bằng `queue_tru
 Ba kiểu `pipeline-*` phá mục `pipeline` của `scan --json` (cạnh LangGraph,
 Airflow) trên `--pipeline-repo` (mặc định langgraph) và hai kiểu `dvc-*` phá mục
 `dvc` trên `--dvc-repo` (mặc định example-get-started), đối chiếu bằng
-`pipeline_truth.py` (`ast`, PyYAML). Hai kiểu `java-*` phá mục `rpc` của file
-`.java` trên `--java-repo` (mặc định microservices-demo), đối chiếu bằng
-`java_truth.py` (tree-sitter-java, cài vào venv nên cần mạng).
+`pipeline_truth.py` (`ast`, PyYAML). Bốn kiểu `java-*` phá mục `rpc`, `imports`,
+`refs` của file `.java` trên `--java-repo` (mặc định microservices-demo), đối
+chiếu bằng `java_truth.py` (tree-sitter-java, cài vào venv nên cần mạng). Kiểu
+`import` chạy trên `--import-repo` (mặc định guice): xoá cạnh import Java bắt
+buộc (`consistency.IMPORTS`) khỏi cả luật `init` sinh ra lẫn vi phạm `check` báo;
+kiểu `java-host-drop` phá tên máy trong chuỗi `.java` cũng trên repo đó. Kiểu
+`ctypes-drop` bỏ một lời nạp thư viện của `ctypes` trên `--ctypes-repo` (mặc
+định vllm), đối chiếu bằng `ffi_truth.py` (`ast`).
 `--rust-repo ripgrep` phá thêm ba kiểu như vậy ở file Rust, đối chiếu bằng
 `oracle.py --require syn` — tức là tải crate, nên chỉ CI bật. Phần Rust miễn
 trừ import nằm trong thân macro; kiểu `rust-extra` đặt import giả ở ngoài macro
@@ -99,6 +104,8 @@ MODES = {
 CROSSING_MODES = {"crossing": "thiếu cạnh liên ngôn ngữ"}
 # kiểu phá chạy trên `--rpc-repo`: cạnh gRPC bắt buộc mất ở cả hai phía
 RPC_MODES = {"rpc": "thiếu cạnh gRPC"}
+# kiểu phá chạy trên `--import-repo`: cạnh import Java bắt buộc mất ở cả hai phía
+IMPORT_MODES = {"import": "thiếu cạnh import Java"}
 # kiểu phá chạy trên `--queue-repo`: cạnh qua hàng đợi bắt buộc mất ở cả hai phía
 QUEUE_MODES = {"queue": "thiếu cạnh qua hàng đợi"}
 # phá mục `queues` của `scan --json` ở file Python đầu tiên có chỗ gửi, nhận
@@ -118,7 +125,14 @@ PIPELINE_ORACLE_MODES = {
 JAVA_ORACLE_MODES = {
     "java-drop": "thiếu:",
     "java-line": "lệch dòng:",
+    # import và tham chiếu không qua import của file `.java` đầu tiên có chúng
+    "java-import-drop": "thiếu:",
+    "java-ref-extra": "thừa:",
 }
+# tên máy trong chuỗi `.java`: chạy trên `--import-repo` (guice có, microservices-demo thì không)
+JAVA_HOST_MODES = {"java-host-drop": "thiếu:"}
+# lời nạp thư viện native (`ctypes`, `cffi`) của file Python: chạy trên `--ctypes-repo`
+CTYPES_MODES = {"ctypes-drop": "thiếu:"}
 # phá mục `dvc` của `scan --json` ở `dvc.yaml` đầu tiên có cạnh
 DVC_ORACLE_MODES = {
     "dvc-drop": "thiếu:",
@@ -431,9 +445,23 @@ def sabotage_pipeline(rep: dict, mode: str):
 
 
 def sabotage_java(rep: dict, mode: str):
-    """Làm hỏng chỗ gRPC đầu tiên của file `.java` đầu tiên có nó."""
+    """Làm hỏng chỗ gRPC đầu tiên của file `.java` đầu tiên có nó, hay import,
+    tham chiếu đầu tiên."""
     for f in rep["files"]:
         if not f["file"].endswith(".java"):
+            continue
+        if mode == "java-import-drop":
+            if f.get("imports"):
+                f["imports"].pop(0)
+                return
+            continue
+        if mode == "java-ref-extra":
+            f.setdefault("refs", []).append({"line": 1, "specs": ["com.khong.co.That"], "qualified": True, "target": None})
+            return
+        if mode == "java-host-drop":
+            if f.get("hosts", {}).get("found"):
+                f["hosts"]["found"].pop(0)
+                return
             continue
         for field in ("calls", "implements", "serves"):
             sites = f.get("rpc", {}).get(field, [])
@@ -442,6 +470,16 @@ def sabotage_java(rep: dict, mode: str):
                     sites.pop(0)
                 else:
                     sites[0]["line"] += 1
+                return
+
+
+def sabotage_ctypes(rep: dict):
+    """Bỏ lời nạp thư viện (khoá `lib:`) đầu tiên của file Python đầu tiên có nó."""
+    for f in rep["files"]:
+        calls = f.get("crossings", {}).get("calls", [])
+        for k, c in enumerate(calls):
+            if c["key"].startswith("lib:"):
+                calls.pop(k)
                 return
 
 
@@ -485,6 +523,8 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
         drop_crossings_from_law(args, "RPC")
     if mode == "queue" and args[:1] == ["init"] and p.returncode == 0:
         drop_crossings_from_law(args, "QUEUE")
+    if mode == "import" and args[:1] == ["init"] and p.returncode == 0:
+        drop_crossings_from_law(args, "IMPORTS")
     if mode == "deploy-gen" and args[:1] == ["init"] and p.returncode == 0:
         root = Path(args[args.index("--root") + 1]) if "--root" in args else Path.cwd()
         law = root / ".arch/system.arch"
@@ -493,11 +533,12 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
                                    if not l.startswith("link ")))
     if args[:1] == ["check"] and "--json" in args and p.stdout.startswith("{"):
         rep = json.loads(out)
-        if mode in ("crossing", "rpc", "queue"):
+        if mode in ("crossing", "rpc", "queue", "import"):
             via, edges = {
                 "crossing": ("ffi", crossing_edges()),
                 "rpc": ("rpc", crossing_edges("RPC")),
                 "queue": ("queue", crossing_edges("QUEUE")),
+                "import": ("import", crossing_edges("IMPORTS")),
             }[mode]
             rep["violations"] = [
                 v for v in rep["violations"]
@@ -562,7 +603,11 @@ def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
         rep = json.loads(out)
         sabotage_pipeline(rep, mode)
         out = json.dumps(rep)
-    elif mode in JAVA_ORACLE_MODES and args[:1] == ["scan"] and "--json" in args:
+    elif mode in CTYPES_MODES and args[:1] == ["scan"] and "--json" in args:
+        rep = json.loads(out)
+        sabotage_ctypes(rep)
+        out = json.dumps(rep, ensure_ascii=False)
+    elif (mode in JAVA_ORACLE_MODES or mode in JAVA_HOST_MODES) and args[:1] == ["scan"] and "--json" in args:
         rep = json.loads(out)
         sabotage_java(rep, mode)
         out = json.dumps(rep)
@@ -603,6 +648,10 @@ def main():
                     help="repo có cạnh liên ngôn ngữ bắt buộc, cho kiểu phá `crossing`")
     ap.add_argument("--rpc-repo", default="etcd",
                     help="repo có cạnh gRPC bắt buộc, cho kiểu phá `rpc`")
+    ap.add_argument("--ctypes-repo", default="vllm",
+                    help="repo có Python nạp thư viện bằng `ctypes`, cho kiểu phá `ctypes-drop`")
+    ap.add_argument("--import-repo", default="guice",
+                    help="repo có cạnh import Java bắt buộc, cho kiểu phá `import`")
     ap.add_argument("--queue-repo", default="rabbitmq-tutorials",
                     help="repo có cạnh qua hàng đợi bắt buộc, cho kiểu phá `queue` và `queue-*`")
     ap.add_argument("--pipeline-repo", default="langgraph",
@@ -639,6 +688,8 @@ def main():
                  for m, e in [("", None), *CROSSING_MODES.items()]]
         runs += [("bench.py", args.rpc_repo, m, e)
                  for m, e in [("", None), *RPC_MODES.items()]]
+        runs += [("bench.py", args.import_repo, m, e)
+                 for m, e in [("", None), *IMPORT_MODES.items()]]
         runs += [("bench.py", args.queue_repo, m, e)
                  for m, e in [("", None), *QUEUE_MODES.items()]]
         runs += [("oracle.py", args.queue_repo, m, e)
@@ -648,6 +699,8 @@ def main():
         runs += [("oracle.py", args.dvc_repo, m, e)
                  for m, e in [("", None), *DVC_ORACLE_MODES.items()]]
         runs += [("oracle.py", args.java_repo, m, e) for m, e in JAVA_ORACLE_MODES.items()]
+        runs += [("oracle.py", args.import_repo, m, e) for m, e in JAVA_HOST_MODES.items()]
+        runs += [("oracle.py", args.ctypes_repo, m, e) for m, e in CTYPES_MODES.items()]
         runs += [("bench.py", args.deploy_bench_repo, m, e)
                  for m, e in [("", None), *DEPLOY_MODES.items()]]
         runs += [("bench.py", args.k8s_bench_repo, m, e)
@@ -688,7 +741,7 @@ def main():
                 need = ["deploy"]
             if mode in DVC_ORACLE_MODES or (script == "oracle.py" and repo == args.dvc_repo and not mode):
                 need = [*need, "deploy"]
-            if mode in JAVA_ORACLE_MODES:
+            if mode in JAVA_ORACLE_MODES or mode in JAVA_HOST_MODES:
                 need = [*need, "java"]
             # Repo manifest Kubernetes có chart Helm: đối chiếu với `helm template`.
             if script == "oracle.py" and repo == args.k8s_repo and (mode in K8S_ORACLE_MODES or not mode):

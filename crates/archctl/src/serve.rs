@@ -502,18 +502,6 @@ fn model_json(root: &Path) -> String {
         .deploy_unread
         .iter()
         .map(|u| card(format!("chưa đọc được {}", u.file), u.why.clone()))
-        .chain(report.imports_unchecked.iter().map(|(c, l, n)| {
-            card(
-                format!("import {} chưa kiểm ở {c}", l.name()),
-                format!("{n} file: archctl chỉ đọc lời gọi gRPC, phụ thuộc qua import không được kiểm"),
-            )
-        }))
-        .chain(report.imports_accepted.iter().map(|(c, l, n, why)| {
-            card(format!("import {} chưa kiểm ở {c}, đã khai nhận", l.name()), format!("{n} file — {why}"))
-        }))
-        .chain(report.unchecked_unused.iter().map(|(c, l, line)| {
-            card(format!("khai nhận lạc hậu: unchecked {c} imports {l}"), format!("system.arch:{line} — {c} không còn file {l} nào trong diện kiểm"))
-        }))
         .chain(report.entry_unknown.iter().map(|(s, why)| {
             card(format!("không rõ điểm vào của service {s}"), format!("{why} — `runs` chỉ được kiểm theo cạnh import"))
         }))

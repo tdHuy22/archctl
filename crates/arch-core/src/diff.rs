@@ -146,12 +146,7 @@ pub fn diff(base: &Document, head: &Document) -> Delta {
                 key: old.key.clone(),
                 before: Some(meta_text(old)),
                 after: Some(meta_text(new)),
-                // `unchecked` ngược chiều: bật khai nhận lên là nới lỏng.
-                loosening: if old.kind == "unchecked" {
-                    !old.status.is_enforced() && new.status.is_enforced()
-                } else {
-                    is_loosening(old.status, new.status)
-                },
+                loosening: is_loosening(old.status, new.status),
             });
         }
         if !body_changed && !meta_changed {
@@ -174,8 +169,7 @@ pub fn diff(base: &Document, head: &Document) -> Delta {
             key: new.key.clone(),
             before: None,
             after: Some(new.body.clone()),
-            // Khai nhận một phần mã không được kiểm là nới lỏng `--strict`.
-            loosening: new.kind == "unchecked" && new.status.is_enforced(),
+            loosening: false,
         });
     }
 

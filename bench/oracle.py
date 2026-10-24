@@ -81,6 +81,7 @@ sys.path.insert(0, str(HERE))
 
 import bench  # noqa: E402
 import code_hosts  # noqa: E402
+import ffi_truth  # noqa: E402
 import java_truth  # noqa: E402
 import pipeline_truth  # noqa: E402
 import queue_truth  # noqa: E402
@@ -1423,8 +1424,9 @@ def compare_pipelines(tally, python, root, by_lang, by_file):
 
 
 def compare_java(tally, python, root, by_lang, by_file):
-    """Chỗ gọi, cài đặt, đăng ký gRPC trong file `.java` theo tree-sitter-java
-    (`java_truth.py`), chỉ service có trong `.proto` của repo như `scan` lọc."""
+    """Import, tham chiếu không qua import, và chỗ gọi, cài đặt, đăng ký gRPC
+    trong file `.java` theo tree-sitter-java (`java_truth.py`); gRPC chỉ service
+    có trong `.proto` của repo như `scan` lọc."""
     files = sorted(f for f in by_lang["Java"])
     if not files or not python:
         return
@@ -1439,7 +1441,13 @@ def compare_java(tally, python, root, by_lang, by_file):
         if res.startswith("ERR"):
             tally.note(f"{file}: tree-sitter {res[:80]}")
             continue
-        want = collections.Counter((l, k) for l, k in json.loads(res) if k.split()[1] in services)
+        res = json.loads(res)
+        want = collections.Counter((l, k) for l, k in res["facts"]
+                                   if k.split()[0] in ("import", "ref") or k.split()[1] in services)
+        # Tên máy trong chuỗi: khoá theo cây, luật đổi chuỗi thành máy của `code_hosts`.
+        lits = [(l, v, (k[4:] if code_hosts.kind(k[4:]) == "HOST" else None) if k and k.startswith("?fn:") else k, x)
+                for l, v, k, x in res["literals"]]
+        want += collections.Counter({(l, f"host {h}"): n for (l, h), n in code_hosts.tally(lits).items()})
         have = java_truth.have(by_file[file], services)
         if want or have:
             check_lines(tally, file, want, have)
@@ -1889,6 +1897,18 @@ def main():
         if hosts.files:
             tallies.append(hosts)
 
+        # Python nạp thư viện native (`ctypes`, `cffi`) theo `ast`.
+        loads = Tally("ctypes")
+        for file in by_lang["Python"]:
+            if file.endswith(PY_EXTS):
+                want = ffi_truth.truth(root / file)
+                if want is None:
+                    loads.unparsed += 1
+                elif want or ffi_truth.have(by_file[file]):
+                    check_lines(loads, file, want, ffi_truth.have(by_file[file]))
+        if loads.files:
+            tallies.append(loads)
+
         # Chỗ gửi, nhận qua hàng đợi: Python theo `ast`, Go theo `go/ast`.
         queues = Tally("Hàng đợi")
         for file in by_lang["Python"]:
@@ -1916,7 +1936,7 @@ def main():
             tallies.append(pipes)
 
         # gRPC Java: chỗ gọi stub, lớp cài đặt, chỗ đăng ký theo tree-sitter-java.
-        jt = Tally("gRPC Java")
+        jt = Tally("Java")
         compare_java(jt, java_python, root, by_lang, by_file)
         if jt.files:
             tallies.append(jt)
@@ -2189,6 +2209,20 @@ def main():
             print(f"      {e}")
         bad += qt.bad
 
+    # Mẫu Python nạp thư viện native trong `bench/fixtures/ctypes`: repo thật của
+    # bộ đo chỉ nạp thư viện hệ thống.
+    if not args.only:
+        fx = HERE / "fixtures" / "ctypes"
+        files = archctl_scan(archctl, fx)
+        by_file = {f["file"]: f for f in files}
+        ct = Tally("ctypes")
+        for file in sorted(f for f in by_file if f.endswith(".py")):
+            check_lines(ct, file, ffi_truth.truth(fx / file), ffi_truth.have(by_file[file]))
+        print(ct.line(fx.name))
+        for e in ct.examples:
+            print(f"      {e}")
+        bad += ct.bad
+
     # Mẫu đồ thị pipeline trong `bench/fixtures/pipelines`: repo thật của bộ đo
     # không có LangGraph, Airflow, dvc.
     if not args.only:
@@ -2205,8 +2239,9 @@ def main():
             print(f"      {e}")
         bad += pt.bad
 
-    # Mẫu gRPC Java trong `bench/fixtures/java-grpc`: tên viết tách dòng, nhập
-    # tĩnh, text block và chú thích chứa lời gọi giả, `java_package` khác `package`.
+    # Mẫu Java trong `bench/fixtures/java-grpc`: gRPC (tên viết tách dòng, nhập
+    # tĩnh, text block và chú thích chứa lời gọi giả, `java_package` khác
+    # `package`) và import, tham chiếu không qua import (`imports/`).
     if not args.only and java_python:
         fx = HERE / "fixtures" / "java-grpc"
         files = archctl_scan(archctl, fx)
@@ -2214,7 +2249,7 @@ def main():
         fx_lang = collections.defaultdict(list)
         for f in files:
             fx_lang[f["lang"]].append(f["file"])
-        jt = Tally("gRPC Java")
+        jt = Tally("Java")
         compare_java(jt, java_python, fx, fx_lang, by_file)
         print(jt.line(fx.name))
         for e in jt.examples:

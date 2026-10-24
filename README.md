@@ -33,7 +33,7 @@ kiến trúc c8bd3bd9 · 15 file quét (5 Rust, 4 C/C++, 4 Python, 2 Go) · 7/8 
   → gọi Capture thay vì chạm thẳng vào dữ liệu của nó
 ```
 
-**Năm ngôn ngữ**: TypeScript/JavaScript, Python, C/C++, Rust, Go.
+**Sáu ngôn ngữ**: TypeScript/JavaScript, Python, C/C++, Rust, Go, Java.
 
 | Luật | Kiểm bằng |
 | --- | --- |
@@ -85,6 +85,45 @@ trúc, không phải bằng cơ chế phát hiện.
 Mọi quyết định vào `decisions.md` kèm lý do bắt buộc. Agent không có trí nhớ
 giữa các phiên, nên file đó chặn nó đề xuất lại thứ đã bị từ chối — và nó cũng
 chính là ADR tự sinh ra trong lúc làm việc.
+
+## Cài đặt
+
+Một binary, không cần gì khác. Tải bản cho máy mình ở trang Releases
+(`archctl-vX.Y.Z-<target>.tar.gz`), kiểm SHA-256, giải nén rồi chép vào một
+thư mục trong `PATH`. Trên macOS:
+
+```bash
+shasum -a 256 -c archctl-v0.1.0-aarch64-apple-darwin.tar.gz.sha256
+```
+
+Trên Linux:
+
+```bash
+sha256sum -c archctl-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+```
+
+Rồi:
+
+```bash
+tar -xzf archctl-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+```
+
+```bash
+install archctl-v0.1.0-x86_64-unknown-linux-gnu/archctl ~/.local/bin/
+```
+
+Target có sẵn: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` (dựng
+trên Ubuntu 24.04, nên cần glibc mới như của máy đó), `aarch64-apple-darwin`,
+`x86_64-apple-darwin`. Windows chưa có bản dựng sẵn. Dựng từ mã cần Rust 1.88
+trở lên, không tải crate nào:
+
+```bash
+cargo install --locked --path crates/archctl
+```
+
+Bản phát hành do `.github/workflows/release.yml` dựng khi đẩy tag `vX.Y.Z`
+trùng `version` trong `Cargo.toml`; nó chỉ tạo bản nháp, kiểm đủ 8 file, người
+duyệt xem rồi mới phát hành.
 
 ## Áp lên dự án đã có mã
 
@@ -165,9 +204,10 @@ https://claude.ai/code/artifact/2b26df5d-d6b0-40d0-a398-7e574c7d1387
 
 - **Một phần cạnh liên ngôn ngữ vẫn vô hình.** `extern "C"` của Rust và `C.x`
   của Go ghép được với định nghĩa hàm C. Python ghép được với module mở rộng
-  (PyO3, pybind11, nanobind) và op PyTorch có namespace viết thẳng. Nhưng
-  `dlopen`, con trỏ hàm, `ctypes` của Python, op có namespace là macro và IPC
-  thì không. Với C/C++ thì `#include` là điều kiện cần nhưng rất xa điều kiện
+  (PyO3, pybind11, nanobind), op PyTorch có namespace viết thẳng, và thư viện
+  dùng chung mà repo dựng khi nạp bằng `ctypes`/`cffi` với tên viết thẳng.
+  Nhưng `dlopen` của C, con trỏ hàm, op có namespace là macro và IPC thì
+  không. Với C/C++ thì `#include` là điều kiện cần nhưng rất xa điều kiện
   đủ, và đó là lý do có `api`.
 - **Tầng hạ tầng mới đọc docker-compose, Dockerfile, manifest Kubernetes, và
   gRPC của Python, Go, Node, Rust, hàng đợi (Kafka, RabbitMQ, Redis pub/sub,
@@ -178,7 +218,7 @@ https://claude.ai/code/artifact/2b26df5d-d6b0-40d0-a398-7e574c7d1387
   Chart Helm được tự dựng từ `values.yaml`, overlay Kustomize được tự dựng
   như `kustomize build` (tập con; ngoài tập con thì báo chưa đọc); Terraform
   được đọc tĩnh (ECS, Lambda, Cloud Run; module registry, `for_each` không
-  hằng thì báo chưa đọc). gRPC của Java đọc được (chỉ phần gRPC; import Java chưa kiểm và được báo, người duyệt khai nhận được bằng `unchecked`), C# thì chưa; cạnh mạng chỉ có lúc chạy (tên máy ghép trong mã,
+  hằng thì báo chưa đọc). gRPC của Java đọc được, C# thì không; cạnh mạng chỉ có lúc chạy (tên máy ghép trong mã,
   service discovery) thì không thấy — xem [docs/infra.md](docs/infra.md).
 - **Đồ thị pipeline chỉ đọc phần khai tĩnh** của LangGraph, Airflow, dvc: tên
   bước từ biến, đồ thị dựng trong vòng lặp, nhánh rẽ bằng `Command`/`Send` thì

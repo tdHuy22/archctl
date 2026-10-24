@@ -494,54 +494,6 @@ fn cpp_client_server() {
     assert!(v.contains(&"NoAllow Client -> Native app/client/c.py:4".to_string()), "{v:?}");
 }
 
-/// Bộ quét Java chỉ dò gRPC: component đã vào diện kiểm có file Java được báo
-/// "import Java chưa kiểm" (`--strict` tính); component chưa có `allow` thì
-/// không, như mọi phần chưa khai báo (TM-68).
-#[test]
-fn java_import_chua_kiem_duoc_bao() {
-    let r = Repo::new("java-unchecked");
-    r.write("ads/src/main/java/hipstershop/AdService.java", "package hipstershop;\nimport hipstershop.Demo;\nclass AdService {}\n")
-        .write("ads/src/main/java/hipstershop/Util.java", "package hipstershop;\nclass Util {}\n")
-        .write("other/src/X.java", "class X {}\n")
-        .write("web/main.go", "package main\n")
-        .write(".arch/system.arch", "component Ads at ads/**\ncomponent Other at other/**\ncomponent Web at web/**\nallow Ads -> Web\n");
-    let rep = r.report();
-    assert_eq!(rep.imports_unchecked, [("Ads".to_string(), arch_core::scan::Lang::Java, 2)]);
-    assert!(rep.unresolved.is_empty() && rep.violations.is_empty(), "{:?} {:?}", rep.unresolved, rep.violations);
-    assert_eq!(rep.files_scanned, 4);
-}
-
-/// `unchecked … imports java because "…"` (TM-70): người khai nhận thì cảnh
-/// báo chuyển sang `imports_accepted` (`--strict` không tính); `#proposed`
-/// chưa có hiệu lực; khai nhận không còn ứng với file nào thì lần kiểm cả repo
-/// báo lạc hậu, còn hook (chỉ thấy file vừa sửa) thì không kết luận.
-#[test]
-fn java_khai_nhan_import_chua_kiem() {
-    let r = Repo::new("java-accepted");
-    let law = "component Ads at ads/**\ncomponent Web at web/**\nallow Ads -> Web\n";
-    r.write("ads/src/AdService.java", "package hipstershop;\nclass AdService {}\n")
-        .write("web/main.go", "package main\n")
-        .write(".arch/system.arch", &format!("{law}unchecked Ads imports java because \"chỉ gọi qua gRPC\"\n"));
-    let rep = r.report();
-    assert!(rep.imports_unchecked.is_empty(), "{:?}", rep.imports_unchecked);
-    assert_eq!(
-        rep.imports_accepted,
-        [("Ads".to_string(), arch_core::scan::Lang::Java, 1, "chỉ gọi qua gRPC".to_string())]
-    );
-    assert!(rep.unchecked_unused.is_empty());
-
-    r.write(".arch/system.arch", &format!("{law}unchecked Ads imports java because \"x\" #proposed\n"));
-    let rep = r.report();
-    assert_eq!(rep.imports_unchecked.len(), 1, "#proposed chưa có hiệu lực");
-    assert!(rep.imports_accepted.is_empty() && rep.unchecked_unused.is_empty());
-
-    r.write(".arch/system.arch", &format!("{law}unchecked Ads imports java because \"x\"\n"))
-        .remove_file("ads/src/AdService.java")
-        .write("ads/src/ads.go", "package ads\n");
-    assert_eq!(r.report().unchecked_unused, [("Ads".to_string(), "java".to_string(), 4)]);
-    assert!(r.partial(&["ads/src/ads.go"]).unchecked_unused.is_empty(), "hook không kết luận lạc hậu");
-}
-
 /// gRPC Java (việc 15.2): client Go gọi server Java đăng ký bằng
 /// `.addService(` cùng file; client Java (`import`, `java_package` khác
 /// `package`) gọi server Go. Thiếu `allow` là vi phạm như mọi cạnh gRPC.
@@ -564,7 +516,6 @@ fn grpc_java_hai_chieu_voi_go() {
         "{:?}",
         rep.unresolved
     );
-    assert_eq!(rep.imports_unchecked, [("Ads".to_string(), arch_core::scan::Lang::Java, 1)]);
 }
 
 /// Java đăng ký lớp cài đặt ở file khác (`Server.java`: `addService(new

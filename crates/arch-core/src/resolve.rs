@@ -159,6 +159,10 @@ pub struct Resolver {
     /// File C/C++ trong repo theo tên file, chỉ dựng khi build không khai thư
     /// mục include nào. Xem [`Resolver::c_unique`].
     c_files: OnceCell<HashMap<String, Vec<String>>>,
+    /// File `.java` của repo, đọc muộn. Xem [`JavaIndex`].
+    java: OnceCell<JavaIndex>,
+    /// Package mà mỗi file Java đã hỏi khai ở câu `package`.
+    java_packages: RefCell<HashMap<String, Option<String>>>,
     /// Tên thật trong những thư mục đã dò, để kiểm hoa thường. Xem [`exact_case`].
     listing: RefCell<Listing>,
     /// File gốc crate của từng gói Rust, theo thư mục gói. Đọc một lần.
@@ -258,6 +262,8 @@ impl Resolver {
             extensions: OnceCell::new(),
             c_includes: OnceCell::new(),
             c_files: OnceCell::new(),
+            java: OnceCell::new(),
+            java_packages: RefCell::new(HashMap::new()),
             listing: RefCell::new(HashMap::new()),
             rust_roots: RefCell::new(HashMap::new()),
             crate_of: RefCell::new(HashMap::new()),
@@ -273,8 +279,7 @@ impl Resolver {
             Lang::C => self.c(importer, spec, import.system),
             Lang::Rust => self.rust(importer, spec),
             Lang::Go => self.go(spec),
-            // Không bao giờ được gọi: bộ quét Java không ra import nào.
-            Lang::Java => Resolved::Internal,
+            Lang::Java => self.java(importer, spec),
         }
     }
 
@@ -974,6 +979,246 @@ impl Resolver {
     }
 }
 
+// ---- Java ----
+
+impl Resolver {
+    /// `a.b.C` (và `a.b.C.Inner`, `a.b.C.m` của import tĩnh) là file
+    /// `a/b/C.java` khai `package a.b;`, dưới một gốc nguồn bất kỳ:
+    /// `src/main/java` của Maven, Gradle, `src` của Bazel hay Ant. Không đoán
+    /// gốc nguồn theo quy ước: đường dẫn phải kết thúc bằng `a/b/C.java`, và
+    /// câu `package` trong file phải đúng `a.b` — `x/a/b/C.java` khai
+    /// `package x.a.b;` không phải `a.b.C`. `a.b.*` là thư mục của package.
+    ///
+    /// Không có trong repo thì là gói ngoài (JDK, Maven). Có ở nhiều module
+    /// thì `Missing`: classpath mới quyết lớp nào thắng, archctl không đoán.
+    fn java(&self, importer: &str, spec: &str) -> Resolved {
+        let body = spec.strip_suffix(".*").unwrap_or(spec);
+        if self.java.get_or_init(|| JavaIndex::read(&self.root)).overflow {
+            return Resolved::Missing;
+        }
+        match self.java_pick(importer, spec) {
+            None => Resolved::Package(body.to_string()),
+            Some(Pick::Internal) => Resolved::Internal,
+            Some(Pick::One(path)) => Resolved::Path(path),
+            Some(Pick::Many(_)) => Resolved::Missing,
+            Some(Pick::None) => Resolved::Package(body.to_string()),
+        }
+    }
+
+    fn java_pick(&self, importer: &str, spec: &str) -> Option<Pick> {
+        let (body, wild) = match spec.strip_suffix(".*") {
+            Some(body) => (body, true),
+            None => (spec, false),
+        };
+        let segs: Vec<&str> = body.split('.').collect();
+        if segs.iter().any(|s| s.is_empty()) {
+            return None;
+        }
+        // Package là các đoạn đầu viết thường, như quy ước đặt tên của Java.
+        let lower = segs.iter().take_while(|s| s.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')).count();
+        let (package, class) = if lower < segs.len() {
+            (&segs[..lower], Some(segs[lower]))
+        } else if wild {
+            (&segs[..], None)
+        } else {
+            // `import a.b.c;`: lớp tên viết thường.
+            (&segs[..segs.len() - 1], segs.last().copied())
+        };
+        // Không import được lớp của package mặc định.
+        if package.is_empty() {
+            return None;
+        }
+        let dotted = package.join(".");
+        let dir = package.join("/");
+        let index = self.java.get_or_init(|| JavaIndex::read(&self.root));
+        let found = match class {
+            Some(class) => {
+                let tail = format!("{dir}/{class}.java");
+                let matched: Vec<(String, String)> = index
+                    .by_name
+                    .get(&format!("{class}.java"))
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|f| Some((f.clone(), source_root(f, &tail)?)))
+                    .collect();
+                let packages: Vec<Option<String>> = matched.iter().map(|(f, _)| self.java_package(f)).collect();
+                // Đường dẫn khớp mà không đọc được câu `package`: không biết có
+                // phải lớp này không, nên không coi là gói ngoài.
+                let unknown = packages.iter().any(Option::is_none);
+                let candidates: Vec<(String, String)> = matched
+                    .into_iter()
+                    .zip(packages)
+                    .filter(|(_, p)| p.as_deref() == Some(dotted.as_str()))
+                    .map(|(c, _)| c)
+                    .collect();
+                match pick_java(importer, candidates) {
+                    Pick::None if unknown => Pick::Many(Vec::new()),
+                    pick => pick,
+                }
+            }
+            None => {
+                let last = package[package.len() - 1];
+                let candidates: Vec<(String, String)> = index
+                    .by_dir
+                    .get(last)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|(d, sample)| Some((d.clone(), sample, source_root_dir(d, &dir)?)))
+                    .filter(|(_, sample, _)| self.java_package(sample).as_deref() == Some(dotted.as_str()))
+                    .map(|(_, sample, root)| (sample.clone(), root))
+                    .collect();
+                // Đích là một file của package (không phải thư mục), để luật
+                // `at core/**/*.java` cũng khớp. Package có ở nhiều module thì
+                // import này không tự thành cạnh: tên trần dùng qua nó là tham
+                // chiếu, phân giải từng lớp (TM-71).
+                match pick_java(importer, candidates) {
+                    Pick::Many(_) => Pick::Internal,
+                    pick => pick,
+                }
+            }
+        };
+        Some(found)
+    }
+
+    /// Các file mà `spec` có thể trỏ tới khi [`Resolver::java`] ra `Missing`
+    /// vì có ở nhiều chỗ: nơi gọi xem chúng có cùng một component không
+    /// (biến thể `src/debug`, `src/release` của Android).
+    pub fn java_candidates(&self, importer: &str, spec: &str) -> Vec<String> {
+        match self.java_pick(importer, spec) {
+            Some(Pick::Many(c)) => c,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Ứng viên đầu tiên của một tham chiếu Java ra file trong repo; tên đầy
+    /// đủ (`a.b.Lớp`) ra gói ngoài thì cũng trả, để so với `external`.
+    pub fn java_ref(&self, importer: &str, r: &crate::scan::Ref) -> Option<String> {
+        // `Missing` (có ở nhiều module) cũng trả: nơi gọi báo nó như với
+        // import, không bỏ im lặng; trừ khi chỉ mục chạm trần (mọi tên đều thế).
+        if self.java.get_or_init(|| JavaIndex::read(&self.root)).overflow {
+            return None;
+        }
+        for spec in &r.specs {
+            match self.java(importer, spec) {
+                Resolved::Path(_) | Resolved::Missing => return Some(spec.clone()),
+                Resolved::Package(_) if r.qualified => return Some(spec.clone()),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Câu `package` của một file Java. Đọc một lần.
+    fn java_package(&self, file: &str) -> Option<String> {
+        if let Some(known) = self.java_packages.borrow().get(file) {
+            return known.clone();
+        }
+        // Thường câu `package` ở đầu; license dài thì đọc tiếp tới trần cỡ file.
+        let read = |max: u64| read_prefix(&self.root.join(file), max).and_then(|src| crate::scan::java_package(&Lang::Java.tokens(&crate::scan::source_view(file, &src))));
+        let found = read(1 << 16).or_else(|| {
+            let big = std::fs::metadata(self.root.join(file)).is_ok_and(|m| m.len() > 1 << 16);
+            if big { read(crate::check::MAX_FILE_BYTES) } else { None }
+        });
+        self.java_packages.borrow_mut().insert(file.to_string(), found.clone());
+        found
+    }
+}
+
+enum Pick {
+    One(String),
+    /// Nhiều ứng viên còn lại sau khi lọc.
+    Many(Vec<String>),
+    /// `import p.*` của package có ở nhiều module: không tự thành cạnh.
+    Internal,
+    None,
+}
+
+/// Chọn một trong các file (hay thư mục) cùng tên đầy đủ, kèm gốc nguồn của
+/// từng cái. Gốc test (`src/test/java`) thường không nằm trên classpath của
+/// module khác, nên có bản ngoài test thì bỏ bản test của module khác; chỉ có
+/// bản test (tiện ích test dùng chung, như `core/test/…/Asserts.java` của
+/// guice) thì vẫn là nó. Còn nhiều hơn một thì ưu tiên gốc chứa file gọi; vẫn
+/// nhiều thì không đoán.
+fn pick_java(importer: &str, mut candidates: Vec<(String, String)>) -> Pick {
+    let inside = |root: &str| root.is_empty() || importer.starts_with(&format!("{root}/"));
+    let is_test = |root: &str| root.split('/').any(|p| p == "test" || p == "tests");
+    if candidates.iter().any(|(_, root)| !is_test(root) || inside(root)) {
+        candidates.retain(|(_, root)| !is_test(root) || inside(root));
+    }
+    candidates.sort();
+    candidates.dedup();
+    if candidates.len() > 1 {
+        let own: Vec<_> = candidates.iter().filter(|(_, root)| inside(root)).cloned().collect();
+        if own.len() == 1 {
+            candidates = own;
+        }
+    }
+    match candidates.len() {
+        0 => Pick::None,
+        1 => Pick::One(candidates.remove(0).0),
+        _ => Pick::Many(candidates.into_iter().map(|(f, _)| f).collect()),
+    }
+}
+
+/// Gốc nguồn của `file` nếu nó kết thúc đúng bằng `tail` (theo đoạn đường dẫn).
+fn source_root(file: &str, tail: &str) -> Option<String> {
+    if file == tail {
+        return Some(String::new());
+    }
+    file.strip_suffix(tail)?.strip_suffix('/').map(str::to_string)
+}
+
+fn source_root_dir(dir: &str, tail: &str) -> Option<String> {
+    source_root(dir, tail)
+}
+
+/// File `.java` của repo: theo tên file, và thư mục chứa file Java theo tên
+/// thư mục (kèm một file mẫu để đọc câu `package`). Chạm trần thì rỗng và
+/// `overflow`: dừng giữa chừng thì kết quả tuỳ thứ tự `read_dir`.
+#[derive(Default)]
+struct JavaIndex {
+    by_name: HashMap<String, Vec<String>>,
+    by_dir: HashMap<String, Vec<(String, String)>>,
+    /// Chạm trần: không biết lớp nào có trong repo, nên mọi import là chưa
+    /// phân giải được, không phải gói ngoài (TM-72).
+    overflow: bool,
+}
+
+impl JavaIndex {
+    /// Cùng danh sách file mà `check` quét (bỏ `target/`, `build/` khi
+    /// `.gitignore` bỏ, mẫu của `.archignore`…): bản sao do build sinh ra
+    /// không được biến một import thật thành "có ở nhiều module".
+    fn read(root: &Path) -> Self {
+        const MAX_FILES: usize = 200_000;
+        let mut index = JavaIndex::default();
+        let files = crate::check::source_files(root, &crate::read_ignores(root));
+        let mut seen = 0;
+        let mut samples: HashMap<String, String> = HashMap::new();
+        for rel in files.into_iter().filter(|f| f.ends_with(".java")) {
+            seen += 1;
+            if seen > MAX_FILES {
+                return JavaIndex { overflow: true, ..JavaIndex::default() };
+            }
+            let (dir, name) = match rel.rsplit_once('/') {
+                Some((d, n)) => (d.to_string(), n.to_string()),
+                None => (String::new(), rel.clone()),
+            };
+            let sample = samples.entry(dir).or_insert_with(|| rel.clone());
+            if rel < *sample {
+                *sample = rel.clone();
+            }
+            index.by_name.entry(name).or_default().push(rel);
+        }
+        let mut dirs: Vec<(String, String)> = samples.into_iter().collect();
+        dirs.sort();
+        for (dir, sample) in dirs {
+            let last = dir.rsplit('/').next().unwrap_or("").to_string();
+            index.by_dir.entry(last).or_default().push((dir, sample));
+        }
+        index
+    }
+}
+
 /// Quét `Cargo.toml` để biết workspace có những crate nào. Chỉ cần tên gói,
 /// nên đọc bằng cách dò dòng thay vì kéo thêm một thư viện TOML.
 fn find_rust_crates(root: &Path) -> Vec<(String, String)> {
@@ -1452,6 +1697,19 @@ fn read_bounded(path: &Path, max: u64) -> Option<String> {
     let mut src = String::new();
     file.take(max + 1).read_to_string(&mut src).ok()?;
     (src.len() as u64 <= max).then_some(src)
+}
+
+/// Phần đầu của một file thường (không theo symlink ở bước liệt kê), tối đa
+/// `max` byte; byte lạ hay ký tự bị cắt đôi ở cuối thành ký tự thay thế.
+fn read_prefix(path: &Path, max: u64) -> Option<String> {
+    use std::io::Read as _;
+    let file = std::fs::File::open(path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(max).read_to_end(&mut bytes).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Các lời gọi dựng extension trong một `setup.py`: `(tên, nguồn nếu viết thẳng)`.

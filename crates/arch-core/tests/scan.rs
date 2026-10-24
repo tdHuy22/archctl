@@ -681,7 +681,7 @@ fn so_dong_dung_voi_vi_tri_that() {
     assert_eq!(Lang::Rust.imports("\n\nuse crate::x;\n")[0].line, 3);
 }
 
-// ---------- Java (chỉ để dò gRPC) ----------
+// ---------- Java ----------
 
 fn words(src: &str) -> Vec<(usize, String)> {
     use arch_core::scan::lexer::Tok;
@@ -692,7 +692,7 @@ fn words(src: &str) -> Vec<(usize, String)> {
 }
 
 /// Text block, chuỗi, char literal, chú thích không nuốt mã sau chúng; tên
-/// đầy đủ gộp thành một từ; import Java không được đọc (TM-68).
+/// đầy đủ gộp thành một từ; import trong chuỗi, chú thích không tính (TM-68).
 #[test]
 fn java_chuoi_text_block_va_chu_thich() {
     let src = "import hipstershop.AdServiceGrpc;\nclass A {\n  String t = \"\"\"\n    \"quoted\" // not a comment /* nor this\n    \\\"\"\" still inside\n    \"\"\";\n  char q = '\"'; char e = '\\''; String s = \"a\\\"b // x\";\n  /* block \"\"\" */ int after1;\n  // line \"\"\" \n  hipstershop.AdServiceGrpc.AdServiceImplBase base;\n}\n";
@@ -701,7 +701,8 @@ fn java_chuoi_text_block_va_chu_thich() {
     assert!(names.contains(&"after1"), "{names:?}");
     assert!(w.contains(&(10, "hipstershop.AdServiceGrpc.AdServiceImplBase".to_string())), "{w:?}");
     assert!(!names.iter().any(|n| *n == "quoted" || *n == "still" || *n == "block" || *n == "line"), "{names:?}");
-    assert!(Lang::Java.imports(src).is_empty());
+    let specs: Vec<String> = Lang::Java.imports(src).into_iter().map(|i| i.spec).collect();
+    assert_eq!(specs, ["hipstershop.AdServiceGrpc"]);
     assert_eq!(Lang::for_path("src/main/java/A.java"), Some(Lang::Java));
 }
 

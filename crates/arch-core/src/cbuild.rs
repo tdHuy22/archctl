@@ -40,6 +40,8 @@ enum Kind {
     CompileCommands,
     Cmake,
     Make,
+    /// `Cargo.toml`: không có thư mục include, chỉ có thư viện `cdylib`.
+    Cargo,
 }
 
 /// Mọi thư mục include mà build khai báo, tương đối so với gốc dự án, đã lọc
@@ -65,6 +67,7 @@ pub fn include_dirs(root: &Path) -> Vec<String> {
             Kind::CompileCommands => from_compile_commands(src),
             Kind::Cmake => from_cmake(src, base),
             Kind::Make => from_make(src, base),
+            Kind::Cargo => continue,
         };
         for (at, raw) in raws {
             let Some(dir) = to_repo_dir(root, &at, &raw, &mut listing) else { continue };
@@ -108,10 +111,193 @@ fn kind_of(name: &str) -> Option<Kind> {
         "compile_commands.json" => Some(Kind::CompileCommands),
         "CMakeLists.txt" => Some(Kind::Cmake),
         "Makefile" | "makefile" | "GNUmakefile" => Some(Kind::Make),
+        "Cargo.toml" => Some(Kind::Cargo),
         _ if name.ends_with(".cmake") => Some(Kind::Cmake),
         _ if name.ends_with(".mk") => Some(Kind::Make),
         _ => None,
     }
+}
+
+// ---- thư viện dùng chung ----
+
+/// Cỡ tối đa của một file build đọc để tìm thư viện dùng chung.
+const MAX_BUILD_BYTES: u64 = 1 << 20;
+/// Số thư viện tối đa ghi nhận cho cả repo.
+const MAX_LIBRARIES: usize = 1024;
+
+/// Thư viện dùng chung mà build của repo dựng, cho phía Python nạp bằng
+/// `ctypes`/`cffi`: `(khoá lib:tên, đường dẫn trong repo cho biết component)`.
+///
+/// - CMake: `add_library(foo SHARED …)`, `MODULE`; component theo file nguồn
+///   đầu tiên viết thẳng, không thì theo chính `CMakeLists.txt`.
+/// - Makefile: `-o libfoo.so` (cả `-buildmode=c-shared` của Go), đích
+///   `libfoo.so:`; component theo Makefile.
+/// - Cargo: `crate-type = ["cdylib"]`; tên ở `[lib] name`, không thì tên gói
+///   (`-` thành `_`); component theo `Cargo.toml`.
+///
+/// Tên có biến chưa biết thì bỏ: đoán tên sai sinh cạnh không có thật.
+pub fn shared_libraries(root: &Path) -> Vec<(String, String)> {
+    let mut configs = Vec::new();
+    walk(root, "", 0, &mut configs);
+    configs.sort();
+    configs.truncate(MAX_FILES * 2);
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (kind, path) in &configs {
+        let base = dir_of(path);
+        let Some(src) = read_capped(&root.join(path)) else { continue };
+        let src = crate::strip_bom(&src);
+        let found: Vec<(String, String)> = match kind {
+            Kind::Cmake => cmake_libraries(src, base)
+                .into_iter()
+                .map(|(name, source)| {
+                    let at = source
+                        .and_then(|s| normalize(&join(base, &s)?))
+                        .filter(|p| root.join(p).is_file())
+                        .unwrap_or_else(|| path.clone());
+                    (name, at)
+                })
+                .collect(),
+            Kind::Make => make_libraries(src).into_iter().map(|n| (n, path.clone())).collect(),
+            Kind::Cargo => cargo_cdylib(src).into_iter().map(|n| (n, path.clone())).collect(),
+            Kind::CompileCommands => Vec::new(),
+        };
+        for (name, at) in found {
+            if let Some(key) = crate::scan::foreign::library_key(&name) {
+                out.push((key, at));
+                if out.len() >= MAX_LIBRARIES {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
+fn read_capped(path: &Path) -> Option<String> {
+    use std::io::Read as _;
+    let file = std::fs::File::open(path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_BUILD_BYTES).read_to_end(&mut bytes).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// `add_library(tên SHARED|MODULE nguồn…)`: tên và file nguồn đầu tiên.
+fn cmake_libraries(src: &str, _base: &str) -> Vec<(String, Option<String>)> {
+    const TYPES: &[&str] = &["SHARED", "MODULE"];
+    const SKIP: &[&str] = &["STATIC", "OBJECT", "INTERFACE", "IMPORTED", "ALIAS", "EXCLUDE_FROM_ALL", "GLOBAL"];
+    let clean = strip_hash_comments(src);
+    let lower = clean.to_ascii_lowercase();
+    let name = "add_library";
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let Some(found) = lower[at..].find(name) {
+        let start = at + found;
+        at = start + name.len();
+        if start > 0 && is_ident(lower.as_bytes()[start - 1]) {
+            continue;
+        }
+        let Some(open) = lower[at..].find('(') else { break };
+        if clean[at..at + open].chars().any(|c| !c.is_whitespace()) {
+            continue;
+        }
+        let body_start = at + open + 1;
+        let Some(len) = balanced(&clean[body_start..]) else { break };
+        at = body_start + len + 1;
+        let mut words = clean[body_start..body_start + len].split_whitespace().map(|w| w.trim_matches(['"', '\'']));
+        let Some(target) = words.next() else { continue };
+        let rest: Vec<&str> = words.collect();
+        // `SHARED IMPORTED` là thư viện dựng sẵn, `ALIAS` là tên khác: repo không dựng.
+        let has = |set: &[&str]| rest.iter().any(|w| set.contains(&w.to_ascii_uppercase().as_str()));
+        if !has(TYPES) || has(&["IMPORTED", "ALIAS"]) || target.contains('$') {
+            continue;
+        }
+        let source = rest
+            .iter()
+            .find(|w| {
+                let up = w.to_ascii_uppercase();
+                !TYPES.contains(&up.as_str()) && !SKIP.contains(&up.as_str()) && !w.contains('$') && w.contains('.')
+            })
+            .map(|w| w.to_string());
+        out.push((target.to_string(), source));
+    }
+    out
+}
+
+fn is_library_file(name: &str) -> bool {
+    name.ends_with(".so") || name.contains(".so.") || name.ends_with(".dylib") || name.ends_with(".dll")
+}
+
+/// `-o libfoo.so` và đích `libfoo.so:` của Makefile, sau khi mở biến.
+fn make_libraries(src: &str) -> Vec<String> {
+    const ROUNDS: usize = 3;
+    let mut vars: HashMap<String, String> = HashMap::new();
+    let mut out = Vec::new();
+    for raw in src.lines() {
+        let line = match raw.find('#') {
+            Some(i) => &raw[..i],
+            None => raw,
+        };
+        if let Some((name, value)) = assignment(line)
+            && !line.contains("-o ")
+        {
+            let value = expand(value, &vars, ROUNDS);
+            vars.insert(name.to_string(), value);
+            continue;
+        }
+        let line = expand(line, &vars, ROUNDS);
+        let args = split_command(&line);
+        for pair in args.windows(2) {
+            if pair[0] == "-o" && is_library_file(&pair[1]) && !pair[1].contains('$') {
+                out.push(pair[1].clone());
+            }
+        }
+        // Đích của luật: `libfoo.so: a.o b.o` (dòng không bắt đầu bằng tab).
+        if !raw.starts_with('\t')
+            && let Some((targets, _)) = line.split_once(':')
+            && !line.contains(":=")
+        {
+            out.extend(targets.split_whitespace().filter(|t| is_library_file(t) && !t.contains('$')).map(str::to_string));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Tên thư viện `cdylib` của một `Cargo.toml`, đọc theo dòng như phần Rust
+/// của bộ phân giải.
+fn cargo_cdylib(src: &str) -> Option<String> {
+    let mut section = String::new();
+    let (mut package, mut lib_name, mut cdylib) = (None, None, false);
+    let mut lines = src.lines().map(|l| l.split('#').next().unwrap_or("").trim());
+    while let Some(line) = lines.next() {
+        if line.starts_with('[') && !line.contains('=') {
+            section = line.to_string();
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let (key, mut value) = (key.trim(), value.trim().to_string());
+        // `crate-type = [` viết nhiều dòng.
+        if value.starts_with('[') && !value.contains(']') {
+            for more in lines.by_ref().take(64) {
+                value.push_str(more);
+                if more.contains(']') {
+                    break;
+                }
+            }
+        }
+        let text = || value.trim_matches(['"', '\'']).to_string();
+        match (section.as_str(), key) {
+            ("[package]", "name") => package = Some(text()),
+            ("[lib]", "name") => lib_name = Some(text()),
+            ("[lib]", "crate-type" | "crate_type") => cdylib = value.contains("cdylib"),
+            _ => {}
+        }
+    }
+    cdylib.then(|| lib_name.or(package).map(|n| n.replace('-', "_")))?
 }
 
 // ---- compile_commands.json ----
@@ -562,4 +748,22 @@ mod tests {
     fn make_doc_duoc_co_trong_dong_recipe() {
         assert_eq!(raws(from_make("all:\n\t$(CC) -Iinc -o x x.c\n", "")), ["inc"]);
     }
+
+    #[test]
+    fn thu_vien_dung_chung_cua_build() {
+        assert_eq!(
+            cmake_libraries("# add_library(no SHARED x.c)\nadd_library(a SHARED src/a.c)\nADD_LIBRARY(b MODULE)\nadd_library(c STATIC c.c)\nadd_library(${N} SHARED n.c)\n", ""),
+            [("a".to_string(), Some("src/a.c".to_string())), ("b".to_string(), None)]
+        );
+        assert_eq!(make_libraries("OUT := build/libx.so.1\nlibz.dylib: z.o\n\t$(CC) -shared -o $(OUT) x.o\n\t$(CC) -o $(UNKNOWN).so y.o\n"), ["build/libx.so.1", "libz.dylib"]);
+        assert_eq!(cargo_cdylib("[package]\nname = \"my-ext\"\n[lib]\ncrate-type = [\"cdylib\", \"rlib\"]\n").as_deref(), Some("my_ext"));
+        assert_eq!(cargo_cdylib("[package]\nname = \"x\"\n[lib]\nname = \"y\"\n"), None);
+        assert_eq!(cargo_cdylib("[package]\nname = \"x\"\n[lib]\ncrate-type = [\n  \"rlib\",\n  \"cdylib\",\n]\n").as_deref(), Some("x"));
+        assert!(cmake_libraries("add_library(cudart SHARED IMPORTED)\nadd_library(a::b ALIAS a)\n", "").is_empty());
+        assert_eq!(crate::scan::foreign::library_key("build/libx.so.1").as_deref(), Some("lib:x"));
+        assert_eq!(crate::scan::foreign::library_key("C:\\x\\foo.dll").as_deref(), Some("lib:foo"));
+        assert_eq!(crate::scan::foreign::library_key("lib"), Some("lib:lib".to_string()));
+        assert_eq!(crate::scan::foreign::library_key("a b.so"), None);
+    }
+
 }

@@ -120,6 +120,9 @@ pub enum UnresolvedReason {
     /// Đồ thị pipeline dựng lúc chạy: tên bước từ biến, nhánh do hàm chọn,
     /// hàm của bước không lần được về file nào.
     Pipeline,
+    /// Python nạp thư viện native lúc chạy mà tên không viết thẳng
+    /// (`ctypes.CDLL(path)`), trong repo có dựng thư viện dùng chung.
+    Ffi,
 }
 
 impl UnresolvedReason {
@@ -129,10 +132,16 @@ impl UnresolvedReason {
             (UnresolvedReason::Missing, Lang::C) => {
                 "không tìm thấy header, có thể nằm trong include path của build"
             }
+            (UnresolvedReason::Missing, Lang::Java) => {
+                "không xác định được: lớp có ở nhiều module, không đọc được câu `package` của file đích, hay quá nhiều file, quá nhiều tên để xét hết"
+            }
             (UnresolvedReason::Missing, _) => "không tìm thấy file nào ở đường dẫn này",
             (UnresolvedReason::Rpc, _) => "không ghép được lời gọi gRPC với server",
             (UnresolvedReason::Queue, _) => "không ghép được chỗ gửi, nhận qua hàng đợi",
             (UnresolvedReason::Pipeline, _) => "không đọc được cạnh của đồ thị pipeline",
+            (UnresolvedReason::Ffi, _) => {
+                "thư viện nạp lúc chạy: không đọc được tên, hay repo dựng thư viện đó ở hai component (hoặc ngoài mọi component)"
+            }
         }
     }
 }
@@ -211,17 +220,6 @@ pub struct Report {
     pub unproven: Vec<(String, crate::verify::Stale)>,
     /// File triển khai không đọc được: hỏng, quá lớn, trỏ ra ngoài dự án.
     pub deploy_unread: Vec<deploy::Unread>,
-    /// Component đã vào diện kiểm có file của ngôn ngữ mà archctl không đọc
-    /// import (Java: chỉ dò gRPC): component, ngôn ngữ, số file. Phụ thuộc qua
-    /// import của các file đó không được kiểm, nên `--strict` tính (TM-68).
-    pub imports_unchecked: Vec<(String, Lang, usize)>,
-    /// Như trên, nhưng người đã khai nhận bằng `unchecked … because "…"`:
-    /// component, ngôn ngữ, số file, lý do. Vẫn in, `--strict` không tính (TM-70).
-    pub imports_accepted: Vec<(String, Lang, usize, String)>,
-    /// `unchecked` có hiệu lực mà lần kiểm cả repo không thấy file nào của
-    /// ngôn ngữ đó trong component đã vào diện kiểm: `(component, ngôn ngữ,
-    /// dòng trong file luật)`. Khai nhận lạc hậu, `--strict` tính.
-    pub unchecked_unused: Vec<(String, String, usize)>,
     /// Service có `runs` mà không biết nó khởi chạy mã nào: `runs` khi đó chỉ
     /// được kiểm theo cạnh import, không theo điểm vào.
     pub entry_unknown: Vec<(String, String)>,
@@ -394,6 +392,9 @@ fn check_with(
     let mut code_hosts: Vec<(String, String, scan::hosts::CodeHost)> = Vec::new();
     let mut ffi_provides: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
+    // `ctypes.CDLL(path)` không đọc được tên: chỉ báo khi repo có dựng thư
+    // viện dùng chung, không thì đó là thư viện hệ thống (TM-74).
+    let mut ffi_unread: Vec<(String, String, Crossing)> = Vec::new();
     fn as_refs(v: &[String]) -> Vec<&str> {
         v.iter().map(String::as_str).collect()
     }
@@ -436,19 +437,6 @@ fn check_with(
             continue;
         }
         symbol_scanned += 1;
-        if lang == Lang::Java && report.checked.contains(from) {
-            if let Some(u) = doc.unchecked(from, lang.name()) {
-                match report.imports_accepted.iter_mut().find(|(c, l, ..)| c == from && *l == lang) {
-                    Some((_, _, n, _)) => *n += 1,
-                    None => report.imports_accepted.push((from.clone(), lang, 1, u.reason.clone())),
-                }
-            } else {
-                match report.imports_unchecked.iter_mut().find(|(c, l, _)| c == from && *l == lang) {
-                    Some((_, _, n)) => *n += 1,
-                    None => report.imports_unchecked.push((from.clone(), lang, 1)),
-                }
-            }
-        }
         let src = scan::source_view(path, &src);
         let scan = lang.scan_all(&src, &needle_set, &as_refs(&table_needles));
         for import in &scan.imports {
@@ -457,6 +445,27 @@ fn check_with(
             for native in inspect(&resolver, doc, lang, path, from, import, &mut report) {
                 natives.push((from.clone(), path.clone(), import.line, native));
             }
+        }
+        // Java dùng được lớp khác không qua `import` (tên đầy đủ, tên trần
+        // cùng package): chỉ thành cạnh khi ra đúng một file trong repo, vì
+        // phần lớn ứng viên là biến, trường hay lớp của JDK (TM-71).
+        for r in &scan.refs {
+            let Some(spec) = resolver.java_ref(path, r) else { continue };
+            let before = report.violations.len();
+            inspect(&resolver, doc, lang, path, from, &r.import(&spec), &mut report);
+            // Dòng này không có câu import nào: nói rõ để người sửa không đi tìm.
+            for v in &mut report.violations[before..] {
+                v.spec.push_str(" (không qua import)");
+            }
+        }
+        if scan.refs_cut {
+            report.unresolved.push(Unresolved {
+                file: path.clone(),
+                line: 1,
+                spec: "(quá nhiều import hay tên lớp trong một file)".to_string(),
+                lang,
+                reason: UnresolvedReason::Missing,
+            });
         }
         inspect_hits(
             doc,
@@ -479,6 +488,9 @@ fn check_with(
 
         for call in &scan.foreign.calls {
             ffi_calls.push((from.clone(), path.clone(), call.clone()));
+        }
+        for u in &scan.foreign.unread {
+            ffi_unread.push((from.clone(), path.clone(), u.clone()));
         }
         for provided in &scan.foreign.provides {
             // `TORCH_EXTENSION_NAME` thành tên thật, hoặc bỏ nếu không biết chắc.
@@ -577,6 +589,49 @@ fn check_with(
             ffi_calls.push((from.clone(), path.clone(), crossing));
         }
     }
+    // Thư viện dùng chung mà build dựng: phía kia của `ctypes`, `cffi`. Đọc
+    // cả trong hook, vì phía build không phải file vừa sửa.
+    let python_loads = !ffi_unread.is_empty() || ffi_calls.iter().any(|(_, _, c)| c.symbol.starts_with("lib:"));
+    let libraries = if python_loads { crate::cbuild::shared_libraries(root) } else { Vec::new() };
+    let built: HashSet<&str> = libraries.iter().map(|(k, _)| k.as_str()).collect();
+    for (key, at) in &libraries {
+        let Some(owner) = owners_of(doc, at).first().cloned() else { continue };
+        ffi_provides
+            .entry(key.clone())
+            .and_modify(|o| {
+                if *o != owner {
+                    o.clear();
+                }
+            })
+            .or_insert(owner);
+    }
+    // Chỉ báo ở component đã vào diện kiểm: repo dựng thư viện dùng chung mà
+    // nạp thư viện hệ thống bằng biến (pytorch) không đỏ cả khi chưa áp luật.
+    if !libraries.is_empty() {
+        for (from, file, u) in ffi_unread {
+            if report.checked.contains(&from) {
+                report.unresolved.push(Unresolved { file, line: u.line, spec: u.shown, lang: Lang::Python, reason: UnresolvedReason::Ffi });
+            }
+        }
+    }
+    // Thư viện repo có dựng mà không biết thuộc component nào: hai component
+    // cùng dựng một tên, hay file build ngoài mọi component. Không ghép được
+    // thì báo, không im lặng: một bản dựng mồi cùng tên không được xoá cạnh.
+    for (from, file, c) in &ffi_calls {
+        if c.symbol.starts_with("lib:")
+            && built.contains(c.symbol.as_str())
+            && scan::foreign::provider(&ffi_provides, &c.symbol).is_none()
+            && report.checked.contains(from)
+        {
+            report.unresolved.push(Unresolved {
+                file: file.clone(),
+                line: c.line,
+                spec: c.shown.clone(),
+                lang: Lang::Python,
+                reason: UnresolvedReason::Ffi,
+            });
+        }
+    }
     let paired = judge_ffi(doc, &ffi_calls, &ffi_provides, &mut report);
     // Import của module mở rộng không ra file nào, nhưng đã tìm thấy nơi định
     // nghĩa nó ở phía native: nó đã được phân giải.
@@ -670,16 +725,6 @@ fn check_with(
 
     counts.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     report.by_lang = counts;
-    // Hook chỉ thấy file vừa sửa, nên chỉ lần kiểm cả repo mới kết luận được
-    // một khai nhận không còn ứng với file nào.
-    if !partial {
-        for u in doc.uncheckeds.iter().filter(|u| u.meta.status.is_enforced()) {
-            let used = report.imports_accepted.iter().any(|(c, l, ..)| *c == u.component && l.name().eq_ignore_ascii_case(&u.lang));
-            if !used {
-                report.unchecked_unused.push((u.component.clone(), u.lang.clone(), u.meta.line));
-            }
-        }
-    }
 
     report
         .violations
@@ -795,7 +840,7 @@ fn java_registrations(root: &Path, scanned: &[String], budget: &mut usize) -> (H
         }
         *budget -= text.len();
         if text.contains("addService") {
-            out.extend(grpc::scan(&Lang::Java.tokens(&text), Lang::Java).java_registered);
+            out.extend(grpc::scan(&Lang::Java.tokens(&scan::source_view(&f, &text)), Lang::Java).java_registered);
         }
     }
     (out, false)
@@ -2189,7 +2234,16 @@ fn inspect(
     import: &scan::Import,
     report: &mut Report,
 ) -> Vec<NativeImport> {
-    let base = resolver.resolve(lang, path, import);
+    let mut base = resolver.resolve(lang, path, import);
+    // Java: lớp có ở nhiều chỗ nhưng cùng một component (biến thể `src/debug`,
+    // `src/release` của Android) thì đích vẫn rõ.
+    if lang == Lang::Java && base == Resolved::Missing {
+        let candidates = resolver.java_candidates(path, &import.spec);
+        let owners: BTreeSet<Option<String>> = candidates.iter().map(|c| owners_of(doc, c).first().cloned()).collect();
+        if let ([first, ..], [Some(_)]) = (candidates.as_slice(), owners.iter().cloned().collect::<Vec<_>>().as_slice()) {
+            base = Resolved::Path(first.clone());
+        }
+    }
     let (submodules, natives) = resolver.import_targets(lang, path, import, &base);
     let mut unresolved = |reason| {
         report.unresolved.push(Unresolved {
@@ -2209,6 +2263,7 @@ fn inspect(
         // Thư viện không được khai báo `external` thì không tham gia luật. Bắt
         // khai báo mọi gói npm hay mọi header hệ thống sẽ khiến file luật dài
         // vô ích.
+        Resolved::Package(pkg) if lang == Lang::Java => targets.extend(external_java(doc, pkg)),
         Resolved::Package(pkg) => targets.extend(external_named(doc, pkg)),
         Resolved::Alias => {
             unresolved(UnresolvedReason::Alias);
@@ -2516,6 +2571,18 @@ fn external_named(doc: &Document, package: &str) -> Option<String> {
                 || c.name.eq_ignore_ascii_case(package)
         })
         .map(|c| c.name.clone())
+}
+
+/// `com.google.common.collect.ImmutableList` thuộc `external Guava at
+/// com.google.common`: package Java lồng nhau, nên khớp theo tiền tố đoạn.
+fn external_java(doc: &Document, spec: &str) -> Option<String> {
+    let mut cut = spec;
+    loop {
+        if let Some(name) = external_named(doc, cut) {
+            return Some(name);
+        }
+        cut = cut.rsplit_once('.')?.0;
+    }
 }
 
 fn describe(rule: &Rule) -> String {
@@ -3412,6 +3479,13 @@ pub(crate) fn direct_targets(root: &Path, resolver: &Resolver, file: &str) -> Ta
             subs.into_iter()
                 .map(|p| (p, import.line, import.spec.clone())),
         );
+    }
+    for r in &scanned.refs {
+        if let Some(spec) = resolver.java_ref(file, r)
+            && let Resolved::Path(p) = resolver.resolve(lang, file, &r.import(&spec))
+        {
+            out.push((p, r.line, spec));
+        }
     }
     Ok(out)
 }

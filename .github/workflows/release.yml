@@ -1,0 +1,131 @@
+# Phát hành: đẩy tag `vX.Y.Z` trùng `version` trong Cargo.toml thì dựng binary
+# cho Linux và macOS (x86_64, aarch64), kèm SHA-256, gắn vào một bản phát hành **nháp**. Người
+# xem lại rồi tự bấm phát hành: một lần đẩy tag nhầm không đưa gì ra ngoài.
+#
+# Cùng luật với ci.yml: không action của bên thứ ba, `actions/checkout` ghim
+# theo SHA; tải lên bằng `gh` có sẵn trên runner, không cần action tải lên.
+# Không dependency nào ngoài std, nên cargo không cần mạng.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_OFFLINE: "true"
+
+jobs:
+  nhap:
+    name: tạo bản nháp
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: lấy mã
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: tag phải trùng phiên bản trong Cargo.toml
+        run: |
+          want="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "$GITHUB_REF_NAME" != "$want" ]; then
+            echo "tag $GITHUB_REF_NAME khác phiên bản $want trong Cargo.toml" >&2
+            exit 1
+          fi
+
+      - name: test trước khi dựng
+        run: cargo test --workspace --locked -q
+
+      - name: bản nháp
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+            --title "archctl $GITHUB_REF_NAME" \
+            --notes "Binary cho Linux, macOS, Windows. Kiểm tải về bằng file .sha256 đi kèm (xem README, mục Cài đặt)."
+
+  dung:
+    name: dựng ${{ matrix.target }}
+    needs: nhap
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    # Windows chưa có trong CI nên chưa phát hành. Runner ghim như ci.yml;
+    # aarch64 Linux dựng chéo trên x86_64: runner arm có thể không có cho repo
+    # riêng tư, và job chờ runner thì `timeout-minutes` không tính.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04, target: aarch64-unknown-linux-gnu, cross: gcc-aarch64-linux-gnu }
+          - { os: macos-15, target: aarch64-apple-darwin }
+          - { os: macos-15, target: x86_64-apple-darwin }
+    steps:
+      - name: lấy mã
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: linker dựng chéo
+        if: matrix.cross
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ${{ matrix.cross }}
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: dựng
+        run: cargo build --release --locked --target ${{ matrix.target }} -p archctl
+
+      - name: đóng gói và tải lên
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          name="archctl-$GITHUB_REF_NAME-$TARGET"
+          mkdir -p "dist/$name"
+          cp "target/$TARGET/release/archctl" README.md "dist/$name/"
+          if [ -f LICENSE ]; then cp LICENSE "dist/$name/"; fi
+          cd dist
+          archive="$name.tar.gz"
+          tar -czf "$archive" "$name"
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$archive" > "$archive.sha256"
+          else
+            shasum -a 256 "$archive" > "$archive.sha256"
+          fi
+          cat "$archive.sha256"
+          # Chạy lại job hỏng thì ghi đè file đã tải lên dở.
+          gh release upload "$GITHUB_REF_NAME" "$archive" "$archive.sha256" --repo "$GITHUB_REPOSITORY" --clobber
+
+  du:
+    name: đủ file chưa
+    needs: dung
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # Bản nháp chỉ token có quyền ghi mới thấy; job này không ghi gì.
+    permissions:
+      contents: write
+    steps:
+      - name: bản nháp phải có đủ 4 gói và 4 file .sha256
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')
+          echo "$n file"
+          [ "$n" -eq 8 ]

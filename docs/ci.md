@@ -45,8 +45,7 @@ trên macOS, nên cùng lúc trả lời câu hỏi khác: công cụ viết tr�
 Vi phạm mới thì `check` nào cũng chặn. `--strict` chặn thêm mọi thứ "chưa kiểm
 được": import không phân giải được, file quá lớn, mẫu `at` chồng nhau, biên
 nhận hết hạn, **và cảnh báo của chính file luật** — `contract` không có verify,
-`invariant` chỉ là ghi chú, import Java chưa kiểm mà chưa ai khai nhận bằng
-`unchecked`. Chi tiết ở [check.md](check.md).
+`invariant` chỉ là ghi chú. Chi tiết ở [check.md](check.md).
 
 Trên nhánh chính thì đó là đúng mức. Một luật không ai kiểm được vẫn nằm trong
 file và vẫn đọc lên y như luật đang được áp.
@@ -90,7 +89,7 @@ khi mã dùng let-chain của 1.88, suốt nhiều tháng, vì không có gì ki
 
 ## Repo thật, ở mỗi pull request
 
-Job `repo thật` chạy [bench/bench.py](../bench/bench.py): tải ba mươi lăm repo ở
+Job `repo thật` chạy [bench/bench.py](../bench/bench.py): tải ba mươi hai repo ở
 đúng commit ghim trong `bench/repos.tsv`, rồi đòi hai điều. Luật do `init
 --from-code` sinh ra, nâng lên `#accepted`, kiểm lại chính mã đó thì phải ra 0
 vi phạm. Và mọi lệnh phải chạy được trên mã người khác viết, chứ không chỉ trên
@@ -124,15 +123,14 @@ cứng bằng `=`. IPython, PyYAML và dockerfile-parse cài bằng pip vào ven
 mọi gói ghim `==` kèm sha256; grpcio-tools (`protoc`) cũng vậy. `helm` bản ghim
 tải từ get.helm.sh, `kustomize` bản ghim tải từ bản phát hành trên GitHub, OpenTofu và provider
 aws, google bản ghim, đều kiểm sha256. `--require
-clang,node,go,syn,ipython,deploy,proto,helm,kustomize,terraform,java` để ngày thiếu một cái thì bước này
-đỏ chứ không lặng lẽ bỏ qua. Bốn mươi bảy trong sáu mươi chín kiểu phá của
+clang,node,go,syn,ipython,deploy,proto,helm,kustomize,terraform` để ngày thiếu một cái thì bước này
+đỏ chứ không lặng lẽ bỏ qua. Bốn mươi trong sáu mươi hai kiểu phá của
 `sabotage.py` nhắm vào bước này: ba ở import Python, hai ở tên máy trong chuỗi
 của mã Python, ba ở import Rust, hai ở
 notebook, bốn ở cạnh Python ↔ native, bốn ở compose và Dockerfile, bảy ở
 manifest Kubernetes, cạnh qua Service, NetworkPolicy và lối vào từ Internet,
 một ở manifest dựng từ chart Helm, ba ở bản dựng Kustomize, sáu ở service Terraform (hai ở đường plan), hai ở `.proto`,
-ba ở chỗ gửi, nhận qua hàng đợi, ba ở cạnh LangGraph, Airflow, hai ở cạnh giữa
-các stage của `dvc.yaml`, hai ở chỗ gRPC trong mã Java. Mười hai kiểu khác nhắm vào
+ba ở chỗ gửi, nhận qua hàng đợi. Mười hai kiểu khác nhắm vào
 phần hạ tầng của chính bộ đo (năm trên compose gồm một ở tên máy viết trong mã,
 bảy trên manifest Kubernetes gồm hai ở NetworkPolicy, một ở lối vào, một ở
 chart Helm), một kiểu vào cạnh gRPC bắt buộc (chạy

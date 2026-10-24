@@ -36,6 +36,13 @@ const KEYWORDS: &[&str] = &[
 
 /// Hàm mà đối số đầu là một tên máy.
 const HOST_FUNCS: &[&str] = &["JoinHostPort", "gethostbyname", "gethostbyname_ex", "getaddrinfo", "LookupHost"];
+/// Java: lớp và hàm dựng mà đối số đầu là tên máy (`new Jedis("redis", 6379)`).
+const JAVA_HOST_CTORS: &[&str] = &[
+    "Socket", "InetSocketAddress", "createUnresolved", "Jedis", "JedisPool", "JedisPooled", "HostAndPort", "fromParts",
+    "ServerAddress",
+];
+/// Java: hàm ghi cấu hình theo khoá, `put("host", "db")`, `setProperty("db.host", "db")`.
+const JAVA_SETTERS: &[&str] = &["put", "putIfAbsent", "setProperty", "set", "property", "withProperty"];
 
 /// Thêm vào từ chỉ bí mật của biến môi trường, chỉ cho mã: `login = "admin:12345"`.
 /// Biến môi trường thì không: `LOGIN_HOST=login` vẫn là một máy.
@@ -119,6 +126,12 @@ pub fn scan(toks: &[Token], lang: Lang) -> CodeHosts {
                 } else {
                     (&joined, None)
                 }
+            }
+            // `@Value("${redis.host:redis}")` của Spring: giá trị mặc định của khoá.
+            Tok::Str(s) if lang == Lang::Java && spring_default(s).is_some() => {
+                let (k, v) = spring_default(s).unwrap_or_default();
+                addr = v;
+                (&addr, Some(k))
             }
             Tok::Str(s) | Tok::Template(s) => (s, None),
             // Chuỗi ba nháy chỉ khi là một giá trị: docstring thì không.
@@ -471,7 +484,10 @@ fn context(toks: &[Token], i: usize, lang: Lang) -> Option<String> {
             _ => None,
         }
     };
-    let getter = |k: usize| matches!(at(k), Some(Tok::Word(w)) if GETTERS.contains(&last_segment(w)));
+    let getter = |k: usize| {
+        matches!(at(k), Some(Tok::Word(w)) if GETTERS.contains(&last_segment(w))
+            || (lang == Lang::Java && JAVA_SETTERS.contains(&last_segment(w))))
+    };
     // Tên được gán, khi `at(k)` là dấu `=` của phép gán: `host = …`,
     // `host: str = …`, `host := …`.
     let assigned = |k: usize| -> Option<String> {
@@ -597,6 +613,10 @@ fn context(toks: &[Token], i: usize, lang: Lang) -> Option<String> {
         Tok::Punct('(') => match at(2) {
             // `net.JoinHostPort("db", …)`, `gethostbyname("db")`.
             Some(Tok::Word(w)) if HOST_FUNCS.contains(&last_segment(w)) => Some("host".to_string()),
+            Some(Tok::Word(w)) if lang == Lang::Java && JAVA_HOST_CTORS.contains(&last_segment(w)) => Some("host".to_string()),
+            // Java: builder, setter có tên là khoá máy (`.host("redis")`,
+            // `setHost("rabbit")`, `withEndpoint(…)`).
+            Some(Tok::Word(w)) if lang == Lang::Java && kind(last_segment(w)) == "HOST" => Some(last_segment(w).to_string()),
             _ => None,
         },
         // `std::string host{"db"}` của C++.
@@ -690,6 +710,13 @@ fn value_position(toks: &[Token], i: usize) -> bool {
     matches!(j.checked_sub(1).map(|k| &toks[k].tok), Some(Tok::Punct('(' | ',' | '=')))
 }
 
+/// `${khoá:mặc định}` của Spring, cả chuỗi: `(khoá, mặc định)`.
+fn spring_default(s: &str) -> Option<(String, String)> {
+    let inner = s.strip_prefix("${")?.strip_suffix('}')?;
+    let (k, v) = inner.split_once(':')?;
+    (keyish(k) && !v.contains(['{', '}', '$'])).then(|| (k.to_string(), v.to_string()))
+}
+
 /// Tên khoá cấu hình: chữ, số, `_`, `.`, `-`.
 fn keyish(s: &str) -> bool {
     !s.is_empty() && s.len() <= 128 && s.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'-'))
@@ -737,6 +764,26 @@ mod tests {
         assert_eq!(found(Lang::Python, "cfg = {\"hostname\": \"db\"}"), ["1:hostname → db"]);
         assert_eq!(found(Lang::Go, "opt := redis.Options{Addr: \"redis\"}\nredisHost := \"cache\""), ["1:Addr → redis", "2:redisHost → cache"]);
         assert_eq!(found(Lang::Rust, "let server = \"db\";"), ["1:server → db"]);
+        // Java: khai báo có kiểu, trường, lời gọi đọc cấu hình, annotation; số
+        // đọc trọn (`digit_separators`) không làm lệch khoá.
+        assert_eq!(found(Lang::Java, "private static final String DB_HOST = \"db\";"), ["1:DB_HOST → db"]);
+        assert_eq!(found(Lang::Java, "this.host = \"cache\"; hosts[0] = \"queue\";"), ["1:host → cache", "1:hosts → queue"]);
+        assert_eq!(
+            found(Lang::Java, "String a = System.getenv().getOrDefault(\"REDIS_ADDR\", \"redis:6379\");"),
+            ["1:REDIS_ADDR → redis:6379"]
+        );
+        assert_eq!(found(Lang::Java, "@Endpoint(host = \"metrics\", port = 9090)"), ["1:host → metrics"]);
+        assert_eq!(
+            found(Lang::Java, "RedisClient.builder().host(\"redis\"); cf.setHost(\"rabbit\"); new Jedis(\"redis3\", 6379);"),
+            ["1:host → redis", "1:setHost → rabbit", "1:host → redis3"]
+        );
+        assert_eq!(
+            found(Lang::Java, "props.setProperty(\"db.host\", \"pghost\"); m.put(\"host\", \"mapped\"); log.info(\"cart\");"),
+            ["1:db.host → pghost", "1:host → mapped"]
+        );
+        assert_eq!(found(Lang::Java, "@Value(\"${redis.host:redis}\") String h;"), ["1:redis.host → redis"]);
+        // Khoá bí mật không đọc, chỉ in tên và cổng.
+        assert_eq!(found(Lang::Java, "String pw = \"http://user:hunter2@vault:8200\";"), ["1:pw → vault:8200"]);
         // Có kiểu.
         assert_eq!(found(Lang::Python, "host: str = \"db\""), ["1:host → db"]);
         assert_eq!(found(Lang::TypeScript, "let host: string = 'db'"), ["1:host → db"]);

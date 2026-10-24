@@ -17,6 +17,7 @@ pub mod grpc;
 pub mod hcl;
 pub mod helm;
 pub mod hosts;
+mod java;
 pub mod k8s;
 pub mod kustomize;
 mod notebook;
@@ -61,6 +62,22 @@ pub struct Import {
     /// Chỉ Python điền. Tên nào chính là module con thì cũng là một đích —
     /// xem [`crate::resolve::Resolver::submodules`].
     pub names: Vec<String>,
+}
+
+/// Java: một lớp dùng không qua `import`. Thử lần lượt `specs` (cùng package
+/// trước, rồi từng `import p.*`); cái đầu ra file trong repo là đích.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ref {
+    pub line: usize,
+    pub specs: Vec<String>,
+    /// Tên đầy đủ dạng `a.b.Lớp`: ra gói ngoài thì vẫn so với `external`.
+    pub qualified: bool,
+}
+
+impl Ref {
+    pub fn import(&self, spec: &str) -> Import {
+        Import::local(spec, self.line)
+    }
 }
 
 impl Import {
@@ -143,10 +160,13 @@ impl Lang {
             },
             // Text block `"""…"""` của Java 15 đọc như chuỗi ba nháy; `'x'`,
             // `'\''` là char literal, luôn đóng. Gộp `a.b.C` thành một từ, cho
-            // tên đầy đủ `hipstershop.AdServiceGrpc.AdServiceImplBase`.
+            // tên đầy đủ `hipstershop.AdServiceGrpc.AdServiceImplBase`. Số đọc
+            // trọn cả hậu tố (`42L`, `0x1F`, `1_000`): không thì `L` thành một
+            // tên lớp cùng package.
             Lang::Java => LexConfig {
                 triple_quoted: true,
                 path_separator: Some("."),
+                digit_separators: true,
                 ..LexConfig::base()
             },
         }
@@ -174,15 +194,18 @@ impl Lang {
     /// [`find_tables`].
     pub fn scan_all(self, src: &str, needles: &Needles, tables: &[&str]) -> FileScan {
         let toks = lexer::lex(src, &self.config());
-        let imports = match self {
-            Lang::TypeScript => ts::extract(&toks),
-            Lang::Python => python::extract(&toks),
-            Lang::C => clang::extract(&toks),
-            Lang::Rust => rustlang::extract(&toks),
-            Lang::Go => golang::extract(&toks),
-            // Import Java chưa đọc: component có file Java được báo "import
-            // Java chưa kiểm" (việc 15.1).
-            Lang::Java => Vec::new(),
+        let mut refs_cut = false;
+        let (imports, refs) = match self {
+            Lang::TypeScript => (ts::extract(&toks), Vec::new()),
+            Lang::Python => (python::extract(&toks), Vec::new()),
+            Lang::C => (clang::extract(&toks), Vec::new()),
+            Lang::Rust => (rustlang::extract(&toks), Vec::new()),
+            Lang::Go => (golang::extract(&toks), Vec::new()),
+            Lang::Java => {
+                let (imports, refs, cut) = java::extract(&toks);
+                refs_cut = cut;
+                (imports, refs)
+            }
         };
         let queues = queue::scan(&toks, self, &imports);
         let pipeline = if self == Lang::Python { pipeline::scan(src, &toks, &imports) } else { pipeline::Graph::default() };
@@ -190,14 +213,20 @@ impl Lang {
             queues,
             pipeline,
             imports,
+            refs,
+            refs_cut,
             symbols: find_symbols(&toks, needles, self),
             tables: find_tables(&toks, tables),
             foreign: foreign::scan(&toks, self),
             rpc: grpc::scan(&toks, self),
-            // Tên máy trong chuỗi Java chưa có thước đo: không đọc.
-            hosts: if self == Lang::Java { hosts::CodeHosts::default() } else { hosts::scan(&toks, self) },
+            hosts: hosts::scan(&toks, self),
         }
     }
+}
+
+/// Package mà một file Java khai (`package a.b;`).
+pub fn java_package(toks: &[lexer::Token]) -> Option<String> {
+    java::package(toks)
 }
 
 /// Một lần gặp ký hiệu bị theo dõi trong mã.
@@ -217,6 +246,12 @@ pub struct SymbolHit {
 #[derive(Debug, Clone, Default)]
 pub struct FileScan {
     pub imports: Vec<Import>,
+    /// Java: lớp dùng không qua `import` (tên đầy đủ trong mã, tên trần cùng
+    /// package hay của `import p.*`). Chỉ thành cạnh khi phân giải ra file
+    /// trong repo.
+    pub refs: Vec<Ref>,
+    /// Java: chạm trần số import hay tham chiếu của một file (TM-72).
+    pub refs_cut: bool,
     pub symbols: Vec<SymbolHit>,
     pub tables: Vec<SymbolHit>,
     /// Hàm đi qua ranh giới ngôn ngữ — thứ mà câu lệnh import không nói gì.
@@ -404,6 +439,50 @@ pub fn imports_for(path: &str, src: &str) -> Option<(Lang, Vec<Import>)> {
     Some((lang, lang.imports(&source_view(path, src))))
 }
 
+/// Bước dịch đầu tiên của javac (JLS 3.3): `\uXXXX` (một hay nhiều `u`) đứng
+/// sau một số lẻ dấu `\` là ký tự đó, kể cả trong định danh — `\u0063om.acme`
+/// là `com.acme`. Không thì tên viết bằng escape lách được luật (TM-71).
+/// `\u000a` cũng là xuống dòng thật như javac: nó kết thúc chú thích `//`, nên
+/// giữ nguyên thì mã sau nó bị giấu. Số dòng sau đó lệch so với file gốc.
+fn java_unicode_escapes(src: &str) -> std::borrow::Cow<'_, str> {
+    if !src.contains("\\u") {
+        return std::borrow::Cow::Borrowed(src);
+    }
+    let b = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    let mut slashes = 0usize;
+    let mut copied = 0;
+    while i < b.len() {
+        if b[i] == b'\\' {
+            slashes += 1;
+            i += 1;
+            continue;
+        }
+        if b[i] == b'u' && slashes % 2 == 1 {
+            let mut j = i;
+            while j < b.len() && b[j] == b'u' {
+                j += 1;
+            }
+            let hex = src.get(j..j + 4).filter(|h| h.bytes().all(|c| c.is_ascii_hexdigit()));
+            if let Some(c) = hex.and_then(|h| u32::from_str_radix(h, 16).ok()).and_then(char::from_u32)
+            {
+                out.push_str(&src[copied..i - 1]);
+                out.push(c);
+                i = j + 4;
+                copied = i;
+                // Ký tự vừa giải là `\` thì không mở escape mới (JLS 3.3).
+                slashes = 0;
+                continue;
+            }
+        }
+        slashes = 0;
+        i += 1;
+    }
+    out.push_str(&src[copied..]);
+    std::borrow::Cow::Owned(out)
+}
+
 /// Phần mã của một file, để quét. Gần như luôn là cả file.
 ///
 /// Component một file của Vue (`.vue`) là ngoại lệ: mã nằm trong các khối
@@ -417,6 +496,9 @@ pub fn imports_for(path: &str, src: &str) -> Option<(Lang, Vec<Import>)> {
 pub fn source_view<'a>(path: &str, src: &'a str) -> std::borrow::Cow<'a, str> {
     if path.ends_with(".ipynb") {
         return std::borrow::Cow::Owned(notebook::code_view(src));
+    }
+    if path.ends_with(".java") {
+        return java_unicode_escapes(src);
     }
     if !path.ends_with(".vue") {
         return std::borrow::Cow::Borrowed(src);

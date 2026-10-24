@@ -424,37 +424,6 @@ fn strict_coi_import_khong_phan_giai_duoc_la_vi_pham() {
     assert!(text(&out).contains("--strict"), "{}", text(&out));
 }
 
-/// Import Java không được đọc (TM-68), nên `--strict` chặn; người khai nhận
-/// qua `propose`/`accept` thì cho qua, kèm lý do vẫn in ra; bỏ file Java đi
-/// thì khai nhận lạc hậu và `--strict` lại chặn (TM-70).
-#[test]
-fn strict_va_khai_nhan_import_java() {
-    let p = Project::new("strict-java");
-    std::fs::write(p.0.join("src/web/Page.java"), "package web;\nimport order.Store;\nclass Page {}\n").unwrap();
-    let out = p.run(&["check", "--strict"]);
-    assert_eq!(code(&out), 1, "{}", text(&out));
-    assert!(text(&out).contains("archctl propose 'unchecked Web imports java because \"<lý do>\"' --reason"), "{}", text(&out));
-
-    let out = p.run(&["propose", "unchecked Web imports java because \"Web chỉ gọi Order qua gRPC\"", "--reason", "Java không đọc import"]);
-    assert_eq!(code(&out), 3, "{}", text(&out));
-    assert_eq!(code(&p.run(&["check", "--strict"])), 1, "đề xuất chưa duyệt chưa có hiệu lực");
-    let id = p.id_of("ĐỀ XUẤT");
-    assert_eq!(code(&p.run(&["accept", &id, "--reason", "chấp nhận"])), 0);
-
-    let out = p.run(&["check", "--strict"]);
-    assert_eq!(code(&out), 0, "{}", text(&out));
-    assert!(text(&out).contains("ĐÃ KHAI NHẬN") && text(&out).contains("Web chỉ gọi Order qua gRPC"), "{}", text(&out));
-    let json = text(&p.run(&["check", "--json"]));
-    assert!(json.contains(r#""importsAccepted":[{"component":"Web","lang":"Java","files":1,"reason":"Web chỉ gọi Order qua gRPC"}]"#), "{json}");
-
-    std::fs::remove_file(p.0.join("src/web/Page.java")).unwrap();
-    let out = p.run(&["check", "--strict"]);
-    assert_eq!(code(&out), 1, "{}", text(&out));
-    assert!(text(&out).contains("KHAI NHẬN LẠC HẬU"), "{}", text(&out));
-    let json = text(&p.run(&["check", "--json"]));
-    assert!(json.contains(r#""uncheckedUnused":[{"component":"Web","lang":"Java","line":5}]"#), "{json}");
-}
-
 /// `ARCH` có `allow Web -> Order` và không có gì cho `Order`, `Report`, nên dự
 /// án này *có* cảnh báo — loại "chưa khai báo". `--strict` phải cho qua: áp
 /// dần là cách dùng được thiết kế, và chặn ở đây nghĩa là không ai bật được

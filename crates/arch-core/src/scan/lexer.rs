@@ -945,12 +945,16 @@ impl Lexer<'_> {
     /// mũ (`1.5e+3`, `0x1p-3`). Chỉ phát một token: không ai cần từng chữ số.
     fn number(&mut self) {
         let first = self.cs[self.i];
+        // `0xE+x` là `0xE` cộng `x`: dấu của số mũ chỉ đứng sau `e` của số
+        // thập phân, `p` của số hex, và trước một chữ số.
+        let hex = first == '0' && matches!(self.cs.get(self.i + 1), Some('x' | 'X'));
         while let Some(&c) = self.cs.get(self.i) {
             let separator = c == '\''
                 && self.cs.get(self.i + 1).is_some_and(|n| n.is_ascii_alphanumeric());
             let exponent_sign = matches!(c, '+' | '-')
                 && self.i > 0
-                && matches!(self.cs[self.i - 1], 'e' | 'E' | 'p' | 'P');
+                && if hex { matches!(self.cs[self.i - 1], 'p' | 'P') } else { matches!(self.cs[self.i - 1], 'e' | 'E') }
+                && self.cs.get(self.i + 1).is_some_and(|n| n.is_ascii_digit());
             if c.is_ascii_alphanumeric() || c == '.' || c == '_' || separator || exponent_sign {
                 self.i += 1;
             } else {

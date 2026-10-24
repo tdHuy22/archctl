@@ -763,7 +763,8 @@ nằm đâu), `Gateway` của Gateway API không có listener nào, cổng của
 
 Cạnh mạng lấy từ cấu hình có một lối lách: viết thẳng địa chỉ của service khác
 vào mã thì không dòng cấu hình nào đổi. Vì vậy `check` đọc cả chuỗi trong mã
-Python, JS/TS, Go, Rust, C/C++. Chuỗi trỏ tới một service của repo là cạnh mạng
+Python, JS/TS, Go, Rust, C/C++, Java (cả builder, setter như `.host("redis")`,
+`new Jedis("redis", 6379)`, `@Value("${redis.host:redis}")`). Chuỗi trỏ tới một service của repo là cạnh mạng
 từ mọi service chạy component chứa file đó (theo `runs`), và cần `link` như cạnh
 lấy từ biến môi trường:
 
