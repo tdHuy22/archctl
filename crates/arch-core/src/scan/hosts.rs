@@ -248,6 +248,11 @@ enum Stripped {
     Port,
 }
 
+/// Độ dài tối đa của tên trong chỗ trống `{port}`, `%(port)s`.
+const PLACEHOLDER_MAX: usize = 64;
+/// Số máy tối đa của một URL nhiều máy (`mongodb://a:1,b:2/x`) được tách ra.
+const MAX_URL_HOSTS: usize = 64;
+
 /// Đưa chuỗi về dạng luật tên máy đọc được, giữ phần viết thẳng:
 ///
 /// - cổng ghép lúc chạy bỏ đi, tên máy giữ lại: `http://db:\0/x` (f-string,
@@ -268,12 +273,20 @@ fn normalize(text: &str) -> (String, Stripped) {
             let placeholder = match rest {
                 ['\0', ..] => Some(1),
                 ['%', 'd' | 's' | 'v' | 'i' | 'u', ..] => Some(2),
-                ['%', '(', ..] => rest.iter().position(|&c| c == ')').filter(|&e| rest.get(e + 1).is_some_and(|c| c.is_ascii_alphabetic())).map(|e| e + 2),
-                ['{', ..] => rest
+                // Tên trong chỗ trống ngắn: chỉ dò `PLACEHOLDER_MAX` ký tự, không thì
+                // `":{:{:{…"` 4 MiB làm phép dò thành bậc hai (review claude-security F2).
+                ['%', '(', ..] => rest
                     .iter()
-                    .position(|&c| c == '}')
-                    .filter(|&e| rest[1..e].iter().all(|c| c.is_ascii_alphanumeric() || *c == '_'))
-                    .map(|e| e + 1),
+                    .take(PLACEHOLDER_MAX + 3)
+                    .position(|&c| c == ')')
+                    .filter(|&e| rest.get(e + 1).is_some_and(|c| c.is_ascii_alphabetic()))
+                    .map(|e| e + 2),
+                ['{', ..] => rest[1..]
+                    .iter()
+                    .take(PLACEHOLDER_MAX + 1)
+                    .position(|&c| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .filter(|&e| rest[1 + e] == '}')
+                    .map(|e| e + 2),
                 [] => Some(0),
                 ['/', next, ..] if *next != '/' => Some(0),
                 ['/'] => Some(0),
@@ -343,7 +356,10 @@ fn normalize(text: &str) -> (String, Stripped) {
                 Some(at) => authority.split_at(at + 1),
                 None => ("", authority),
             };
-            if !hosts.contains(',') {
+            // Mỗi máy chép lại cả scheme, user, path: `"<M chữ>://<N dấu phẩy>"`
+            // ra N·M byte. URL thật có vài máy; nhiều hơn trần thì không tách
+            // (review opus của bản sửa F2).
+            if !hosts.contains(',') || hosts.matches(',').count() >= MAX_URL_HOSTS {
                 out.push_str(part);
                 continue;
             }
@@ -782,6 +798,16 @@ mod tests {
             ["1:db.host → pghost", "1:host → mapped"]
         );
         assert_eq!(found(Lang::Java, "@Value(\"${redis.host:redis}\") String h;"), ["1:redis.host → redis"]);
+        // `":{:{:{…"` dài không làm phép dò chỗ trống thành bậc hai (claude-security F2).
+        let many = format!("x = \"{}://{}\"", "a".repeat(40_000), ",".repeat(40_000));
+        let t = crate::testclock::Clock::start();
+        let _ = found(Lang::Python, &many);
+        assert!(t.elapsed().as_secs() < 5);
+        let big = format!("x = \"{}\"", ":{".repeat(1_000_000));
+        let t = crate::testclock::Clock::start();
+        let _ = found(Lang::Python, &big);
+        assert!(t.elapsed().as_secs() < 5);
+        assert_eq!(found(Lang::Python, &format!("u = \"http://db:{{{}}}/x\"", "p".repeat(64))), ["1:u → db"]);
         // Khoá bí mật không đọc, chỉ in tên và cổng.
         assert_eq!(found(Lang::Java, "String pw = \"http://user:hunter2@vault:8200\";"), ["1:pw → vault:8200"]);
         // Có kiểu.

@@ -1040,8 +1040,13 @@ def archctl_tf_plan(archctl, root, files, plans, workdir):
             shutil.copyfile(Path(root) / f, dst)
         cmds = []
         for r, plan in sorted(plans.items()):
+            # Tên gốc module lấy từ repo được đo: đi vào lệnh `sh -c` của
+            # `archctl verify`, nên chỉ nhận ký tự an toàn và luôn nháy
+            # (claude-security F17).
+            if not re.fullmatch(r"[A-Za-z0-9._/-]*", r) or ".." in r.split("/"):
+                bench.die(f"gốc module Terraform có ký tự lạ, không đưa vào lệnh: {r!r}")
             target = ".arch/tf-plan.json" if r == "" else f".arch/tf-plan/{r}.json"
-            cmds.append(f"mkdir -p {shlex.quote(str(Path(target).parent))} && cp {shlex.quote(str(Path(plan).resolve()))} {target}")
+            cmds.append(f"mkdir -p {shlex.quote(str(Path(target).parent))} && cp {shlex.quote(str(Path(plan).resolve()))} {shlex.quote(target)}")
         (work / ".arch").mkdir(exist_ok=True)
         (work / ".arch" / "system.arch").write_text(f'verify tf_plan runs "{" && ".join(cmds)}"\n')
         p = subprocess.run([archctl, "verify", "tf_plan", "--quiet", "--root", str(work)], capture_output=True, text=True, timeout=600)

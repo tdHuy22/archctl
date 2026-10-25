@@ -753,7 +753,7 @@ fn unproven(root: &Path, doc: &Document, files: &[String]) -> Vec<(String, crate
         .map(|v| v.name.clone())
         .collect();
     let receipts = crate::verify::parse(
-        &std::fs::read_to_string(root.join(crate::verify::RECEIPTS_FILE)).unwrap_or_default(),
+        &crate::read_config(&root.join(crate::verify::RECEIPTS_FILE)).unwrap_or_default(),
     );
     let changed = crate::verify::last_source_change(root, files);
     crate::verify::stale(&names, &receipts, &crate::arch_hash(doc), changed)
@@ -1187,6 +1187,15 @@ fn judge_queues(
                 key: shown_key.clone(),
             });
         }
+    }
+    if receivers.work_cut.get() {
+        report.unresolved.push(Unresolved {
+            file: ".".into(),
+            line: 0,
+            spec: "quá ngân sách khớp mẫu psubscribe (mẫu, tên quá nhiều hay quá dài); tên gửi sau không ghép với mẫu".into(),
+            lang: Lang::Python,
+            reason: UnresolvedReason::Queue,
+        });
     }
     for h in &hops {
         let Some((reason, rule, status)) = judge(doc, &h.from, &h.to) else {
@@ -3590,7 +3599,7 @@ fn ignore_sources(top: &Path, parts: &[&str]) -> (Vec<(usize, String)>, bool) {
     let mut sources: Vec<(usize, String)> = Vec::new();
     for depth in 0..parts.len() {
         let dir = parts[..depth].join("/");
-        if let Ok(text) = std::fs::read_to_string(top.join(&dir).join(".gitignore")) {
+        if let Some(text) = crate::read_config(&top.join(&dir).join(".gitignore")) {
             sources.push((depth, crate::strip_bom(&text).to_string()));
         }
     }
@@ -3598,7 +3607,7 @@ fn ignore_sources(top: &Path, parts: &[&str]) -> (Vec<(usize, String)>, bool) {
     // nhau. `.git/info/exclude` là của riêng một máy, nên nó được bỏ thêm thư
     // mục nhưng không được biến "không biết" thành "quét".
     let known = !sources.is_empty();
-    if let Ok(text) = std::fs::read_to_string(top.join(".git/info/exclude")) {
+    if let Some(text) = crate::read_config(&top.join(".git/info/exclude")) {
         sources.insert(0, (0, crate::strip_bom(&text).to_string()));
     }
     (sources, known)

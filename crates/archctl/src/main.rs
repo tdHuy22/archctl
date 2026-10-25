@@ -193,10 +193,12 @@ Mã thoát:
 /// nhiều người đọc — nói ngược lại những dòng ngay trên nó.
 fn load_arch(root: &Path, as_json: bool) -> Option<(Document, String, Vec<Diag>)> {
     let path = root.join(arch_core::ARCH_FILE);
-    let src = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) => {
-            crate::say_err!("archctl: không đọc được `{}`: {e}", path.display());
+    // File luật cũng do repo kiểm soát: chỉ file thường, không theo symlink,
+    // có trần cỡ (review opus: `system.arch -> /dev/zero` làm `check` treo).
+    let src = match arch_core::read_config(&path) {
+        Some(s) => s,
+        None => {
+            crate::say_err!("archctl: không đọc được `{}`: không có, không phải file thường, hay quá 4 MB", path.display());
             return None;
         }
     };
@@ -350,7 +352,7 @@ fn violation_key(v: &arch_core::check::Violation) -> String {
 
 fn remember(root: &Path, hash: &str, report: &Report) -> Memory {
     let path = root.join(protocol::STATE_FILE);
-    let previous = protocol::parse_state(&std::fs::read_to_string(&path).unwrap_or_default());
+    let previous = protocol::parse_state(&arch_core::read_config(&path).unwrap_or_default());
 
     // Chỉ đếm những vi phạm còn tồn tại: sửa xong thì bộ đếm về không.
     let mut attempts = std::collections::BTreeMap::new();
@@ -363,11 +365,10 @@ fn remember(root: &Path, hash: &str, report: &Report) -> Memory {
     let _ = arch_core::write_atomic(&path, &protocol::render_state(&state));
 
     let (proposals, _) = protocol::parse_proposals(
-        &std::fs::read_to_string(root.join(protocol::PROPOSALS_FILE)).unwrap_or_default(),
+        &arch_core::read_config(&root.join(protocol::PROPOSALS_FILE)).unwrap_or_default(),
     );
     let baseline = arch_core::baseline::parse(
-        &std::fs::read_to_string(root.join(arch_core::baseline::BASELINE_FILE))
-            .unwrap_or_default(),
+        &arch_core::read_config(&root.join(arch_core::baseline::BASELINE_FILE)).unwrap_or_default(),
     );
     Memory {
         previous_hash: previous.arch_hash,
@@ -889,10 +890,10 @@ fn cmd_diff(args: &[String]) -> ExitCode {
         return ExitCode::from(exit::USAGE);
     };
 
-    let head_src = match std::fs::read_to_string(root.join(arch_core::ARCH_FILE)) {
-        Ok(s) => s,
-        Err(e) => {
-            crate::say_err!("archctl: không đọc được file luật: {e}");
+    let head_src = match arch_core::read_config(&root.join(arch_core::ARCH_FILE)) {
+        Some(s) => s,
+        None => {
+            crate::say_err!("archctl: không đọc được file luật: không có, không phải file thường, hay quá 4 MB");
             return ExitCode::from(exit::USAGE);
         }
     };
@@ -1374,7 +1375,7 @@ fn cmd_scan(args: &[String]) -> ExitCode {
     // `--plan`: dùng plan Terraform đã chứng nhận như `check` (lệnh ghi plan
     // lấy từ file luật). Không có cờ thì in đúng những gì bộ đọc HCL thấy.
     let plan_verifies = if with_plan {
-        let src = std::fs::read_to_string(root.join(arch_core::ARCH_FILE)).unwrap_or_default();
+        let src = arch_core::read_config(&root.join(arch_core::ARCH_FILE)).unwrap_or_default();
         let names = arch_core::check::deploy_options(&arch_core::load(&src).0).plan_verifies;
         if names.is_empty() {
             crate::say_err!(

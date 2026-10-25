@@ -28,6 +28,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Trần số chỗ gửi, nhận trong một file (TM-42).
 pub const MAX_PER_FILE: usize = 10_000;
+/// Tên topic, queue, kênh, mẫu dài hơn chừng này byte thì không ghép.
+pub const MAX_NAME_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum System {
@@ -185,6 +187,14 @@ pub fn scan(toks: &[Token], lang: Lang, imports: &[Import]) -> Queues {
                 out.cut = true;
                 return;
             }
+            // Tên thật ngắn; tên dài thành "không ghép được" thay vì đưa vào
+            // phép khớp glob tốn |mẫu|·|tên| (review claude-security F3).
+            let name = match name {
+                Name::Fixed(n) | Name::Pattern(n) | Name::Env(n) | Name::Task(n) if n.len() > MAX_NAME_BYTES => {
+                    Name::Dynamic(format!("(tên dài {} byte)", n.len()))
+                }
+                other => other,
+            };
             out.sites.push(Site { system, role, name, line, shown: shown.to_string() });
         }
     };
@@ -1883,7 +1893,16 @@ pub struct Index {
     tasks: Vec<(String, String)>,
     /// Quá [`MAX_PATTERNS`] mẫu: mẫu sau không xét, bên gọi báo ra.
     pub patterns_cut: bool,
+    /// Công việc khớp mẫu đã tiêu, tính theo |mẫu|·|tên| mỗi cặp: số cặp mẫu ×
+    /// tên gửi không có trần riêng, nên cả lần ghép có chung một ngân sách
+    /// (review opus của bản sửa F3).
+    work: std::cell::Cell<u64>,
+    /// Hết [`MAX_GLOB_WORK`]: tên gửi sau không được khớp với mẫu.
+    pub work_cut: std::cell::Cell<bool>,
 }
+
+/// Ngân sách khớp mẫu của cả lần ghép, đủ cho hàng nghìn mẫu và tên thật.
+pub const MAX_GLOB_WORK: u64 = 200_000_000;
 
 /// Mẫu `psubscribe` tối đa trong một lần ghép: mỗi tên bên gửi khớp với mọi
 /// mẫu (TM-42). Repo thật có vài chục.
@@ -1913,7 +1932,20 @@ impl Index {
     /// Chủ của mọi bên nhận khớp tên `name` của hệ `system`.
     pub fn targets(&self, system: System, name: &str) -> BTreeSet<String> {
         let mut out = self.fixed.get(&(system, name.to_string())).cloned().unwrap_or_default();
-        out.extend(self.patterns.iter().filter(|(s, p, _)| *s == system && pattern_matches(system, p, name)).map(|(_, _, c)| c.clone()));
+        for (s, p, owner) in &self.patterns {
+            if *s != system {
+                continue;
+            }
+            let cost = (p.len() as u64 + 1) * (name.len() as u64 + 1);
+            if self.work.get() + cost > MAX_GLOB_WORK {
+                self.work_cut.set(true);
+                break;
+            }
+            self.work.set(self.work.get() + cost);
+            if pattern_matches(system, p, name) {
+                out.insert(owner.clone());
+            }
+        }
         if system == System::Celery {
             // Bên gửi viết tên tính từ gốc package, đường dẫn file có thể dài
             // hơn (`src/shop/tasks.py`).
@@ -2023,6 +2055,32 @@ pub fn glob_prefix(pattern: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nhiều mẫu dài nhân nhiều tên gửi dài: cả lần ghép có chung ngân sách,
+    /// hết thì dừng và báo, không chạy hàng giờ (review opus của bản sửa F3).
+    #[test]
+    fn nhieu_mau_nhan_nhieu_ten_co_ngan_sach() {
+        let mut idx = Index::default();
+        for k in 0..1000 {
+            let site = Site { system: System::Redis, role: Role::Receive, name: Name::Pattern(format!("*{}{k}b", "a".repeat(1000))), line: 1, shown: String::new() };
+            idx.add(&site, "r.py", "R");
+        }
+        let t = crate::testclock::Clock::start();
+        for k in 0..1000 {
+            let _ = idx.targets(System::Redis, &format!("{}{k}", "a".repeat(1000)));
+        }
+        assert!(t.elapsed().as_secs() < 20, "{:?}", t.elapsed());
+        assert!(idx.work_cut.get());
+    }
+
+    #[test]
+    fn ten_dai_khong_dua_vao_glob() {
+        let long = "a".repeat(2_000_000);
+        let src = format!("import redis\nr = redis.Redis()\nr.psubscribe(\"*{long}b\")\nr.publish(\"{long}\", m)\n");
+        let toks = Lang::Python.tokens(&src);
+        let q = scan(&toks, Lang::Python, &Lang::Python.imports(&src));
+        assert!(q.sites.iter().all(|s| matches!(s.name, Name::Dynamic(_))), "{:?}", q.sites.iter().map(|s| &s.name).collect::<Vec<_>>().len());
+    }
 
     fn run(path: &str, src: &str) -> Vec<(System, Role, Name)> {
         let lang = Lang::for_path(path).unwrap();

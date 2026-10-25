@@ -153,7 +153,8 @@ def hosts_in(key, value, max_parts=MAX_PARTS, max_hosts=MAX_HOSTS):
     return out
 
 
-PLACEHOLDER = re.compile(r":(\x00|%[dsviu]|%\([^)]*\)[A-Za-z]|\{[A-Za-z0-9_]*\}|$|/(?!/)|/$)")
+# Tên trong chỗ trống tối đa 64 ký tự, như `PLACEHOLDER_MAX` của hosts.rs.
+PLACEHOLDER = re.compile(r":(\x00|%[dsviu]|%\([^)]{0,64}\)[A-Za-z]|\{[A-Za-z0-9_]{0,64}\}|$|/(?!/)|/$)")
 
 
 def normalize(text):
@@ -186,7 +187,8 @@ def normalize(text):
             authority, path = after[:end], after[end:]
             at = authority.rfind("@")
             user, hosts = (authority[:at + 1], authority[at + 1:]) if at >= 0 else ("", authority)
-            if "," not in hosts:
+            # Như `MAX_URL_HOSTS` của hosts.rs: quá 64 máy thì không tách.
+            if "," not in hosts or hosts.count(",") >= 64:
                 out.append(part)
                 continue
             for h in hosts.split(","):

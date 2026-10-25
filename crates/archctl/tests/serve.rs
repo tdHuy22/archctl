@@ -414,3 +414,14 @@ fn duong_dan_la_tra_ve_404() {
     let s = Server::start("notfound", 4741);
     assert!(s.get("/khong-co").contains("404"));
 }
+
+/// Một dòng header dài vô tận không làm server ăn bộ nhớ không giới hạn: dòng
+/// quá trần thì yêu cầu bị bỏ, server vẫn trả lời yêu cầu sau
+/// (claude-security F7).
+#[test]
+fn dong_header_qua_dai_bi_bo() {
+    let s = Server::start("longline", 4791);
+    let reply = s.raw(&format!("GET / HTTP/1.1\r\nX-Long: {}\r\n\r\n", "a".repeat(1 << 20)));
+    assert!(!reply.contains("200"), "{reply}");
+    assert!(s.get("/api/model").contains(r#""name":"Web""#), "server vẫn trả lời yêu cầu sau");
+}

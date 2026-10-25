@@ -828,7 +828,7 @@ impl Resolver {
         if let Some(found) = self.root_bindings.borrow().get(file) {
             return Rc::clone(found);
         }
-        let text = std::fs::read_to_string(self.root.join(file)).unwrap_or_default();
+        let text = crate::read_config(&self.root.join(file)).unwrap_or_default();
         let found = Rc::new(crate::scan::rust_bindings(crate::strip_bom(&text)));
         self.root_bindings.borrow_mut().insert(file.to_string(), Rc::clone(&found));
         found
@@ -1248,7 +1248,8 @@ fn collect_manifests(root: &Path, prefix: &str, depth: usize, out: &mut Vec<(Str
         if SKIP.contains(&name.as_str()) || name.starts_with('.') {
             continue;
         }
-        if entry.path().is_dir() {
+        // `file_type` không theo symlink: `x -> /` không được kéo việc đọc ra ngoài repo.
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
             let next = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
             collect_manifests(root, &next, depth + 1, out);
         }
@@ -1258,7 +1259,7 @@ fn collect_manifests(root: &Path, prefix: &str, depth: usize, out: &mut Vec<(Str
 /// `(loại, đường dẫn)` của mỗi target khai đường dẫn riêng trong `Cargo.toml`:
 /// `[lib]`, `[[bin]]`, `[[test]]`, `[[example]]`, `[[bench]]`.
 fn cargo_targets(manifest: &Path) -> Vec<(&'static str, String)> {
-    let Ok(text) = std::fs::read_to_string(manifest) else { return Vec::new() };
+    let Some(text) = crate::read_config(manifest) else { return Vec::new() };
     let mut kind = None;
     let mut out = Vec::new();
     for line in crate::strip_bom(&text).lines() {
@@ -1288,7 +1289,7 @@ fn cargo_targets(manifest: &Path) -> Vec<(&'static str, String)> {
 }
 
 fn package_name(manifest: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(manifest).ok()?;
+    let text = crate::read_config(manifest)?;
     let text = crate::strip_bom(&text);
     let mut in_package = false;
     for line in text.lines() {
@@ -1331,7 +1332,7 @@ fn find_npm_packages(root: &Path) -> Vec<(String, String)> {
         .filter(|dir| !dir.is_empty())
         .filter_map(|dir| {
             let path = root.join(dir).join("package.json");
-            let text = std::fs::read_to_string(path).ok()?;
+            let text = crate::read_config(&path)?;
             let name = jsonc::parse(&text)?.get("name")?.as_str()?.to_string();
             (!name.is_empty()).then_some((name, dir.clone()))
         })
@@ -1363,7 +1364,7 @@ fn read_ts_config(root: &Path, dir: &str) -> Option<TsConfig> {
         } else {
             format!("{current}/tsconfig.json")
         };
-        let Some(value) = std::fs::read_to_string(root.join(&path)).ok().and_then(|s| jsonc::parse(&s))
+        let Some(value) = crate::read_config(&root.join(&path)).and_then(|s| jsonc::parse(&s))
         else {
             break;
         };
@@ -1901,7 +1902,7 @@ fn find_go_modules(root: &Path) -> Vec<(String, String)> {
         .into_iter()
         .filter(|dir| !dir.split('/').any(|part| part == "testdata"))
         .filter_map(|dir| {
-            let text = std::fs::read_to_string(root.join(&dir).join("go.mod")).ok()?;
+            let text = crate::read_config(&root.join(&dir).join("go.mod"))?;
             let module = crate::strip_bom(&text)
                 .lines()
                 .map(str::trim)

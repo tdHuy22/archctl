@@ -386,7 +386,7 @@ mod tests {
             src.push_str(&format!("import a.b{i}.C;\nX{i} x{i};\n"));
         }
         src.push_str("import a.b.c.d.e.f");
-        let clock = std::time::Instant::now();
+        let clock = crate::testclock::Clock::start();
         let (imports, refs, cut) = extract(&crate::scan::Lang::Java.tokens(&src));
         assert_eq!((imports.len(), refs.len(), cut), (MAX_IMPORTS, MAX_REFS, true));
         assert!(clock.elapsed().as_secs() < 10);

@@ -70,7 +70,12 @@ fn root_from(args: &Args) -> Result<PathBuf, String> {
 }
 
 fn read(root: &Path, rel: &str) -> String {
-    std::fs::read_to_string(root.join(rel)).unwrap_or_default()
+    arch_core::read_config(&root.join(rel)).unwrap_or_default()
+}
+
+/// Như [`read`], cho file sắp ghi lại: không đọc được thì lỗi, không coi là rỗng.
+fn read_for_update(root: &Path, rel: &str) -> Result<String, String> {
+    arch_core::read_for_update(&root.join(rel))
 }
 
 fn write(root: &Path, rel: &str, body: &str) -> Result<(), String> {
@@ -125,7 +130,7 @@ fn validate_statement(root: &Path, statement: &str) -> Result<(), String> {
 }
 
 fn load_proposals(root: &Path) -> Result<Vec<Proposal>, String> {
-    let (proposals, diags) = proto::parse_proposals(&read(root, PROPOSALS_FILE));
+    let (proposals, diags) = proto::parse_proposals(&read_for_update(root, PROPOSALS_FILE)?);
     match diags.first() {
         Some(d) => Err(format!("`{PROPOSALS_FILE}` hỏng: {}", d.msg)),
         None => Ok(proposals),
@@ -250,6 +255,18 @@ pub fn cmd_decide(args: &[String], verdict: Verdict) -> ExitCode {
     let Some(pos) = proposals.iter().position(|p| p.id == id) else {
         return fail(&format!("không có đề xuất nào tên `{id}`"), exit::USAGE);
     };
+    // `proposals.arch` là file agent ghi: id phải đúng là id của nội dung,
+    // và chỉ một đề xuất mang id đó. Không thì lời duyệt cho câu người đã đọc
+    // đem đi duyệt một câu khác (claude-security F12).
+    if proposals.iter().filter(|p| p.id == id).count() > 1 {
+        return fail(&format!("có nhiều đề xuất cùng tên `{id}` trong {PROPOSALS_FILE}: không biết duyệt cái nào"), exit::USAGE);
+    }
+    if proto::proposal_id(proposals[pos].intent, &proposals[pos].statement) != id {
+        return fail(
+            &format!("đề xuất `{id}` không khớp nội dung của nó: {PROPOSALS_FILE} đã bị sửa sau khi đề xuất. Không duyệt."),
+            exit::USAGE,
+        );
+    }
     let proposal = proposals.remove(pos);
 
     if verdict == Verdict::Accepted && proposal.intent == Intent::Rule {
@@ -267,7 +284,10 @@ pub fn cmd_decide(args: &[String], verdict: Verdict) -> ExitCode {
                 exit::USAGE,
             );
         }
-        let mut law = read(&root, arch_core::ARCH_FILE);
+        let mut law = match read_for_update(&root, arch_core::ARCH_FILE) {
+            Ok(l) => l,
+            Err(e) => return fail(&e, exit::USAGE),
+        };
         if !law.ends_with('\n') {
             law.push('\n');
         }
@@ -292,7 +312,10 @@ pub fn cmd_decide(args: &[String], verdict: Verdict) -> ExitCode {
         by: whoami(&root),
         reason: reason.clone(),
     };
-    let mut log = read(&root, DECISIONS_FILE);
+    let mut log = match read_for_update(&root, DECISIONS_FILE) {
+        Ok(l) => l,
+        Err(e) => return fail(&e, exit::USAGE),
+    };
     if log.is_empty() {
         log.push_str(DECISIONS_HEADER);
     }

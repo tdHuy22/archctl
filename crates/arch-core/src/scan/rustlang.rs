@@ -145,15 +145,23 @@ fn from_file_module(path: &str, inline: &[&str]) -> String {
     out.join("::")
 }
 
+/// Độ lồng `{` tối đa của một cây `use`. Rust thật hiếm khi quá vài tầng; sâu
+/// hơn thì bỏ qua phần lồng thay vì đệ quy tới tràn stack (claude-security F4).
+const MAX_USE_DEPTH: usize = 64;
+
 /// Một cây `use` bắt đầu ở `i`, nối sau `prefix`. Trả về vị trí ngay sau cây.
-fn tree(toks: &[Token], mut i: usize, prefix: &str, out: &mut Vec<Leaf>) -> usize {
+fn tree(toks: &[Token], i: usize, prefix: &str, out: &mut Vec<Leaf>) -> usize {
+    tree_at(toks, i, prefix, out, 0)
+}
+
+fn tree_at(toks: &[Token], mut i: usize, prefix: &str, out: &mut Vec<Leaf>, depth: usize) -> usize {
     // `use ::std::io` — hai chấm dẫn đầu chỉ nói "crate ngoài".
     if is_punct(toks, i, ':') && is_punct(toks, i + 1, ':') {
         i += 2;
     }
     let Some(tok) = toks.get(i) else { return i };
     let word = match &tok.tok {
-        Tok::Punct('{') => return group(toks, i, prefix, out),
+        Tok::Punct('{') => return group(toks, i, prefix, out, depth + 1),
         Tok::Word(w) => w.as_str(),
         _ => return i + 1,
     };
@@ -167,7 +175,7 @@ fn tree(toks: &[Token], mut i: usize, prefix: &str, out: &mut Vec<Leaf>) -> usiz
 
     if is_punct(toks, i + 1, ':') && is_punct(toks, i + 2, ':') {
         match toks.get(i + 3).map(|t| &t.tok) {
-            Some(Tok::Punct('{')) => return group(toks, i + 3, &path, out),
+            Some(Tok::Punct('{')) => return group(toks, i + 3, &path, out, depth + 1),
             Some(Tok::Punct('*')) => {
                 out.push(Leaf { path, name: None, line, top: false });
                 return i + 4;
@@ -186,14 +194,32 @@ fn tree(toks: &[Token], mut i: usize, prefix: &str, out: &mut Vec<Leaf>) -> usiz
 }
 
 /// `{ a, b::{c, d}, e as f }` mở ở dấu `{` tại `open`.
-fn group(toks: &[Token], open: usize, prefix: &str, out: &mut Vec<Leaf>) -> usize {
+fn group(toks: &[Token], open: usize, prefix: &str, out: &mut Vec<Leaf>, depth: usize) -> usize {
     let mut i = open + 1;
+    if depth > MAX_USE_DEPTH {
+        // Nhảy tới `}` khớp, không đệ quy.
+        let mut level = 1usize;
+        while let Some(t) = toks.get(i) {
+            match t.tok {
+                Tok::Punct('{') => level += 1,
+                Tok::Punct('}') => {
+                    level -= 1;
+                    if level == 0 {
+                        return i + 1;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        return i;
+    }
     while let Some(t) = toks.get(i) {
         match &t.tok {
             Tok::Punct('}') => return i + 1,
             Tok::Punct(',') => i += 1,
             // Luôn tiến về phía trước, kể cả gặp token không hiểu.
-            _ => i = tree(toks, i, prefix, out).max(i + 1),
+            _ => i = tree_at(toks, i, prefix, out, depth).max(i + 1),
         }
     }
     i

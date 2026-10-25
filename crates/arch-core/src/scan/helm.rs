@@ -127,7 +127,21 @@ fn json_num(f: f64) -> String {
 /// Giá trị YAML → giá trị template. Vô hướng trần theo YAML 1.1 như
 /// `sigs.k8s.io/yaml` của Helm: `true`, `yes`, `on` là bool, số là số.
 pub fn from_yaml(n: Node<'_>, budget: &mut usize) -> V {
+    from_yaml_at(n, budget, 0)
+}
+
+/// Độ sâu tối đa của giá trị values. Alias cho một nút trỏ về nút có anchor,
+/// nên độ sâu logic không bị trần của parser YAML giới hạn; quá trần thì cạn
+/// ngân sách, file được báo chưa đọc được (claude-security F6, như
+/// `kustomize::MAX_TREE_DEPTH`).
+const MAX_VALUE_DEPTH: usize = 128;
+
+fn from_yaml_at(n: Node<'_>, budget: &mut usize, depth: usize) -> V {
     if *budget == 0 {
+        return V::Nil;
+    }
+    if depth > MAX_VALUE_DEPTH {
+        *budget = 0;
         return V::Nil;
     }
     *budget -= 1;
@@ -142,12 +156,12 @@ pub fn from_yaml(n: Node<'_>, budget: &mut usize) -> V {
                 | "FALSE" => "false",
                 k => k,
             };
-            m.insert(key.to_string(), from_yaml(v, budget));
+            m.insert(key.to_string(), from_yaml_at(v, budget, depth + 1));
         }
         return V::Map(Rc::new(m));
     }
     if n.is_seq() {
-        return V::List(Rc::new(n.items().map(|i| from_yaml(i, budget)).collect()));
+        return V::List(Rc::new(n.items().map(|i| from_yaml_at(i, budget, depth + 1)).collect()));
     }
     let Some(s) = n.as_str() else { return V::Nil };
     if !n.is_plain() {
@@ -1847,7 +1861,7 @@ fn load_yaml(
             if budget == 0 {
                 chart
                     .unread
-                    .push((path.to_string(), format!("quá {MAX_VALUES} giá trị")));
+                    .push((path.to_string(), format!("quá {MAX_VALUES} giá trị, hay lồng quá {MAX_VALUE_DEPTH} tầng")));
                 return None;
             }
             Some(if v == V::Nil { map(BTreeMap::new()) } else { v })
@@ -2060,6 +2074,28 @@ fn title_key(k: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Chuỗi alias nối nhau dựng giá trị sâu tuỳ ý trong vài dòng: không tràn
+    /// stack, ngân sách cạn để file được báo (claude-security F6).
+    #[test]
+    fn values_alias_long_sau_co_tran() {
+        let mut text = String::from("a0: &a0 [x]\n");
+        for i in 1..20_000 {
+            text.push_str(&format!("a{i}: &a{i} [*a{}]\n", i - 1));
+        }
+        let budget = std::thread::Builder::new()
+            .stack_size(512 << 10)
+            .spawn(move || {
+                let y = yaml::parse(&text).expect("đọc được");
+                let mut budget = MAX_VALUES;
+                let _ = y.documents().next().map(|n| from_yaml(n, &mut budget));
+                budget
+            })
+            .unwrap()
+            .join()
+            .expect("không tràn stack");
+        assert_eq!(budget, 0);
+    }
 
     fn chart(files: &[(&str, &str)]) -> Chart {
         let map: HashMap<String, String> = files

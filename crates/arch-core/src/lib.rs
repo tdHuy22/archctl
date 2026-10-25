@@ -107,10 +107,38 @@ pub fn find_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Một file cấu hình do repo kiểm soát (`Cargo.toml`, `go.mod`, `tsconfig.json`,
+/// `.archignore`…): chỉ file thường, không qua symlink, tối đa trần cỡ file
+/// của bộ quét. Git commit được symlink, nên `Cargo.toml -> /dev/zero` từng làm
+/// mọi lần `check` đọc mãi không dừng (claude-security F14).
+pub fn read_config(path: &Path) -> Option<String> {
+    use std::io::Read as _;
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_file() || meta.len() > check::MAX_FILE_BYTES {
+        return None;
+    }
+    let mut text = String::new();
+    std::fs::File::open(path).ok()?.take(check::MAX_FILE_BYTES + 1).read_to_string(&mut text).ok()?;
+    (text.len() as u64 <= check::MAX_FILE_BYTES).then_some(text)
+}
+
+/// Đọc một file sắp được ghi lại. Chưa có thì rỗng; có mà [`read_config`]
+/// không nhận (symlink, không phải file thường, quá cỡ) thì lỗi, để nơi gọi
+/// không ghi đè nội dung nó chưa đọc được (review opus: `system.arch` là
+/// symlink từng bị thay bằng file chỉ còn luật vừa duyệt).
+pub fn read_for_update(path: &Path) -> Result<String, String> {
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("không đọc được `{}`: {e}", path.display())),
+        Ok(_) => read_config(path).ok_or_else(|| {
+            format!("`{}` là symlink, không phải file thường hay quá 4 MB: không ghi đè", path.display())
+        }),
+    }
+}
+
 /// Mẫu glob trong `.arch/.archignore`. Thiếu file thì danh sách rỗng.
 pub fn read_ignores(root: &Path) -> Vec<String> {
-    let text = std::fs::read_to_string(root.join(IGNORE_FILE))
-        .unwrap_or_default();
+    let text = read_config(&root.join(IGNORE_FILE)).unwrap_or_default();
     strip_bom(&text)
         .lines()
         .map(str::trim)

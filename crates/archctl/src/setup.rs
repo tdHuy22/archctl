@@ -20,7 +20,12 @@ const ARCHITECTURE_MD: &str = include_str!("../../../templates/ARCHITECTURE.md")
 /// từ một câu trong tài liệu thành một ràng buộc. Không có nó, cả mô hình
 /// quyền chỉ là lời đề nghị: agent ghi thẳng `system.arch` là tự cho mình
 /// quyền, và ghi `.verified` là tự cấp cho mình một biên nhận. `proposals.arch`
-/// được chừa ra vì đó đúng là chỗ agent phải ghi.
+/// được chừa ra vì đó đúng là chỗ agent phải ghi. `.archignore` và baseline
+/// cũng bị chặn: ghi được chúng là tự miễn hay tự tha vi phạm. `accept`,
+/// `reject`, `baseline`, `init`, `serve` là lệnh của người (claude-security F13,
+/// F16): `serve` in khoá phiên ra stdout, và `/api/decide` gọi `accept` thay cho
+/// người. Luật Bash theo tiền tố vẫn lách được (`env archctl …`), nên CI và
+/// CODEOWNERS mới là chốt thật.
 const CLAUDE_SETTINGS: &str = r#"{
   "permissions": {
     "deny": [
@@ -28,10 +33,23 @@ const CLAUDE_SETTINGS: &str = r#"{
       "Edit(./.arch/system.arch)",
       "Write(./.arch/.verified)",
       "Edit(./.arch/.verified)",
-      "Write(./.arch/baseline.arch)",
-      "Edit(./.arch/baseline.arch)",
+      "Write(./.arch/baseline)",
+      "Edit(./.arch/baseline)",
+      "Write(./.arch/.archignore)",
+      "Edit(./.arch/.archignore)",
+      "Write(./.arch/decisions.md)",
+      "Edit(./.arch/decisions.md)",
+      "Write(./.arch/.state)",
+      "Edit(./.arch/.state)",
+      "Write(./.claude/settings.json)",
+      "Edit(./.claude/settings.json)",
       "Write(./.git/config)",
-      "Edit(./.git/config)"
+      "Edit(./.git/config)",
+      "Bash(archctl accept:*)",
+      "Bash(archctl reject:*)",
+      "Bash(archctl baseline:*)",
+      "Bash(archctl init:*)",
+      "Bash(archctl serve:*)"
     ]
   },
   "hooks": {
@@ -117,7 +135,20 @@ pub fn cmd_init(args: &[String]) -> ExitCode {
             );
         }
         report_discovery(&found);
-        discover::render(&found, &arch_core::protocol::today())
+        let draft = discover::render(&found, &arch_core::protocol::today());
+        // Lưới cuối (TM-76): bản nháp chỉ được có phần tử `@ai #draft`, không
+        // `verify` nào. Khác đi nghĩa là một tên trong repo đã chèn được câu.
+        let (doc, _) = arch_core::load(&draft);
+        let elements = doc.elements();
+        if !doc.verifies.is_empty()
+            || elements.iter().any(|e| e.owner != arch_core::Owner::Ai || e.status != arch_core::Status::Draft)
+        {
+            return fail(
+                "bản nháp sinh ra có câu không phải `@ai #draft`: một tên thư mục hay service trong repo chứa ký tự lạ. Không ghi gì.",
+                exit::USAGE,
+            );
+        }
+        draft
     } else {
         EMPTY_LAW.to_string()
     };
@@ -187,6 +218,9 @@ fn write_hook(root: &Path) -> Result<bool, String> {
 }
 
 fn report_discovery(found: &discover::Discovery) {
+    for name in &found.dropped {
+        crate::say!("⚠ BỎ QUA  `{name}`: tên có ký tự làm vỡ câu của file luật (xuống dòng, `\"`, `,`, hay đoạn mở đầu bằng `@`, `#`)");
+    }
     let langs: Vec<String> =
         found.by_lang.iter().map(|(l, n)| format!("{n} {}", l.name())).collect();
     let root = if found.source_root.is_empty() { "gốc repo" } else { &found.source_root };
@@ -216,10 +250,29 @@ fn report_discovery(found: &discover::Discovery) {
     crate::say!();
 }
 
+/// File mà `init` sửa ở gốc repo (`CLAUDE.md`, `AGENTS.md`, `.gitignore`):
+/// symlink trỏ tới file thường trong repo (`CLAUDE.md -> AGENTS.md`, quy ước phổ
+/// biến) thì sửa chính file đích, không thay symlink bằng một file mới. Trỏ ra
+/// ngoài repo thì không đụng.
+fn update_target(root: &Path, name: &str) -> Result<std::path::PathBuf, String> {
+    let path = root.join(name);
+    let is_link = std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
+    if !is_link {
+        return Ok(path);
+    }
+    let target = std::fs::canonicalize(&path).map_err(|e| format!("`{name}` là symlink hỏng: {e}"))?;
+    let inside = std::fs::canonicalize(root).is_ok_and(|r| target.starts_with(r));
+    if inside && target.is_file() {
+        Ok(target)
+    } else {
+        Err(format!("`{name}` là symlink trỏ ra ngoài repo hay không tới file thường: không sửa"))
+    }
+}
+
 /// Thêm một dòng trỏ về `.arch/ARCHITECTURE.md`. Trả `false` nếu đã có rồi.
 fn append_pointer(root: &Path, name: &str) -> Result<bool, String> {
-    let path = root.join(name);
-    let mut body = std::fs::read_to_string(&path).unwrap_or_default();
+    let path = update_target(root, name)?;
+    let mut body = arch_core::read_for_update(&path)?;
     if body.contains(".arch/ARCHITECTURE.md") {
         return Ok(false);
     }
@@ -238,8 +291,8 @@ fn append_pointer(root: &Path, name: &str) -> Result<bool, String> {
 }
 
 fn append_gitignore(root: &Path) -> Result<bool, String> {
-    let path = root.join(".gitignore");
-    let mut body = std::fs::read_to_string(&path).unwrap_or_default();
+    let path = update_target(root, ".gitignore")?;
+    let mut body = arch_core::read_for_update(&path)?;
     // `**/` chứ không neo vào gốc: monorepo có thể có nhiều `.arch/` lồng
     // trong các dự án con, và mẫu neo gốc bỏ sót hết chúng. Plan Terraform
     // chứa giá trị đã tính, có thể là mật khẩu (TM-58). Từng dòng thêm riêng:
@@ -272,7 +325,7 @@ pub fn cmd_export(args: &[String]) -> ExitCode {
         return fail(&format!("không tìm thấy `{ARCH_FILE}`"), exit::USAGE);
     };
 
-    let src = std::fs::read_to_string(root.join(ARCH_FILE)).unwrap_or_default();
+    let src = arch_core::read_config(&root.join(ARCH_FILE)).unwrap_or_default();
     let (doc, diags) = arch_core::load(&src);
     if let Some(d) = diags.iter().find(|d| d.severity == arch_core::Severity::Error) {
         return fail(&format!("`{ARCH_FILE}` có lỗi: {}", d.msg), exit::DSL_INVALID);
@@ -326,7 +379,7 @@ pub fn cmd_baseline(args: &[String]) -> ExitCode {
         return fail(&format!("không tìm thấy `{ARCH_FILE}`"), exit::USAGE);
     };
 
-    let src = std::fs::read_to_string(root.join(ARCH_FILE)).unwrap_or_default();
+    let src = arch_core::read_config(&root.join(ARCH_FILE)).unwrap_or_default();
     let (doc, diags) = arch_core::load(&src);
     if let Some(d) = diags.iter().find(|d| d.severity == arch_core::Severity::Error) {
         return fail(&format!("`{ARCH_FILE}` có lỗi: {}", d.msg), exit::DSL_INVALID);
@@ -335,9 +388,12 @@ pub fn cmd_baseline(args: &[String]) -> ExitCode {
     let ignores = arch_core::read_ignores(&root);
     let report = arch_core::check::check(&root, &doc, &ignores);
     let now: BTreeSet<String> = report.violations.iter().map(baseline::key).collect();
-    let existing = std::fs::read_to_string(root.join(BASELINE_FILE)).ok();
-    let first_run = existing.is_none();
-    let before = baseline::parse(existing.as_deref().unwrap_or_default());
+    let existing = match arch_core::read_for_update(&root.join(BASELINE_FILE)) {
+        Ok(text) => text,
+        Err(e) => return fail(&e, exit::USAGE),
+    };
+    let first_run = !root.join(BASELINE_FILE).exists();
+    let before = baseline::parse(&existing);
 
     let added = now.difference(&before).count();
     let removed = before.difference(&now).count();
@@ -382,7 +438,7 @@ pub fn cmd_verify(args: &[String]) -> ExitCode {
         crate::say_err!("archctl: không tìm thấy `{}`", arch_core::ARCH_FILE);
         return ExitCode::from(exit::USAGE);
     };
-    let Ok(src) = std::fs::read_to_string(root.join(arch_core::ARCH_FILE)) else {
+    let Some(src) = arch_core::read_config(&root.join(arch_core::ARCH_FILE)) else {
         crate::say_err!("archctl: không đọc được `{}`", arch_core::ARCH_FILE);
         return ExitCode::from(exit::USAGE);
     };
@@ -429,7 +485,10 @@ pub fn cmd_verify(args: &[String]) -> ExitCode {
 
     let hash = arch_core::arch_hash(&doc);
     let path = root.join(arch_core::verify::RECEIPTS_FILE);
-    let mut receipts = arch_core::verify::parse(&std::fs::read_to_string(&path).unwrap_or_default());
+    let mut receipts = match arch_core::read_for_update(&path) {
+        Ok(text) => arch_core::verify::parse(&text),
+        Err(e) => return fail(&e, exit::USAGE),
+    };
     let quiet = parsed.has("quiet");
     let mut failed = 0usize;
 
@@ -505,4 +564,27 @@ pub fn cmd_verify(args: &[String]) -> ExitCode {
     crate::say!("\n{}/{} đạt · biên nhận ghi vào {}", wanted.len() - failed, wanted.len(),
         arch_core::verify::RECEIPTS_FILE);
     ExitCode::from(if failed > 0 { exit::VIOLATION } else { exit::OK })
+}
+
+#[cfg(test)]
+mod tests {
+    /// Mọi file cho agent quyền tự cho mình qua đều nằm trong danh sách cấm,
+    /// theo đúng hằng đường dẫn (claude-security F13: từng lệch `baseline.arch`).
+    #[test]
+    fn danh_sach_cam_khop_hang_duong_dan() {
+        for file in [
+            arch_core::ARCH_FILE,
+            arch_core::IGNORE_FILE,
+            arch_core::baseline::BASELINE_FILE,
+            arch_core::verify::RECEIPTS_FILE,
+            arch_core::protocol::DECISIONS_FILE,
+            arch_core::protocol::STATE_FILE,
+        ] {
+            for tool in ["Write", "Edit"] {
+                let rule = format!("{tool}(./{file})");
+                assert!(super::CLAUDE_SETTINGS.contains(&rule), "thiếu {rule}");
+            }
+        }
+        assert!(!super::CLAUDE_SETTINGS.contains(arch_core::protocol::PROPOSALS_FILE), "agent phải ghi được đề xuất");
+    }
 }

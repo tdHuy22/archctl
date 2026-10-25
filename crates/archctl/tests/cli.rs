@@ -846,3 +846,55 @@ fn ky_tu_dieu_khien_khong_ra_terminal() {
     assert!(json.contains(r"\u001b[2K\rgone\u202e") && json.contains(r"\u0085\u009b2K\u007fz"), "{json}");
     assert!(!json.contains('?'), "{json}");
 }
+
+/// Agent sửa `proposals.arch` sau khi người đã đọc đề xuất: `accept` từ chối,
+/// vì id không còn khớp nội dung (claude-security F12).
+#[test]
+fn de_xuat_bi_sua_sau_khi_doc_thi_khong_duyet() {
+    let p = Project::new("swap");
+    p.run(&["propose", "allow Order -> Report", "--reason", "cần số liệu"]);
+    let id = p.id_of("ĐỀ XUẤT");
+    let file = p.0.join(".arch/proposals.arch");
+    let swapped = std::fs::read_to_string(&file).unwrap().replace("allow Order -> Report", "allow Report -> Order");
+    std::fs::write(&file, swapped).unwrap();
+    let out = p.run(&["accept", &id, "--reason", "ok"]);
+    assert_ne!(code(&out), 0, "{}", text(&out));
+    assert!(text(&out).contains("không khớp"), "{}", text(&out));
+    assert!(!p.read(".arch/system.arch").contains("Report -> Order"));
+}
+
+/// `CLAUDE.md -> AGENTS.md` (quy ước phổ biến): `init` sửa file đích, giữ
+/// symlink và nội dung cũ, không thay bằng một file chỉ có dòng trỏ
+/// (review opus của bản sửa F14).
+#[cfg(unix)]
+#[test]
+fn init_giu_symlink_claude_md() {
+    let p = Project::new("init-link");
+    std::fs::remove_dir_all(p.0.join(".arch")).unwrap();
+    std::fs::write(p.0.join("AGENTS.md"), "# Luật dự án\n\n- luôn chạy test\n").unwrap();
+    std::os::unix::fs::symlink("AGENTS.md", p.0.join("CLAUDE.md")).unwrap();
+    let out = p.run(&["init"]);
+    assert_eq!(code(&out), 0, "{}", text(&out));
+    assert!(std::fs::symlink_metadata(p.0.join("CLAUDE.md")).unwrap().file_type().is_symlink());
+    let agents = p.read("AGENTS.md");
+    assert!(agents.contains("luôn chạy test") && agents.contains(".arch/ARCHITECTURE.md"), "{agents}");
+}
+
+/// File luật là symlink: `accept` không ghi đè nó bằng một file chỉ còn luật
+/// vừa duyệt.
+#[cfg(unix)]
+#[test]
+fn accept_khong_ghi_de_file_luat_la_symlink() {
+    let p = Project::new("accept-link");
+    let law = p.read(".arch/system.arch");
+    std::fs::write(p.0.join("shared.arch"), &law).unwrap();
+    std::fs::remove_file(p.0.join(".arch/system.arch")).unwrap();
+    std::os::unix::fs::symlink("../shared.arch", p.0.join(".arch/system.arch")).unwrap();
+    let statement = "component X at x/**";
+    let id = arch_core::protocol::proposal_id(arch_core::protocol::Intent::Rule, statement);
+    std::fs::write(p.0.join(".arch/proposals.arch"), format!("proposal {id} @ai 2026-10-25\n  rule {statement}\n  reason thử\n")).unwrap();
+    let out = p.run(&["accept", &id, "--reason", "ok"]);
+    assert_ne!(code(&out), 0, "{}", text(&out));
+    assert!(std::fs::symlink_metadata(p.0.join(".arch/system.arch")).unwrap().file_type().is_symlink());
+    assert_eq!(p.read("shared.arch"), law);
+}

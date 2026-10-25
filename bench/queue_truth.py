@@ -26,8 +26,14 @@ PY_LIBS = {
 }
 
 
+MAX_NAME_BYTES = 1024
+
+
 def key(line, system, role, kind, name):
-    """Khoá so của `oracle.check_lines`: `(dòng, "kafka send fixed:orders")`."""
+    """Khoá so của `oracle.check_lines`: `(dòng, "kafka send fixed:orders")`.
+    Tên dài hơn `MAX_NAME_BYTES` là không cố định, như `queue.rs`."""
+    if kind != "dynamic" and len(name.encode()) > MAX_NAME_BYTES:
+        kind = "dynamic"
     return (line, f"{system} {role} {kind}:{name if kind != 'dynamic' else ''}")
 
 

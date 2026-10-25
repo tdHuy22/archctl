@@ -61,7 +61,11 @@ pub fn include_dirs(root: &Path) -> Vec<String> {
     let mut listing = crate::resolve::Listing::new();
     for (kind, path) in &configs {
         let base = dir_of(path);
-        let Ok(raw) = std::fs::read_to_string(root.join(path)) else { continue };
+        // `compile_commands.json` do build sinh có thể vài chục MB và đọc tuyến
+        // tính; Makefile, CMake thì 1 MiB. Quá trần thì bỏ cả file, không đọc
+        // bản bị cắt (review opus: JSON cắt dở mất hết `-I`).
+        let max = if *kind == Kind::CompileCommands { MAX_COMPILE_COMMANDS_BYTES } else { MAX_BUILD_BYTES };
+        let Some(raw) = read_capped(&root.join(path), max) else { continue };
         let src = crate::strip_bom(&raw);
         let raws = match kind {
             Kind::CompileCommands => from_compile_commands(src),
@@ -120,8 +124,10 @@ fn kind_of(name: &str) -> Option<Kind> {
 
 // ---- thư viện dùng chung ----
 
-/// Cỡ tối đa của một file build đọc để tìm thư viện dùng chung.
+/// Cỡ tối đa của một file build (Makefile, CMake, Cargo) được đọc.
 const MAX_BUILD_BYTES: u64 = 1 << 20;
+/// Cỡ tối đa của `compile_commands.json`.
+const MAX_COMPILE_COMMANDS_BYTES: u64 = 64 << 20;
 /// Số thư viện tối đa ghi nhận cho cả repo.
 const MAX_LIBRARIES: usize = 1024;
 
@@ -144,7 +150,7 @@ pub fn shared_libraries(root: &Path) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     for (kind, path) in &configs {
         let base = dir_of(path);
-        let Some(src) = read_capped(&root.join(path)) else { continue };
+        let Some(src) = read_capped(&root.join(path), MAX_BUILD_BYTES) else { continue };
         let src = crate::strip_bom(&src);
         let found: Vec<(String, String)> = match kind {
             Kind::Cmake => cmake_libraries(src, base)
@@ -173,15 +179,16 @@ pub fn shared_libraries(root: &Path) -> Vec<(String, String)> {
     out
 }
 
-fn read_capped(path: &Path) -> Option<String> {
+/// File thường tối đa `max` byte; lớn hơn thì `None`, không trả bản bị cắt.
+fn read_capped(path: &Path, max: u64) -> Option<String> {
     use std::io::Read as _;
     let file = std::fs::File::open(path).ok()?;
     if !file.metadata().ok()?.is_file() {
         return None;
     }
     let mut bytes = Vec::new();
-    file.take(MAX_BUILD_BYTES).read_to_end(&mut bytes).ok()?;
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    file.take(max + 1).read_to_end(&mut bytes).ok()?;
+    ((bytes.len() as u64) <= max).then(|| String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// `add_library(tên SHARED|MODULE nguồn…)`: tên và file nguồn đầu tiên.
@@ -512,8 +519,12 @@ fn from_make(src: &str, base: &str) -> Vec<(String, String)> {
             match vars.get_mut(name) {
                 // `+=` nối thêm; mọi dạng khác ghi đè.
                 Some(slot) if line.contains("+=") => {
-                    slot.push(' ');
-                    slot.push_str(&value);
+                    if slot.len() + value.len() < MAX_EXPANDED {
+                        slot.push(' ');
+                        slot.push_str(&value);
+                    } else {
+                        *slot = "$(?)".to_string();
+                    }
                 }
                 _ => {
                     vars.insert(name.to_string(), value);
@@ -553,6 +564,11 @@ fn expand(text: &str, vars: &HashMap<String, String>, rounds: usize) -> String {
     out
 }
 
+/// Cỡ tối đa của một giá trị Makefile đã mở rộng. `B=$(A)$(A)`, `C=$(B)$(B)`…
+/// nhân đôi giá trị mỗi dòng; quá trần thì coi như biến chưa biết (giữ `$`
+/// để nơi gọi bỏ nó) thay vì cấp phát tới cạn bộ nhớ (claude-security F5).
+const MAX_EXPANDED: usize = 16 << 10;
+
 fn expand_once(text: &str, vars: &HashMap<String, String>) -> String {
     let mut out = String::with_capacity(text.len());
     let cs: Vec<char> = text.chars().collect();
@@ -575,6 +591,7 @@ fn expand_once(text: &str, vars: &HashMap<String, String>) -> String {
         };
         let name: String = cs[i + 2..i + 2 + end].iter().collect();
         match vars.get(name.as_str()) {
+            Some(value) if out.len() + value.len() > MAX_EXPANDED => return format!("$({name})"),
             Some(value) => out.push_str(value),
             // Biến chưa biết: giữ nguyên để nơi gọi thấy `$` mà loại bỏ.
             None => out.extend(&cs[i..i + 3 + end]),
@@ -760,6 +777,17 @@ mod tests {
         assert_eq!(cargo_cdylib("[package]\nname = \"x\"\n[lib]\nname = \"y\"\n"), None);
         assert_eq!(cargo_cdylib("[package]\nname = \"x\"\n[lib]\ncrate-type = [\n  \"rlib\",\n  \"cdylib\",\n]\n").as_deref(), Some("x"));
         assert!(cmake_libraries("add_library(cudart SHARED IMPORTED)\nadd_library(a::b ALIAS a)\n", "").is_empty());
+        // Biến nhân mười mỗi dòng: không cấp phát tới cạn bộ nhớ, giá trị quá
+        // trần bị bỏ (claude-security F5).
+        let mut mk = String::from("A=x\n");
+        let mut prev = 'A';
+        for name in 'B'..='M' {
+            mk.push_str(&format!("{name}={}\n", format!("$({prev})").repeat(10)));
+            prev = name;
+        }
+        mk.push_str("CFLAGS=-I$(M)\nall:\n\tcc $(CFLAGS) -o libz.so x.c\n");
+        assert!(from_make(&mk, "").is_empty());
+        assert_eq!(make_libraries(&mk), ["libz.so"]);
         assert_eq!(crate::scan::foreign::library_key("build/libx.so.1").as_deref(), Some("lib:x"));
         assert_eq!(crate::scan::foreign::library_key("C:\\x\\foo.dll").as_deref(), Some("lib:foo"));
         assert_eq!(crate::scan::foreign::library_key("lib"), Some("lib:lib".to_string()));

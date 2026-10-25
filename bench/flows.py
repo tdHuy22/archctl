@@ -130,7 +130,7 @@ def run_flows(archctl: str, name: str, src: Path, work: Path) -> Flows:
         p = f.run("propose", stmt, "--reason", "thử giao thức", *R)
         f.check("propose", p.returncode in (0, 3), f"mã {p.returncode}: {p.stderr}")
         listing = f.run("proposals", *R).stdout
-        ids = re.findall(r"\b(p-[0-9a-f]{6})\b", listing)
+        ids = re.findall(r"\b(p-[0-9a-f]{6,16})\b", listing)
         f.check("proposals liệt kê được", bool(ids), listing)
         if ids:
             p = f.run("accept", ids[0], "--reason", "ok", *R)
@@ -139,7 +139,7 @@ def run_flows(archctl: str, name: str, src: Path, work: Path) -> Flows:
             f.check("quyết định vào nhật ký", "DUYỆT" in log and "ok" in log)
         p = f.run("block", "--on", f"deny * -> {names[0]}", "--reason", "bế tắc thử", *R)
         f.check("block", p.returncode in (0, 3), f"mã {p.returncode}: {p.stderr}")
-        ids = re.findall(r"\b(p-[0-9a-f]{6})\b", f.run("proposals", *R).stdout)
+        ids = re.findall(r"\b(p-[0-9a-f]{6,16})\b", f.run("proposals", *R).stdout)
         f.check("block hiện trong proposals", bool(ids))
         if ids:
             p = f.run("reject", ids[-1], "--reason", "không cần", *R)

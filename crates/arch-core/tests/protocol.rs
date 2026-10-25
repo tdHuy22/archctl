@@ -12,7 +12,7 @@ fn danh_tinh_de_xuat_chi_phu_thuoc_noi_dung() {
     assert_eq!(a, proposal_id(Intent::Rule, "allow   Order   ->   Cache"));
     assert_ne!(a, proposal_id(Intent::Rule, "allow Order -> Queue"));
     assert_ne!(a, proposal_id(Intent::Block, "allow Order -> Cache"));
-    assert_eq!(a.len(), 8, "dạng p- cộng sáu ký tự hex");
+    assert_eq!(a.len(), 18, "dạng p- cộng 16 ký tự hex (64 bit đầu của SHA-256)");
 }
 
 #[test]

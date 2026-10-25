@@ -204,11 +204,12 @@ fn bien_nhan_bi_sua_tay_thanh_rac_khong_lam_sap() {
 #[test]
 fn agent_ghi_thang_proposals_roi_accept_cung_khong_qua_duoc() {
     let p = Project::new("escalate", ARCH);
-    p.write(
-        ".arch/proposals.arch",
-        "proposal p-abc123 @ai 2026-10-03\n  rule verify evil runs \"touch /tmp/archctl-pwn\"\n  reason lách\n",
-    );
-    let o = p.run(&["accept", "p-abc123", "--reason", "duyệt vội"]);
+    // Id đúng của nội dung, để chạm tới phép chặn lệnh shell chứ không dừng ở
+    // phép đối chiếu id.
+    let statement = "verify evil runs \"touch /tmp/archctl-pwn\"";
+    let id = arch_core::protocol::proposal_id(arch_core::protocol::Intent::Rule, statement);
+    p.write(".arch/proposals.arch", &format!("proposal {id} @ai 2026-10-03\n  rule {statement}\n  reason lách\n"));
+    let o = p.run(&["accept", &id, "--reason", "duyệt vội"]);
     assert!(!o.status.success());
     let out = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
     assert!(out.contains("lệnh shell"), "{out}");
@@ -225,11 +226,12 @@ fn chan_theo_cu_phap_chu_khong_theo_chuoi() {
         "  verify evil runs \"touch /tmp/archctl-pwn\"",
         "allow Order -> Pay\nverify evil runs \"touch /tmp/archctl-pwn\"",
     ] {
-        p.write(
-            ".arch/proposals.arch",
-            &format!("proposal p-abc123 @ai 2026-10-03\n  rule {statement}\n  reason lách\n"),
-        );
-        assert!(!p.run(&["accept", "p-abc123", "--reason", "x"]).status.success(), "{statement}");
+        // Id đúng của nội dung file đọc được, để chạm phép chặn lệnh shell.
+        let text = format!("proposal p-0 @ai 2026-10-03\n  rule {statement}\n  reason lách\n");
+        let parsed = arch_core::protocol::parse_proposals(&text).0;
+        let id = parsed.first().map_or("p-0".to_string(), |x| arch_core::protocol::proposal_id(x.intent, &x.statement));
+        p.write(".arch/proposals.arch", &text.replace("p-0", &id));
+        assert!(!p.run(&["accept", &id, "--reason", "x"]).status.success(), "{statement}");
     }
     let law = std::fs::read_to_string(p.0.join(".arch/system.arch")).unwrap();
     assert!(!law.contains("evil"), "{law}");

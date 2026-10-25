@@ -213,3 +213,15 @@ fn thu_tu_khong_phu_thuoc_thu_tu_doc_thu_muc() {
     }
     assert_eq!(first, ["vendor/crypto/include", "spare"]);
 }
+
+/// `compile_commands.json` vài MB (`cmake -B build`) vẫn được đọc trọn, không
+/// bị cắt ở trần của Makefile rồi mất hết `-I` (review opus của bản sửa F5).
+#[test]
+fn compile_commands_lon_van_doc_duoc() {
+    let repo = Repo::new("cc-big");
+    let entry = r#"{"directory":".","command":"cc -Ivendor/crypto/include -c app/main.c","file":"app/main.c"}"#;
+    let body = format!("[{}]", vec![entry; 20_000].join(","));
+    assert!(body.len() > 1 << 20);
+    repo.write("build/compile_commands.json", &body);
+    assert!(arch_core::cbuild::include_dirs(&repo.0).contains(&"vendor/crypto/include".to_string()));
+}

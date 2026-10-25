@@ -716,3 +716,19 @@ fn java_khoi_khong_dong_khong_treo() {
     assert_eq!(words(&big).len(), 2);
     assert!(t.elapsed().as_secs() < 5);
 }
+
+/// `use` lồng `{` rất sâu không làm tràn stack, kể cả trên luồng stack nhỏ
+/// như luồng của `serve` (claude-security F4).
+#[test]
+fn rust_use_long_sau_khong_tran_stack() {
+    // Lồng đủ đóng, để `use` sau nó vẫn được đọc; không đóng thì phần sau là
+    // thân của cây đó, như rustc thấy.
+    let src = format!("use {}{};\nuse crate::a::{{b, c::{{d}}}};\nuse {};\n", "{".repeat(200_000), "}".repeat(200_000), "{".repeat(200_000));
+    let imports = std::thread::Builder::new()
+        .stack_size(256 << 10)
+        .spawn(move || Lang::Rust.imports(&src).into_iter().map(|i| i.spec).collect::<Vec<_>>())
+        .unwrap()
+        .join()
+        .expect("không tràn stack");
+    assert!(imports.iter().any(|s| s == "crate::a::c::d"), "{imports:?}");
+}

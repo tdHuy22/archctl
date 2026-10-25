@@ -143,10 +143,21 @@ fn same_origin(origin: &str, port: u16) -> bool {
         .any(|allowed| origin == allowed)
 }
 
+/// Một dòng của yêu cầu HTTP, tối đa `MAX_LINE` byte. `read_line` trần nối
+/// mãi tới khi gặp `\n`, nên một client bơm byte không xuống dòng làm cạn bộ
+/// nhớ trước cả bước kiểm khoá (claude-security F7). Dòng quá dài thì bỏ yêu cầu.
+const MAX_LINE: u64 = 8 << 10;
+
+fn read_line_capped(reader: &mut BufReader<TcpStream>, line: &mut String) -> Option<usize> {
+    use std::io::Read as _;
+    let n = reader.by_ref().take(MAX_LINE).read_line(line).ok()?;
+    (n as u64 != MAX_LINE || line.ends_with('\n')).then_some(n)
+}
+
 fn read_request(stream: &TcpStream) -> Option<Request> {
     let mut reader = BufReader::new(stream.try_clone().ok()?);
     let mut line = String::new();
-    reader.read_line(&mut line).ok()?;
+    read_line_capped(&mut reader, &mut line)?;
     let mut parts = line.split_whitespace();
     let method = parts.next()?.to_string();
     let path = parts.next()?.to_string();
@@ -156,7 +167,7 @@ fn read_request(stream: &TcpStream) -> Option<Request> {
     let mut key = String::new();
     for _ in 0..MAX_HEADERS {
         let mut header = String::new();
-        if reader.read_line(&mut header).ok()? == 0 || header.trim().is_empty() {
+        if read_line_capped(&mut reader, &mut header)? == 0 || header.trim().is_empty() {
             break;
         }
         let Some((name, value)) = header.split_once(':') else { continue };
@@ -330,7 +341,7 @@ fn fingerprint(root: &Path) -> u64 {
 // ---------- mô hình gửi cho giao diện ----------
 
 fn load(root: &Path) -> Option<(Document, Report, String)> {
-    let src = std::fs::read_to_string(root.join(ARCH_FILE)).ok()?;
+    let src = arch_core::read_config(&root.join(ARCH_FILE))?;
     let (doc, diags) = arch_core::load(&src);
     if arch_core::diag::has_errors(&diags) {
         return None;
@@ -343,7 +354,7 @@ fn load(root: &Path) -> Option<(Document, Report, String)> {
 
 fn model_json(root: &Path) -> String {
     let Some((doc, report, hash)) = load(root) else {
-        let src = std::fs::read_to_string(root.join(ARCH_FILE)).unwrap_or_default();
+        let src = arch_core::read_config(&root.join(ARCH_FILE)).unwrap_or_default();
         let messages: Vec<String> = arch_core::load(&src)
             .1
             .iter()
@@ -358,11 +369,11 @@ fn model_json(root: &Path) -> String {
     };
 
     let saved = layout::parse_saved(
-        &std::fs::read_to_string(root.join(LAYOUT_FILE)).unwrap_or_default(),
+        &arch_core::read_config(&root.join(LAYOUT_FILE)).unwrap_or_default(),
     );
     let places = layout::place(&doc, &saved);
     let baseline = arch_core::baseline::parse(
-        &std::fs::read_to_string(root.join(arch_core::baseline::BASELINE_FILE)).unwrap_or_default(),
+        &arch_core::read_config(&root.join(arch_core::baseline::BASELINE_FILE)).unwrap_or_default(),
     );
 
     let mut nodes = Vec::new();
@@ -559,7 +570,7 @@ fn model_json(root: &Path) -> String {
         .collect();
 
     let (proposals, _) = protocol::parse_proposals(
-        &std::fs::read_to_string(root.join(PROPOSALS_FILE)).unwrap_or_default(),
+        &arch_core::read_config(&root.join(PROPOSALS_FILE)).unwrap_or_default(),
     );
     let pending: Vec<String> = proposals
         .iter()
@@ -627,8 +638,7 @@ fn save_position(root: &Path, body: &str) -> Result<(), String> {
     let y: f64 = field(body, "y").ok_or("thiếu `y`")?.parse().map_err(|_| "y không phải số")?;
 
     let path = root.join(LAYOUT_FILE);
-    let mut saved =
-        layout::parse_saved(&std::fs::read_to_string(&path).unwrap_or_default());
+    let mut saved = layout::parse_saved(&arch_core::read_for_update(&path)?);
     saved.insert(name, Point { x, y });
     arch_core::write_atomic(&path, &layout::render_saved(&saved)).map_err(|e| e.to_string())
 }
@@ -648,7 +658,7 @@ fn set_status(root: &Path, body: &str) -> Result<(), String> {
     };
 
     let path = root.join(ARCH_FILE);
-    let src = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let src = arch_core::read_config(&path).ok_or("không đọc được file luật")?;
     let (doc, _) = arch_core::load(&src);
     // `svc:Api` là service Api; tên trần không bao giờ là service, kể cả khi
     // có `component Api` trùng tên.
