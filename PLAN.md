@@ -436,7 +436,11 @@ git, `cargo clean` dọn.
    MSRV, release, bộ đo (271 s), oracle khớp hết (885 s), sabotage 0 trượt
    (3060 s, máy bận vì bản build llama.cpp của project khác), `verify`,
    `check --strict` đạt; `cargo test` trượt một test đo thời gian lúc tải 85,
-   chạy lại đạt (24,5 s). Tiếp: commit, CI, tag `v0.1.1`, publish. Các mục dưới
+   chạy lại đạt (24,5 s). Commit `187bcaa`, CI main xanh 5/5 (run 40274444866),
+   tag `v0.1.1`, workflow phát hành đạt (run 40294672755), 8 file, bản
+   aarch64-apple-darwin khớp sha256 và in `archctl 0.1.1`; đã publish (Latest):
+   https://github.com/tdHuy22/archctl/releases/tag/v0.1.1. Mốc "Hoàn thiện
+   trước khi phát hành" xong hết; chưa có việc mới. Các mục dưới
    là lịch sử cũ.
 
 1. `c5ae95d`..`82b069a` đã lên `main` (2026-10-15) sau CI xanh 5/5 trên `thu/dot4`
