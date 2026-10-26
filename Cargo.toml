@@ -3,7 +3,7 @@ members = ["crates/arch-core", "crates/archctl"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 # Mã dùng let-chain (`if let ... && ...`), ổn định ở 1.88 cho edition
 # 2024. Job `msrv` trong CI biên dịch lại bằng đúng con số này, vì khai

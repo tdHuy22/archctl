@@ -410,6 +410,8 @@ def within(base, rel):
             if not parts:
                 return None
             parts.pop()
+        elif len(seg) >= 2 and seg[0].isascii() and seg[0].isalpha() and seg[1] == ":":
+            return None  # tiền tố ổ đĩa, như `plain_segment` của deploy.rs
         else:
             parts.append(seg)
     return "/".join(parts)

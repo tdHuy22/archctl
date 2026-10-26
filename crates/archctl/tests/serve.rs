@@ -300,8 +300,8 @@ fn content_length_bia_khong_giet_may_chu() {
     let s = Server::start("hugebody", 4745);
     // `vec![0u8; usize::MAX]`: cấp phát hỏng thì Rust kết thúc cả tiến trình,
     // nên một yêu cầu dị dạng từng đủ để giết máy chủ.
-    s.raw("POST /api/layout HTTP/1.1\r\nHost: x\r\nContent-Length: 18446744073709551615\r\n\r\n");
-    s.raw("POST /api/layout HTTP/1.1\r\nHost: x\r\nContent-Length: 99999999\r\n\r\n");
+    s.raw("POST /api/layout HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 18446744073709551615\r\n\r\n");
+    s.raw("POST /api/layout HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 99999999\r\n\r\n");
     assert!(s.get("/api/model").contains("200 OK"), "máy chủ phải còn sống");
 }
 
@@ -314,7 +314,7 @@ fn post_tu_trang_web_khac_bi_tu_choi() {
     let before = s.law();
     let body = r##"{"name":"Report","status":"#locked"}"##;
     let reply = s.raw(&format!(
-        "POST /api/status HTTP/1.1\r\nHost: x\r\nOrigin: https://evil.example\r\n\
+        "POST /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://evil.example\r\n\
          X-Archctl-Key: {}\r\nContent-Length: {}\r\n\r\n{body}",
         s.key,
         body.len()
@@ -328,7 +328,7 @@ fn post_tu_chinh_giao_dien_van_di_qua() {
     let s = Server::start("csrf-ok", 4747);
     let body = r##"{"name":"Report","status":"#locked"}"##;
     let reply = s.raw(&format!(
-        "POST /api/status HTTP/1.1\r\nHost: x\r\nOrigin: http://127.0.0.1:4747\r\n\
+        "POST /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1:4747\r\n\
          X-Archctl-Key: {}\r\nContent-Length: {}\r\n\r\n{body}",
         s.key,
         body.len()
@@ -345,7 +345,7 @@ fn post_tu_chinh_giao_dien_van_di_qua() {
 fn so_do_van_duoc_bao_khi_ma_doi_sau_mot_luc_im_lang() {
     let s = Server::start("events", 4748);
     let mut stream = TcpStream::connect(("127.0.0.1", s.port)).expect("kết nối được");
-    stream.write_all(b"GET /api/events HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    stream.write_all(format!("GET /api/events?k={} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", s.key).as_bytes()).unwrap();
     stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
     let mut head = [0u8; 256];
     assert!(stream.read(&mut head).expect("nhận được tiêu đề") > 0);
@@ -369,7 +369,7 @@ fn khong_ai_mo_so_do_thi_van_phuc_vu_duoc_client_moi() {
     std::thread::sleep(std::time::Duration::from_secs(3));
 
     let mut stream = TcpStream::connect(("127.0.0.1", s.port)).expect("kết nối được");
-    stream.write_all(b"GET /api/events HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    stream.write_all(format!("GET /api/events?k={} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", s.key).as_bytes()).unwrap();
     stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
     let mut head = [0u8; 256];
     assert!(stream.read(&mut head).unwrap() > 0);
@@ -391,7 +391,7 @@ fn khong_co_khoa_phien_thi_khong_ghi_duoc_gi() {
     let body = r##"{"name":"Report","status":"#locked"}"##;
     let reply = s.raw(&format!(
         "POST /api/status HTTP/1.1
-Host: x
+Host: 127.0.0.1
 Content-Length: {}
 
 {body}",
@@ -424,4 +424,32 @@ fn dong_header_qua_dai_bi_bo() {
     let reply = s.raw(&format!("GET / HTTP/1.1\r\nX-Long: {}\r\n\r\n", "a".repeat(1 << 20)));
     assert!(!reply.contains("200"), "{reply}");
     assert!(s.get("/api/model").contains(r#""name":"Web""#), "server vẫn trả lời yêu cầu sau");
+}
+
+/// Trang web DNS-rebind tên máy của nó về 127.0.0.1 thì trình duyệt coi là
+/// cùng nguồn, nhưng `Host` vẫn là tên của trang đó (claude-security F11).
+#[test]
+fn host_la_bi_tu_choi() {
+    let s = Server::start("rebind", 4792);
+    let reply = s.raw(&format!(
+        "GET /api/model HTTP/1.1\r\nHost: evil.example:4792\r\nX-Archctl-Key: {}\r\n\r\n",
+        s.key
+    ));
+    assert!(reply.contains("421"), "{reply}");
+    assert!(s.raw("GET / HTTP/1.1\r\n\r\n").contains("421"), "thiếu Host cũng bị từ chối");
+    let ok = s.raw("GET / HTTP/1.1\r\nHost: 127.0.0.1:4792\r\n\r\n");
+    assert!(ok.contains("200 OK"), "{ok}");
+}
+
+/// Đọc mô hình cũng cần khoá: nó có glob đường dẫn, chỗ vi phạm và đề xuất
+/// đang chờ (claude-security F11).
+#[test]
+fn doc_mo_hinh_can_khoa_phien() {
+    let s = Server::start("readkey", 4793);
+    let model = s.raw("GET /api/model HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+    assert!(model.contains("403"), "{model}");
+    let events = s.raw("GET /api/events?k=sai HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+    assert!(events.contains("403"), "{events}");
+    let ok = s.raw(&format!("GET /api/model?k={} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", s.key));
+    assert!(ok.contains("200 OK"), "{ok}");
 }

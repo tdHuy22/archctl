@@ -128,7 +128,8 @@ diện này gửi tới".
 | Tiêu đề vô tận | tối đa 64 dòng |
 | Kết nối mở rồi im lặng | hết hạn sau 15 giây, không giữ luồng mãi |
 | `POST` kèm `Origin` lạ | 403 |
-| `POST` không có khoá phiên | 403 |
+| `/api/` không có khoá phiên, kể cả `GET` | 403 |
+| `Host` không phải `127.0.0.1`, `localhost` hay `[::1]` (kèm hay không kèm cổng) | 421 |
 
 Chỗ cuối đáng nói nhất. Trang web bất kỳ mà người dùng đang mở vẫn `fetch` tới
 `127.0.0.1` được: `POST` dạng đơn giản không cần hỏi trước. Kẻ gửi không đọc
@@ -155,7 +156,13 @@ archctl serve · http://127.0.0.1:4000/?k=f93986017075681d53133f31f37c8b95
 
 Khoá chỉ đi ra màn hình của người dùng. Nó không vào file, không vào `argv`
 nên `ps` không thấy, và không sống qua lần chạy sau. Giao diện đọc nó từ địa
-chỉ rồi gửi kèm mọi thao tác ghi.
+chỉ rồi gửi kèm mọi yêu cầu `/api/`: header `X-Archctl-Key`, hay `?k=` cho
+luồng sự kiện vì `EventSource` không đặt được header.
+
+Đọc cũng cần khoá: mô hình có glob đường dẫn, chỗ vi phạm và đề xuất đang chờ.
+Một trang web DNS-rebind tên máy của nó về `127.0.0.1` thì trình duyệt coi là
+cùng nguồn và đọc được trả lời, nhưng header `Host` vẫn là tên của trang đó,
+nên máy chủ từ chối mọi `Host` không phải chính máy này.
 
 ## Luồng theo dõi không được ngốn CPU khi ngồi yên
 

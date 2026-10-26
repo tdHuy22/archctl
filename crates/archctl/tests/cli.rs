@@ -898,3 +898,45 @@ fn accept_khong_ghi_de_file_luat_la_symlink() {
     assert!(std::fs::symlink_metadata(p.0.join(".arch/system.arch")).unwrap().file_type().is_symlink());
     assert_eq!(p.read("shared.arch"), law);
 }
+
+/// Người dùng khác trên máy đặt file luật ở thư mục ai cũng ghi được (như
+/// `/tmp`): `verify` chạy ở thư mục con không được nhận nó làm gốc rồi chạy
+/// lệnh trong đó (claude-security F15).
+#[cfg(unix)]
+#[test]
+fn khong_nhan_file_luat_o_thu_muc_ai_cung_ghi_duoc() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let p = Project::new("world-writable");
+    std::fs::write(p.0.join(".arch/system.arch"), "verify t runs \"touch pwned\"\n").unwrap();
+    std::fs::set_permissions(&p.0, std::fs::Permissions::from_mode(0o777)).unwrap();
+    std::fs::create_dir_all(p.0.join("work")).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_archctl"))
+        .arg("verify")
+        .current_dir(p.0.join("work"))
+        .output()
+        .unwrap();
+    assert_ne!(code(&out), 0, "{}", text(&out));
+    assert!(!p.0.join("pwned").exists() && !p.0.join("work/pwned").exists(), "lệnh trong file luật đã chạy");
+    // Người dùng tự chỉ gốc thì đó là lựa chọn của họ (WSL `/mnt/c` hiện mọi
+    // thứ là 0777).
+    std::fs::write(p.0.join(".arch/system.arch"), ARCH).unwrap();
+    let explicit = p.run(&["check"]);
+    assert_ne!(code(&explicit), 64, "{}", text(&explicit));
+}
+
+/// Không đi lên quá gốc repo git: file luật của thư mục cha không phải luật
+/// của repo con.
+#[test]
+fn khong_tim_goc_qua_ranh_gioi_git() {
+    let p = Project::new("git-boundary");
+    std::fs::create_dir_all(p.0.join("child/.git")).unwrap();
+    std::fs::create_dir_all(p.0.join("child/src")).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_archctl"))
+        .arg("check")
+        .current_dir(p.0.join("child/src"))
+        .output()
+        .unwrap();
+    assert_eq!(code(&out), 64, "{}", text(&out));
+    let inside = Command::new(env!("CARGO_BIN_EXE_archctl")).arg("check").current_dir(p.0.join("src/web")).output().unwrap();
+    assert_ne!(code(&inside), 64, "trong cùng repo vẫn tìm được gốc: {}", text(&inside));
+}

@@ -515,6 +515,11 @@ def drop_crossings_from_law(args: list[str], table: str = "CROSSINGS"):
 
 
 def act_as_archctl(real: str, mode: str, args: list[str]) -> int:
+    if args[:1] == ["serve"]:
+        # `serve` chạy mãi: chờ nó thoát để chép đầu ra thì người gọi không bao
+        # giờ thấy dòng in khoá phiên, còn kill chỉ giết lớp bọc này và bỏ sót
+        # máy chủ thật. Không kiểu phá nào đụng `serve`, nên nhường hẳn chỗ.
+        os.execv(real, [real, *args])
     p = subprocess.run([real, *args], capture_output=True, text=True)
     out = p.stdout
     if mode == "crossing" and args[:1] == ["init"] and p.returncode == 0:

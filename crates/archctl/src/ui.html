@@ -195,7 +195,7 @@ async function post(path, body) {
 }
 
 async function refresh() {
-  const res = await fetch("/api/model");
+  const res = await fetch("/api/model", { headers: { "X-Archctl-Key": sessionKey } });
   const next = await res.json();
   if (next.error) { showFault(next); return; }
   model = next;
@@ -632,7 +632,7 @@ function renderProposals() {
 
 // ---------- cập nhật trực tiếp ----------
 
-new EventSource("/api/events").onmessage = refresh;
+new EventSource("/api/events?k=" + encodeURIComponent(sessionKey)).onmessage = refresh;
 addEventListener("resize", () => {
   // Cửa sổ đổi kích thước mà người chưa đụng vào thì canh lại cho vừa.
   if (!userMoved) fitToView();

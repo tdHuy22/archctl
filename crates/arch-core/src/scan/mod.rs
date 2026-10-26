@@ -129,6 +129,8 @@ impl Lang {
                 char_literals: CharLit::AsString,
                 regex_literals: true,
                 backtick: Backtick::Template,
+                cr_line_breaks: true,
+                unicode_line_breaks: true,
                 ..LexConfig::base()
             },
             Lang::Python => LexConfig {
@@ -138,12 +140,14 @@ impl Lang {
                 char_literals: CharLit::AsString,
                 path_separator: Some("."),
                 fstrings: true,
+                cr_line_breaks: true,
                 ..LexConfig::base()
             },
             Lang::C => LexConfig {
                 preprocessor_includes: true,
                 digit_separators: true,
                 cpp_raw_strings: true,
+                cr_line_breaks: true,
                 ..LexConfig::base()
             },
             Lang::Rust => LexConfig {
@@ -167,6 +171,7 @@ impl Lang {
                 triple_quoted: true,
                 path_separator: Some("."),
                 digit_separators: true,
+                cr_line_breaks: true,
                 ..LexConfig::base()
             },
         }

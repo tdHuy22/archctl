@@ -337,10 +337,21 @@ fn last_seg(w: &str) -> &str {
     w.rsplit('.').next().unwrap_or(w)
 }
 
-/// Độ thụt của mỗi dòng (đếm từ 1); tab nhảy tới bội của 8 như Python.
+/// Độ thụt của mỗi dòng (đếm từ 1); tab nhảy tới bội của 8 như Python. Tách
+/// dòng như lexer của Python: CR đứng riêng cũng là hết dòng, không thì số dòng
+/// của token lệch khỏi dòng ở đây.
 fn indents(src: &str) -> Vec<usize> {
+    let bytes = src.as_bytes();
     let mut out = vec![0];
-    for line in src.split('\n') {
+    let mut starts = vec![0];
+    for (k, &b) in bytes.iter().enumerate() {
+        if b == b'\n' || super::lexer::is_lone_cr(bytes, k) {
+            starts.push(k + 1);
+        }
+    }
+    starts.push(bytes.len() + 1);
+    for w in starts.windows(2) {
+        let line = &src[w[0]..w[1] - 1];
         let mut n = 0;
         for c in line.chars() {
             match c {
@@ -1943,6 +1954,12 @@ pub fn dvc_edges(stages: &[Stage]) -> (Vec<DataEdge>, bool) {
 
 #[cfg(test)]
 mod tests {
+    /// CR đứng riêng là hết dòng như lexer Python; CRLF là một dòng.
+    #[test]
+    fn indents_tach_dong_nhu_lexer() {
+        assert_eq!(super::indents("a\n  b\r    c\r\n d"), [0, 0, 2, 4, 1]);
+    }
+
     use super::*;
     use crate::scan::Lang;
 

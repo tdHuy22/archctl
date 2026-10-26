@@ -10,6 +10,7 @@ import shutil
 import sys
 import socket
 import subprocess
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -185,14 +186,26 @@ def run_flows(archctl: str, name: str, src: Path, work: Path) -> Flows:
     port = _free_port()
     proc = subprocess.Popen(
         [archctl, "serve", "--port", str(port), *R],
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
+        text=True,
     )
     try:
+        # Mọi `/api/` cần khoá phiên, và khoá chỉ in ra ở dòng đầu. Đọc ở luồng
+        # riêng có hạn giờ: không có dòng đó thì báo trượt, không treo cả bộ đo.
+        first = []
+        reader = threading.Thread(target=lambda: first.append(proc.stdout.readline()), daemon=True)
+        reader.start()
+        reader.join(30)
+        key = (first[0] if first else "").partition("?k=")[2].split()[0:1]
+        key = key[0] if key else ""
+        f.check("serve in khoá phiên", bool(key))
         model = None
         for _ in range(100):
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/model", timeout=3) as r:
+                req = urllib.request.Request(f"http://127.0.0.1:{port}/api/model",
+                                             headers={"X-Archctl-Key": key})
+                with urllib.request.urlopen(req, timeout=3) as r:
                     model = json.loads(r.read())
                 break
             except Exception:

@@ -52,7 +52,7 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
             --title "archctl $GITHUB_REF_NAME" \
-            --notes "Binary cho Linux, macOS, Windows. Kiểm tải về bằng file .sha256 đi kèm (xem README, mục Cài đặt)."
+            --notes "Binary cho Linux và macOS (x86_64, aarch64). Kiểm tải về bằng file .sha256 đi kèm (xem README, mục Cài đặt). Chưa có bản dựng sẵn cho Windows."
 
   dung:
     name: dựng ${{ matrix.target }}

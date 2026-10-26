@@ -414,6 +414,31 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
+0. (2026-10-26, mới nhất) `f64db05` lên main, CI xanh 5/5 (run 40216471324); tag
+   `v0.1.0` đã đẩy, workflow phát hành đạt (run 40220394214), bản nháp đủ 8 file,
+   bản aarch64-apple-darwin tải về khớp sha256 và in `archctl 0.1.0`. Việc tiếp:
+   bản phát hành đã công bố (Latest, 8 file). Việc 17.1 ĐANG DỞ, CHƯA COMMIT
+   (2026-10-26): đã sửa F8/F10 (`arch_hash` SHA-256 128 bit, `diff` không trả
+   sớm), F9 (CR, LS/PS trong lexer), F11 (`Host`, khoá cho mọi `/api/`), F15
+   (`find_root` dừng ở `.git`, bỏ thư mục ai cũng ghi được), F18 (tiền tố ổ đĩa),
+   test mới đạt, TM-81..85 ghi trong threat model. Review opus vòng 1: 3 vừa,
+   3 thấp (LS trong chuỗi JS, lệch dòng `pipeline::indents`, `--root` trên thư
+   mục 0777, CR áp cho Go/Rust, notebook `%time\r`, thiếu kiểm chủ sở hữu) — đã
+   sửa, test mới đạt, clippy sạch; reviewer kiểm lại: cả 6 đã đóng. logs-r5:
+   test, clippy, MSRV, release, bộ đo đạt; oracle hết hạn 1800 s (trước 594 s,
+   đang chạy riêng để tìm chỗ chậm); sabotage treo vì lớp bọc `--as-archctl`
+   giữ đầu ra của `serve` (đã sửa: `execv` cho `serve`, `flows.py` hạn 30 s đọc
+   khoá). Ghi chú root/0777 thêm vào `docs/verify.md`. Bạn đã chốt: xong thì
+   phát hành 0.1.1 luôn (ghi chú v0.1.0 đã sửa bỏ chữ Windows). Oracle chạy riêng
+   khớp hết (863 s; lần hết hạn trước do máy bị chiếm bởi `serve` bị bỏ sót, đã
+   dọn). Đã nâng 0.1.1 (`Cargo.toml`, `Cargo.lock` chỉ đổi số bản, README, ghi
+   chú phát hành trong `release.yml`), tick 17.1. logs-r6 trên mã 0.1.1: clippy,
+   MSRV, release, bộ đo (271 s), oracle khớp hết (885 s), sabotage 0 trượt
+   (3060 s, máy bận vì bản build llama.cpp của project khác), `verify`,
+   `check --strict` đạt; `cargo test` trượt một test đo thời gian lúc tải 85,
+   chạy lại đạt (24,5 s). Tiếp: commit, CI, tag `v0.1.1`, publish. Các mục dưới
+   là lịch sử cũ.
+
 1. `c5ae95d`..`82b069a` đã lên `main` (2026-10-15) sau CI xanh 5/5 trên `thu/dot4`
    (run 38760676354); `82b069a` nâng trần job "repo thật" lên 40 phút vì run trước
    bị huỷ ở bước đối chiếu. Nhánh thử đã xoá.
@@ -896,5 +921,5 @@ Bạn chốt 2026-10-24: "làm hết đi rồi mới phát hành, bỏ việc 5 
 - [x] `ctypes`/`cffi` của Python với tên thư viện viết thẳng (`ctypes.CDLL("libfoo.so")`, `cdll.LoadLibrary`, `ffi.dlopen`): ghép với thư viện C build trong repo; tên không cố định thì báo; threat model; test; thước đo `ast`. (2026-10-24, chưa commit: TM-74; `cbuild::shared_libraries` đọc CMake, Makefile, Cargo; `bench/ffi_truth.py` khớp bộ mẫu `fixtures/ctypes`, vllm, apex.)
 - [x] Tên máy viết trong chuỗi Java (`"http://payment:80"`): bật `hosts::scan` cho Java; thước đo tree-sitter-java. (2026-10-24, chưa commit: TM-73; `java_truth.py` `literals`; bộ mẫu `fixtures/java-grpc/hosts` 19 tên máy và guice 7 khớp; test `hosts.rs`.)
 - [x] Sửa phát hiện audit claude-security trước phát hành (báo cáo `CLAUDE-SECURITY-20261025-043313/`): 6 MEDIUM (F1–F6) và LOW rẻ (F7, F12, F13, F14, F16, F17); LOW còn lại (F8–F11, F15, F18) quyết sau. (2026-10-25, chưa commit: TM-76..80; mỗi phát hiện có test.)
-- [ ] LOW còn lại của audit: F8, F10 (SHA-256 cho dấu vân tay, `diff` không trả sớm theo hash), F9 (CR đứng riêng), F11 (kiểm `Host`, khoá cho GET), F15 (`find_root` dừng ở ranh giới tin cậy), F18 (Windows).
-- [ ] @ban Phát hành: tag phiên bản, workflow build binary macOS, Linux, Windows kèm SHA-256 (không action bên thứ ba), hướng dẫn cài trong README; hỏi bạn số phiên bản và có tạo GitHub Release công khai không.
+- [x] LOW còn lại của audit (2026-10-26, sửa và review opus hai vòng): F8, F10 (SHA-256 cho dấu vân tay, `diff` không trả sớm theo hash), F9 (CR đứng riêng), F11 (kiểm `Host`, khoá cho GET), F15 (`find_root` dừng ở ranh giới tin cậy), F18 (Windows).
+- [x] @ban Phát hành (v0.1.0 công bố 2026-10-26, https://github.com/tdHuy22/archctl/releases/tag/v0.1.0): tag phiên bản, workflow build binary macOS, Linux, Windows kèm SHA-256 (không action bên thứ ba), hướng dẫn cài trong README; hỏi bạn số phiên bản và có tạo GitHub Release công khai không.

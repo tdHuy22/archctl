@@ -175,6 +175,9 @@ fn code_lines(source: Option<&Json>) -> Vec<(usize, String)> {
     // Dòng mã cuối chưa có `\n`: chuỗi kế tiếp viết tiếp vào nó.
     let mut open = false;
     for (piece, line) in pieces {
+        // IPython tách dòng bằng `splitlines`: CR đứng riêng cũng là hết dòng,
+        // nên `%time\rimport x` chạy import (claude-security F9).
+        let piece = piece.replace("\r\n", "\n").replace('\r', "\n");
         for (k, segment) in piece.split_inclusive('\n').enumerate() {
             let text = segment.strip_suffix('\n').unwrap_or(segment);
             match out.last_mut() {

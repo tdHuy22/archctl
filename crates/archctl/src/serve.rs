@@ -119,7 +119,30 @@ struct Request {
     origin: String,
     /// Khoá phiên, từ header `X-Archctl-Key`.
     key: String,
+    /// Header `Host`.
+    host: String,
     body: String,
+}
+
+/// `Host` phải gọi đúng máy này. Một trang web DNS-rebind tên máy của nó về
+/// `127.0.0.1` thì trình duyệt coi là cùng nguồn, nhưng `Host` vẫn là tên của
+/// trang đó (claude-security F11).
+fn local_host(host: &str, port: u16) -> bool {
+    ["127.0.0.1", "localhost", "[::1]"]
+        .iter()
+        .any(|name| host.eq_ignore_ascii_case(name) || host.eq_ignore_ascii_case(&format!("{name}:{port}")))
+}
+
+/// Khoá phiên của yêu cầu: header `X-Archctl-Key`, hay `k=` trong địa chỉ cho
+/// `EventSource`, vốn không đặt được header.
+fn request_key(req: &Request) -> &str {
+    if !req.key.is_empty() {
+        return &req.key;
+    }
+    req.path
+        .split_once('?')
+        .and_then(|(_, query)| query.split('&').find_map(|pair| pair.strip_prefix("k=")))
+        .unwrap_or("")
 }
 
 /// Yêu cầu có đổi trạng thái không được đến từ một trang web khác.
@@ -165,6 +188,7 @@ fn read_request(stream: &TcpStream) -> Option<Request> {
     let mut length = 0usize;
     let mut origin = String::new();
     let mut key = String::new();
+    let mut host = String::new();
     for _ in 0..MAX_HEADERS {
         let mut header = String::new();
         if read_line_capped(&mut reader, &mut header)? == 0 || header.trim().is_empty() {
@@ -180,6 +204,8 @@ fn read_request(stream: &TcpStream) -> Option<Request> {
             origin = value.trim().to_string();
         } else if name.eq_ignore_ascii_case("x-archctl-key") {
             key = value.trim().to_string();
+        } else if name.eq_ignore_ascii_case("host") {
+            host = value.trim().to_string();
         }
     }
     let mut body = vec![0u8; length];
@@ -191,6 +217,7 @@ fn read_request(stream: &TcpStream) -> Option<Request> {
         path,
         origin,
         key,
+        host,
         body: String::from_utf8_lossy(&body).into_owned(),
     })
 }
@@ -213,6 +240,22 @@ fn handle(mut stream: TcpStream, root: &Path, clients: &Clients, port: u16, key:
     let Some(req) = read_request(&stream) else { return };
     let path = req.path.split('?').next().unwrap_or("/");
 
+    if !local_host(&req.host, port) {
+        respond(&mut stream, "421 Misdirected Request", "text/plain; charset=utf-8", "Host không phải máy này");
+        return;
+    }
+    // Trang chủ không có dữ liệu gì; mọi `/api/` đều cần khoá, kể cả để đọc:
+    // mô hình có glob đường dẫn, chỗ vi phạm và đề xuất đang chờ.
+    if path.starts_with("/api/") && request_key(&req) != key {
+        respond(
+            &mut stream,
+            "403 Forbidden",
+            "application/json",
+            r#"{"ok":false,"error":"thiếu khoá phiên — mở lại địa chỉ mà `archctl serve` in ra"}"#,
+        );
+        return;
+    }
+
     match (req.method.as_str(), path) {
         ("GET", "/") => respond(&mut stream, "200 OK", "text/html; charset=utf-8", UI),
         ("GET", "/api/model") => {
@@ -229,16 +272,8 @@ fn handle(mut stream: TcpStream, root: &Path, clients: &Clients, port: u16, key:
                 open.push(stream);
             }
         }
-        // Khoá trước, nguồn gốc sau: `curl` không gửi `Origin` nên bước kia
+        // Khoá đã kiểm ở trên, vì `curl` không gửi `Origin` nên bước này
         // không chặn được nó.
-        ("POST", _) if req.key != key => {
-            respond(
-                &mut stream,
-                "403 Forbidden",
-                "application/json",
-                r#"{"ok":false,"error":"thiếu khoá phiên — mở lại địa chỉ mà `archctl serve` in ra"}"#,
-            );
-        }
         ("POST", _) if !same_origin(&req.origin, port) => {
             respond(
                 &mut stream,

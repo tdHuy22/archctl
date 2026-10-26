@@ -85,6 +85,12 @@ pub struct LexConfig {
     pub backtick: Backtick,
     /// f-string và t-string của Python: `{...}` bên trong là mã.
     pub fstrings: bool,
+    /// CR đứng riêng là hết dòng: Python, ECMAScript, Java, GCC. Go và Rust
+    /// thì không (CR thô hợp lệ trong rune `'\r'` của Go).
+    pub cr_line_breaks: bool,
+    /// U+2028, U+2029 kết thúc chú thích `//`, như ECMAScript. Trong chuỗi thì
+    /// chúng hợp lệ (ES2019), nên không đổi thành `\n`.
+    pub unicode_line_breaks: bool,
 }
 
 impl LexConfig {
@@ -104,6 +110,8 @@ impl LexConfig {
             cpp_raw_strings: false,
             backtick: Backtick::Punct,
             fstrings: false,
+            cr_line_breaks: false,
+            unicode_line_breaks: false,
         }
     }
 }
@@ -143,7 +151,7 @@ struct Lexer<'a> {
 
 pub fn lex(src: &str, cfg: &LexConfig) -> Vec<Token> {
     let mut lx = Lexer {
-        cs: src.chars().collect(),
+        cs: line_breaks(src, cfg),
         i: 0,
         line: 1,
         at_line_start: true,
@@ -156,6 +164,28 @@ pub fn lex(src: &str, cfg: &LexConfig) -> Vec<Token> {
     };
     lx.run();
     lx.out
+}
+
+/// Ký tự của `src`, với CR đứng riêng đổi thành `\n` ở ngôn ngữ coi nó là hết
+/// dòng. `# x\rimport payments` chạy import, mà lexer chỉ biết LF thì thấy cả
+/// dòng là chú thích (claude-security F9). CRLF giữ nguyên: `\r` trước `\n` là
+/// khoảng trắng. Nơi khác đối chiếu số dòng với văn bản (`pipeline::indents`)
+/// tách dòng theo [`is_lone_cr`] cho khớp.
+fn line_breaks(src: &str, cfg: &LexConfig) -> Vec<char> {
+    let mut cs: Vec<char> = src.chars().collect();
+    if cfg.cr_line_breaks {
+        for k in 0..cs.len() {
+            if cs[k] == '\r' && cs.get(k + 1) != Some(&'\n') {
+                cs[k] = '\n';
+            }
+        }
+    }
+    cs
+}
+
+/// `src[at]` là CR không có LF theo sau.
+pub fn is_lone_cr(src: &[u8], at: usize) -> bool {
+    src[at] == b'\r' && src.get(at + 1) != Some(&b'\n')
 }
 
 impl Lexer<'_> {
@@ -242,7 +272,8 @@ impl Lexer<'_> {
         let c = self.cs[self.i];
         for marker in self.cfg.line_comments {
             if marker.starts_with(c) && self.rest_starts_with(marker) {
-                while self.i < self.cs.len() && self.cs[self.i] != '\n' {
+                let ends = |c: char| c == '\n' || (self.cfg.unicode_line_breaks && matches!(c, '\u{2028}' | '\u{2029}'));
+                while self.i < self.cs.len() && !ends(self.cs[self.i]) {
                     self.i += 1;
                 }
                 return true;

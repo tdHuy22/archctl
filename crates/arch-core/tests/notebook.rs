@@ -216,3 +216,12 @@ fn script_python_viet_kieu_khac_van_la_python() {
     let got: Vec<String> = imports("script.ipynb", src).into_iter().map(|(s, _)| s).collect();
     assert_eq!(got, ["a", "b", "c"]);
 }
+
+/// IPython tách dòng bằng `splitlines`: CR đứng riêng sau magic vẫn mở dòng
+/// mã mới, nên import phía sau phải được thấy (claude-security F9).
+#[test]
+fn cr_sau_magic_khong_giau_import() {
+    let nb = r#"{"cells":[{"cell_type":"code","metadata":{},"outputs":[],"source":["%time\rimport payments.ledger\n"]}],"metadata":{},"nbformat":4,"nbformat_minor":5}"#;
+    let found: Vec<String> = imports("a.ipynb", nb).into_iter().map(|(s, _)| s).collect();
+    assert_eq!(found, ["payments.ledger"]);
+}

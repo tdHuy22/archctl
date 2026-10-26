@@ -21,7 +21,7 @@ mọi thay đổi vào bốn loại.
 | **xê dịch** | nội dung y hệt, chỉ đổi chỗ trong file | không, chỉ đếm |
 
 ```
-kiến trúc 5bbbb540 → 67424c5b  (so với HEAD)
+kiến trúc 5bbbb540e1c2f0a93d6b7e4c1a08f2d3 → 67424c5b9a3e1f0d2c7b8a6e5d4f3c21  (so với HEAD)
 
 + component  Cache
     at src/cache/**  (cấu trúc)
@@ -41,7 +41,7 @@ kiến trúc 5bbbb540 → 67424c5b  (so với HEAD)
 Khi không có gì đổi về ngữ nghĩa:
 
 ```
-kiến trúc 5bbbb540 — không đổi so với HEAD
+kiến trúc 5bbbb540e1c2f0a93d6b7e4c1a08f2d3 — không đổi so với HEAD
 19 phần tử chỉ xê dịch trong file, không cần đọc kỹ
 ```
 
@@ -75,6 +75,11 @@ hoá**, không phải văn bản file:
 
 Lý do: hash là tín hiệu báo agent đọc lại file luật. Báo "kiến trúc đã thay
 đổi" khi không có gì đổi là kêu sói, và agent sẽ học cách phớt lờ cảnh báo.
+
+Hash là 128 bit đầu của SHA-256 (32 chữ hex). Biên nhận `verify` gắn với nó,
+nên không được dò ra bản luật khác cùng hash: bản 32 bit cũ thì vài phút trên
+laptop. `diff` cũng không tin riêng hash: nó chỉ báo "không đổi" khi danh sách
+thay đổi rỗng.
 
 ## Nguồn ý tưởng
 

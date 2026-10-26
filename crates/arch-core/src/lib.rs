@@ -85,26 +85,57 @@ pub fn load(src: &str) -> (Document, Vec<Diag>) {
 /// Băm **mô hình đã chuẩn hoá**, không phải văn bản: thêm một dòng chú thích
 /// hay đổi thứ tự khai báo thì hash phải giữ nguyên. Báo "kiến trúc đã đổi"
 /// khi không có gì đổi là kêu sói, và agent sẽ học cách phớt lờ cảnh báo.
+///
+/// 128 bit đầu của SHA-256: biên nhận `verify` và `diff` dựa vào nó, nên phải
+/// không dò được bản luật khác cùng hash. FNV gập 32 bit thì vài phút trên
+/// laptop (claude-security F8, F10).
 pub fn arch_hash(doc: &Document) -> String {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in doc.canonical().bytes() {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{:08x}", (h as u32) ^ ((h >> 32) as u32))
+    let mut digest = protocol::sha256::hex(doc.canonical().as_bytes());
+    digest.truncate(32);
+    digest
 }
 
 /// Tìm gốc dự án: thư mục gần nhất đi lên có chứa `.arch/system.arch`.
+///
+/// Dừng ở ranh giới tin cậy, vì `verify` chạy lệnh trong file luật tìm được:
+/// không đi lên quá gốc repo git (thư mục có `.git`), và chỉ nhận file luật ở
+/// thư mục tổ tiên khi nó là của chính người chạy (hay root) và không phải
+/// chỗ ai cũng ghi được. Người dùng khác trên máy đặt `/tmp/.arch/system.arch`
+/// thì `archctl verify` chạy trong `/tmp/work` từng chạy lệnh của họ
+/// (claude-security F15). Thư mục người dùng tự chỉ (`--root`, thư mục hiện
+/// tại) là lựa chọn của họ, nên không kiểm: checkout trên ổ mà mọi thứ hiện
+/// quyền 0777 (WSL `/mnt/c`) vẫn chạy được với `--root`.
 pub fn find_root(start: &Path) -> Option<PathBuf> {
-    let mut dir = start.canonicalize().ok()?;
+    let start = start.canonicalize().ok()?;
+    let mut dir = start.clone();
     loop {
         if dir.join(ARCH_FILE).is_file() {
-            return Some(dir);
+            return (dir == start || trusted_root(&dir)).then_some(dir);
         }
-        if !dir.pop() {
+        if dir.join(".git").exists() || !dir.pop() {
             return None;
         }
     }
+}
+
+/// Gốc, `.arch/` và file luật đều là của người chạy hay root, và không phải
+/// thứ mọi người ghi được: như `safe.directory` của git.
+#[cfg(unix)]
+fn trusted_root(dir: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    unsafe extern "C" {
+        fn geteuid() -> u32;
+    }
+    // SAFETY: `geteuid` không nhận đối số, không bao giờ lỗi.
+    let me = unsafe { geteuid() };
+    [dir.to_path_buf(), dir.join(".arch"), dir.join(ARCH_FILE)]
+        .iter()
+        .all(|p| std::fs::metadata(p).is_ok_and(|m| m.mode() & 0o002 == 0 && (m.uid() == me || m.uid() == 0)))
+}
+
+#[cfg(not(unix))]
+fn trusted_root(_dir: &Path) -> bool {
+    true
 }
 
 /// Một file cấu hình do repo kiểm soát (`Cargo.toml`, `go.mod`, `tsconfig.json`,
@@ -158,7 +189,7 @@ mod tests {
     #[test]
     fn hash_doi_khi_luat_doi() {
         assert_ne!(hash("component A at a/**"), hash("component B at b/**"));
-        assert_eq!(hash("component A at a/**").len(), 8);
+        assert_eq!(hash("component A at a/**").len(), 32);
     }
 
     #[test]

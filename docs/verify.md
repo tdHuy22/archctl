@@ -91,6 +91,18 @@ cho một lệnh không còn tồn tại: đổi `runs "exit 0"` thành
 Nhờ vậy `archctl diff` cũng thấy được thay đổi đó — phần tử người duyệt cần
 đọc kỹ nhất thì không được vô hình.
 
+**File luật phải là của repo này.** `verify` chạy lệnh trong file luật tìm
+được, nên việc tìm gốc dừng ở ranh giới tin cậy: không đi lên quá thư mục có
+`.git`, và bỏ qua file luật trong thư mục mà người dùng nào cũng ghi được.
+Người dùng khác trên máy đặt `/tmp/.arch/system.arch` thì `archctl verify`
+chạy trong `/tmp/work` báo không tìm thấy file luật, không chạy lệnh của họ.
+
+Phép kiểm chỉ áp cho thư mục cha: thư mục bạn đứng hay chỉ bằng `--root` là
+lựa chọn của bạn. Nên khi đứng ở thư mục con mà gốc là của uid khác (container
+chạy bằng root trên repo mount vào, `sudo`) hay hiện quyền 0777 (WSL
+`/mnt/c`), hãy chạy ở gốc dự án hoặc thêm `--root <gốc dự án>`, như
+`safe.directory` của git.
+
 **Mốc thời gian lấy trước khi lệnh chạy.** Một bộ test chạy hai phút mà agent
 sửa file ở phút thứ nhất: mốc lấy lúc xong sẽ mới hơn file vừa sửa, và lần
 chạy đó im lặng được coi là chứng minh cho mã nó chưa từng thấy.

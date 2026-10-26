@@ -732,3 +732,38 @@ fn rust_use_long_sau_khong_tran_stack() {
         .expect("không tràn stack");
     assert!(imports.iter().any(|s| s == "crate::a::c::d"), "{imports:?}");
 }
+
+// ---------- hết dòng ----------
+
+/// Python, JS, Java và GCC coi CR đứng riêng là hết dòng, nên mã sau
+/// `chú thích\r` vẫn chạy. Lexer chỉ biết LF thì giấu được import cấm
+/// (claude-security F9).
+#[test]
+fn cr_dung_rieng_ket_thuc_chu_thich() {
+    assert_eq!(specs(Lang::Python, "# warm cache\rimport payments.ledger\n"), ["payments.ledger"]);
+    assert_eq!(specs(Lang::TypeScript, "// x\rimport l from '../payments/ledger'\n"), ["../payments/ledger"]);
+    assert_eq!(specs(Lang::Java, "// x\rimport com.acme.payments.Ledger;\n"), ["com.acme.payments.Ledger"]);
+    // CRLF vẫn là một lần xuống dòng.
+    let crlf = Lang::Python.imports("import a\r\n\r\nimport b\r\n");
+    assert_eq!(crlf.iter().map(|i| i.line).collect::<Vec<_>>(), [1, 3]);
+}
+
+#[test]
+fn ts_ls_ps_ket_thuc_chu_thich() {
+    assert_eq!(specs(Lang::TypeScript, "// x\u{2028}import a from './a'\n"), ["./a"]);
+    assert_eq!(specs(Lang::TypeScript, "// x\u{2029}import b from './b'\n"), ["./b"]);
+    // Trong chuỗi thì LS hợp lệ (ES2019): không được đóng chuỗi sớm rồi nuốt
+    // import phía sau (review opus).
+    assert_eq!(
+        specs(Lang::TypeScript, "const s = \"x\u{2028}\"; import a from '../payments/ledger'\n"),
+        ["../payments/ledger"]
+    );
+}
+
+/// Go và Rust không coi CR là hết dòng: `// x\rimport` vẫn là chú thích, còn
+/// rune `'\r'` thô của Go là một ký tự hợp lệ.
+#[test]
+fn go_rust_cr_khong_phai_het_dong() {
+    assert!(specs(Lang::Go, "package a\n// x\rimport \"payments\"\n").is_empty());
+    assert!(specs(Lang::Rust, "// x\ruse payments::ledger;\n").is_empty());
+}

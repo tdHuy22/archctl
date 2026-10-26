@@ -272,8 +272,9 @@ fn cmd_check(args: &[String]) -> ExitCode {
     let start = root_arg.unwrap_or_else(|| PathBuf::from("."));
     let Some(root) = arch_core::find_root(&start) else {
         crate::say_err!(
-            "archctl: không tìm thấy `{}` ở `{}` hay thư mục cha nào.\n\
-             → chạy trong dự án đã có .arch/, hoặc dùng `--root <dir>`",
+            "archctl: không tìm thấy `{}` ở `{}` hay thư mục cha nào trong cùng repo git\n\
+             (file luật ở thư mục cha của người khác hay ai cũng ghi được, như /tmp, bị bỏ qua).\n\
+             → chạy ở gốc dự án đã có .arch/, hoặc dùng `--root <gốc dự án>`",
             arch_core::ARCH_FILE,
             start.display()
         );
@@ -920,7 +921,9 @@ fn cmd_diff(args: &[String]) -> ExitCode {
     let head_hash = arch_core::arch_hash(&head);
     let delta = arch_core::diff::diff(&base, &head);
 
-    if base_hash == head_hash {
+    // Chỉ báo "không đổi" khi chính danh sách thay đổi rỗng: hash trùng mà
+    // không liệt kê thay đổi từng che được việc nới luật (claude-security F8).
+    if base_hash == head_hash && delta.changes.is_empty() {
         crate::say!("kiến trúc {head_hash} — không đổi so với {git_ref}");
         if delta.moved > 0 {
             crate::say!("{} phần tử chỉ xê dịch trong file, không cần đọc kỹ", delta.moved);

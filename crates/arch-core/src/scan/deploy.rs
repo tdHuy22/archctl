@@ -17,7 +17,7 @@ use super::tfplan;
 use super::k8s;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 /// Trần cho file compose, Dockerfile, script và `env_file`. File cấu hình do
@@ -395,7 +395,7 @@ pub enum Entry {
 }
 
 /// Nối `path` (do file người khác viết) vào thư mục `base` của repo. `None`
-/// nếu tuyệt đối, là URL, hay đi ra ngoài gốc dự án.
+/// nếu tuyệt đối, là URL, có tiền tố ổ đĩa, hay đi ra ngoài gốc dự án.
 pub fn within(base: &str, path: &str) -> Option<String> {
     if path.starts_with('/') || path.starts_with('~') || path.contains('\\') || path.contains("://")
     {
@@ -408,10 +408,35 @@ pub fn within(base: &str, path: &str) -> Option<String> {
             ".." => {
                 parts.pop()?;
             }
+            s if !plain_segment(s) => return None,
             s => parts.push(s),
         }
     }
     Some(parts.join("/"))
+}
+
+/// Một đoạn tên bình thường của đường dẫn. `C:` hay `C:x` là tiền tố ổ đĩa:
+/// trên Windows `root.join("C:/Windows/win.ini")` bỏ `root` và mở file ngoài
+/// repo (claude-security F18). Ở đó `:` còn mở luồng dữ liệu phụ của NTFS.
+fn plain_segment(seg: &str) -> bool {
+    let b = seg.as_bytes();
+    let drive = b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':';
+    !drive && !(cfg!(windows) && seg.contains(':'))
+}
+
+/// `root` nối với `rel`, chỉ từ các đoạn tên bình thường. Phép kiểm và lần mở
+/// dùng cùng một đường dẫn này, nên không thể hiểu `rel` theo hai cách.
+fn path_in(root: &Path, rel: &str) -> Option<PathBuf> {
+    let mut p = root.to_path_buf();
+    for seg in rel.split('/').filter(|s| !s.is_empty()) {
+        let mut parts = Path::new(seg).components();
+        let normal = matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none();
+        if !normal || !plain_segment(seg) || seg.contains('\\') {
+            return None;
+        }
+        p.push(seg);
+    }
+    Some(p)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -422,6 +447,7 @@ pub(crate) enum Kind {
 
 /// Loại của đường dẫn trong repo, không đi theo symlink ở bất kỳ đoạn nào.
 pub(crate) fn kind_in(root: &Path, rel: &str) -> Option<Kind> {
+    path_in(root, rel)?;
     let mut p = root.to_path_buf();
     let mut meta = p.symlink_metadata().ok()?;
     for seg in rel.split('/').filter(|s| !s.is_empty()) {
@@ -505,19 +531,19 @@ pub fn read_in(root: &Path, rel: &str, max: u64) -> Result<String, String> {
 /// manifest không mà không đọc hết nó.
 pub fn read_head(root: &Path, rel: &str, max: u64) -> Result<(String, bool), String> {
     use std::io::Read as _;
+    let Some(path) = path_in(root, rel) else {
+        return Err("đường dẫn ra ngoài repo".into());
+    };
     match kind_in(root, rel) {
         Some(Kind::File) => {}
         Some(Kind::Dir) => return Err("là thư mục".into()),
-        None if root.join(rel).symlink_metadata().is_ok() => {
+        None if path.symlink_metadata().is_ok() => {
             return Err("không phải file thường, hay có symlink trên đường dẫn".into());
         }
         None => return Err("không có".into()),
     }
-    let checked = root
-        .join(rel)
-        .symlink_metadata()
-        .map_err(|e| e.to_string())?;
-    let file = open_plain(&root.join(rel)).map_err(|e| e.to_string())?;
+    let checked = path.symlink_metadata().map_err(|e| e.to_string())?;
+    let file = open_plain(&path).map_err(|e| e.to_string())?;
     // Kiểm lại trên chính file đã mở: giữa lúc kiểm đường dẫn và lúc mở, một
     // tiến trình khác có thể tráo vào FIFO, thiết bị, hay symlink ra ngoài
     // repo. Cùng `(dev, ino)` với thứ đã kiểm thì là cùng một file.
@@ -4289,6 +4315,12 @@ mod tests {
         assert_eq!(within("a", "~/x"), None);
         assert_eq!(within("a", "https://github.com/x/y.git"), None);
         assert_eq!(within("", "."), Some(String::new()));
+        // Tiền tố ổ đĩa Windows (claude-security F18).
+        assert_eq!(within("", "C:/Windows/win.ini"), None);
+        assert_eq!(within("a", "../d:x"), None);
+        assert_eq!(within("a", "ab:c/z").as_deref(), if cfg!(windows) { None } else { Some("a/ab:c/z") });
+        assert!(path_in(Path::new("/r"), "C:/Windows/win.ini").is_none());
+        assert_eq!(path_in(Path::new("/r"), "a/b"), Some(PathBuf::from("/r/a/b")));
     }
 
     #[test]
