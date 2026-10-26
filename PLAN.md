@@ -414,34 +414,17 @@ git, `cargo clean` dọn.
 
 ### Việc tiếp theo
 
-0. (2026-10-26, mới nhất) `f64db05` lên main, CI xanh 5/5 (run 40216471324); tag
-   `v0.1.0` đã đẩy, workflow phát hành đạt (run 40220394214), bản nháp đủ 8 file,
-   bản aarch64-apple-darwin tải về khớp sha256 và in `archctl 0.1.0`. Việc tiếp:
-   bản phát hành đã công bố (Latest, 8 file). Việc 17.1 ĐANG DỞ, CHƯA COMMIT
-   (2026-10-26): đã sửa F8/F10 (`arch_hash` SHA-256 128 bit, `diff` không trả
-   sớm), F9 (CR, LS/PS trong lexer), F11 (`Host`, khoá cho mọi `/api/`), F15
-   (`find_root` dừng ở `.git`, bỏ thư mục ai cũng ghi được), F18 (tiền tố ổ đĩa),
-   test mới đạt, TM-81..85 ghi trong threat model. Review opus vòng 1: 3 vừa,
-   3 thấp (LS trong chuỗi JS, lệch dòng `pipeline::indents`, `--root` trên thư
-   mục 0777, CR áp cho Go/Rust, notebook `%time\r`, thiếu kiểm chủ sở hữu) — đã
-   sửa, test mới đạt, clippy sạch; reviewer kiểm lại: cả 6 đã đóng. logs-r5:
-   test, clippy, MSRV, release, bộ đo đạt; oracle hết hạn 1800 s (trước 594 s,
-   đang chạy riêng để tìm chỗ chậm); sabotage treo vì lớp bọc `--as-archctl`
-   giữ đầu ra của `serve` (đã sửa: `execv` cho `serve`, `flows.py` hạn 30 s đọc
-   khoá). Ghi chú root/0777 thêm vào `docs/verify.md`. Bạn đã chốt: xong thì
-   phát hành 0.1.1 luôn (ghi chú v0.1.0 đã sửa bỏ chữ Windows). Oracle chạy riêng
-   khớp hết (863 s; lần hết hạn trước do máy bị chiếm bởi `serve` bị bỏ sót, đã
-   dọn). Đã nâng 0.1.1 (`Cargo.toml`, `Cargo.lock` chỉ đổi số bản, README, ghi
-   chú phát hành trong `release.yml`), tick 17.1. logs-r6 trên mã 0.1.1: clippy,
-   MSRV, release, bộ đo (271 s), oracle khớp hết (885 s), sabotage 0 trượt
-   (3060 s, máy bận vì bản build llama.cpp của project khác), `verify`,
-   `check --strict` đạt; `cargo test` trượt một test đo thời gian lúc tải 85,
-   chạy lại đạt (24,5 s). Commit `187bcaa`, CI main xanh 5/5 (run 40274444866),
-   tag `v0.1.1`, workflow phát hành đạt (run 40294672755), 8 file, bản
-   aarch64-apple-darwin khớp sha256 và in `archctl 0.1.1`; đã publish (Latest):
-   https://github.com/tdHuy22/archctl/releases/tag/v0.1.1. Mốc "Hoàn thiện
-   trước khi phát hành" xong hết; chưa có việc mới. Các mục dưới
-   là lịch sử cũ.
+0. (2026-10-26, mới nhất) Đã phát hành **v0.1.0** (`f64db05`) và **v0.1.1**
+   (`187bcaa`), cả hai công khai, v0.1.1 là Latest:
+   https://github.com/tdHuy22/archctl/releases/tag/v0.1.1. Mỗi bản: CI main xanh
+   5/5, workflow phát hành đạt, 8 file, bản aarch64-apple-darwin khớp sha256.
+   Audit claude-security: 18 phát hiện đều đã sửa (MEDIUM và LOW rẻ ở 0.1.0,
+   LOW còn lại ở 0.1.1, TM-71..85), reviewer opus kiểm từng bản sửa. Biên nhận
+   cuối (logs-r6, mã 0.1.1): test, clippy, MSRV, release, bộ đo, oracle,
+   sabotage 0 trượt, `verify`, `check --strict` đạt. Không còn việc mở trong
+   kế hoạch; cây làm việc sạch. Lưu ý cho người dùng 0.1.0: hash luật đổi dạng
+   (32 hex), lần đầu chạy 0.1.1 báo "kiến trúc đã thay đổi", cần `verify` lại.
+   Việc tiếp: chờ bạn đặt mốc mới. Các mục dưới là lịch sử cũ.
 
 1. `c5ae95d`..`82b069a` đã lên `main` (2026-10-15) sau CI xanh 5/5 trên `thu/dot4`
    (run 38760676354); `82b069a` nâng trần job "repo thật" lên 40 phút vì run trước
