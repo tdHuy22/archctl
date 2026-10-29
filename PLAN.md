@@ -71,6 +71,12 @@ nhắc rồi **loại**, ghi lại để khỏi nghĩ lại:
    sát. Cách duy nhất nghĩ ra là gộp thêm "anh em của gốc", nhưng điều đó kéo
    `tests/` vào sơ đồ ở mọi repo khác — đánh đổi sai.
 
+### Mốc kiểm tra
+
+Chép từ `.agent/NHAT-KY.md` (đợt 7 Terraform; bản gốc vẫn ở đó). Chạy lần lượt, mỗi lệnh qua `receipt.py run --`, dừng ở lệnh trượt:
+`cargo test --workspace`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo +1.88 check --workspace --tests`; `cargo build --release`; `python3 bench/bench.py --rounds 1`; `python3 bench/oracle.py --require clang,node,go,syn,ipython,deploy,proto,helm,kustomize,terraform,java`; `python3 bench/sabotage.py --archctl target/release/archctl --rust-repo ripgrep --notebook-repo matplotlib --deploy-repo example-voting-app --k8s-repo microservices-demo --proto-repo vllm --tf-repo terraform-docs-samples`; `target/release/archctl verify`; `target/release/archctl check --strict`.
+Mốc: oracle khớp hết; sabotage 0 trượt (69 kiểu ở biên nhận 23/10).
+
 ### Cố ý không làm bằng phân tích tĩnh
 
 Thứ tự bước trong `flow`, `requires`/`ensures` của `contract`, `invariant
