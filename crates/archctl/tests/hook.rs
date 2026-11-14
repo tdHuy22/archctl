@@ -491,3 +491,17 @@ fn hook_khong_kiem_du_an_khac_qua_cham_cham() {
     assert!(out.stdout.is_empty(), "{}", text(&out));
     assert_eq!(std::fs::read_to_string(other.0.join(".arch/.state")).unwrap_or_default(), before);
 }
+
+/// Review vòng 2: symlink tới thư mục (hay submodule) chưa commit làm
+/// `git status` có một mục không phải file. Hook sau Bash không được vì thế
+/// mà im lặng với mọi file khác.
+#[cfg(unix)]
+#[test]
+fn hook_bash_van_kiem_khi_co_symlink_toi_thu_muc() {
+    let p = Project::new("symlink-dir");
+    p.commit_all();
+    std::os::unix::fs::symlink(p.0.join("src"), p.0.join("linkdir")).unwrap();
+    p.write("src/web/page.ts", "import { r } from '../report/r'\n");
+    let out = p.hook(&p.bash_payload());
+    assert!(context(&out).is_some_and(|c| c.contains("Web -> Report")), "{}", text(&out));
+}

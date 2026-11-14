@@ -2537,9 +2537,12 @@ fn changed_paths(root: &Path, law_forces_full: bool) -> Option<Vec<String>> {
         // Mọi file, không chỉ file mã: xem `relative_to`.
         if root.join(path).is_file() {
             files.push(path.to_string());
-        } else if code[0] != b'D' && code[1] != b'D' {
+        } else if code[0] != b'D' && code[1] != b'D' && law_forces_full {
             // Không phải xoá mà vẫn không thấy file: không hiểu đầu ra của
-            // git nữa, nên quay về kiểm cả repo.
+            // git nữa, nên quay về kiểm cả repo. Hook sau Bash thì không quét
+            // cả repo được (mỗi lệnh shell một lần), nên chỉ bỏ mục đó:
+            // symlink tới thư mục, submodule đang đổi — không thì một mục như
+            // vậy làm hook im lặng với mọi file khác.
             return None;
         }
     }
