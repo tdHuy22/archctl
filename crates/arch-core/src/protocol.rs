@@ -251,6 +251,10 @@ pub struct State {
     pub arch_hash: String,
     /// Số lần gặp lại cùng một vi phạm. Khoá là danh tính của vi phạm.
     pub attempts: BTreeMap<String, usize>,
+    /// Dấu (cỡ, giờ sửa) của file mà hook đã kiểm, theo đường dẫn tương đối.
+    /// Sau một lệnh Bash, hook chỉ kiểm file có dấu khác: chạy `ls` hay
+    /// `cargo test` không được đếm thành một lần "gặp lại" vi phạm.
+    pub seen: BTreeMap<String, String>,
 }
 
 pub fn parse_state(src: &str) -> State {
@@ -265,6 +269,10 @@ pub fn parse_state(src: &str) -> State {
             && let Ok(n) = count.trim().parse()
         {
             state.attempts.insert(key.trim().to_string(), n);
+        } else if let Some(rest) = line.strip_prefix("seen ")
+            && let Some((path, stamp)) = rest.rsplit_once(' ')
+        {
+            state.seen.insert(path.trim().to_string(), stamp.trim().to_string());
         }
     }
     state
@@ -275,6 +283,12 @@ pub fn render_state(state: &State) -> String {
     let _ = writeln!(out, "arch_hash {}", state.arch_hash);
     for (key, n) in &state.attempts {
         let _ = writeln!(out, "attempt {key} {n}");
+    }
+    // Bản 0.1.1 trở về trước bỏ qua dòng lạ, nên dòng này không làm hỏng chúng.
+    for (path, stamp) in &state.seen {
+        if !path.contains(['\n', '\r']) {
+            let _ = writeln!(out, "seen {path} {stamp}");
+        }
     }
     out
 }

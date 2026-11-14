@@ -1308,7 +1308,7 @@ impl<'a> StepFiles<'a> {
             format!("{module}{sep}{}", path[..k].join("."))
         };
         for k in (0..=path.len()).rev() {
-            let import = scan::Import { spec: join(k), line: 0, system: false, names: Vec::new() };
+            let import = scan::Import { spec: join(k), line: 0, system: false, names: Vec::new(), py_path: Vec::new() };
             match self.resolver.resolve(Lang::Python, importer, &import) {
                 Resolved::Path(p) if Lang::for_path(&p).is_some() => {
                     if k < path.len()
@@ -3370,6 +3370,7 @@ pub fn entry_files(root: &Path, resolver: &Resolver, entries: &[deploy::Entry]) 
                     line: 0,
                     system: false,
                     names: Vec::new(),
+                    py_path: Vec::new(),
                 };
                 if let Resolved::Path(p) = resolver.resolve(Lang::Python, "", &import) {
                     let main = matches!(e, deploy::Entry::Module { main: true, .. });

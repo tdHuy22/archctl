@@ -11,10 +11,15 @@ use std::process::ExitCode;
 
 const ARCHITECTURE_MD: &str = include_str!("../../../templates/ARCHITECTURE.md");
 
-/// Hook chạy sau mỗi lần agent sửa file, cộng ranh giới ghi cho `.arch/`.
+/// Hook chạy sau mỗi lần agent sửa file hay chạy lệnh shell, cộng ranh giới
+/// ghi cho `.arch/`.
 ///
-/// Hook mất khoảng 10ms vì đường dẫn được đưa thẳng vào `check` — đủ nhanh để
-/// agent không có cớ bỏ qua.
+/// `check --hook` đọc payload của Claude Code, kiểm đúng file vừa sửa (Bash
+/// thì file đổi so với HEAD), mất khoảng 10ms — đủ nhanh để agent không có cớ
+/// bỏ qua. Nó luôn thoát 0 và đưa vi phạm qua `additionalContext`: hook cũ
+/// (`check --changed`, thoát 1) chỉ hiện trong transcript, model không thấy.
+/// Bash có trong matcher vì agent sửa file bằng `sed`, `cat >`, `git apply`
+/// được.
 ///
 /// Phần `permissions.deny` mới là chỗ biến "agent không được ghi file luật"
 /// từ một câu trong tài liệu thành một ràng buộc. Không có nó, cả mô hình
@@ -55,9 +60,9 @@ const CLAUDE_SETTINGS: &str = r#"{
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "Edit|Write",
+        "matcher": "Edit|Write|MultiEdit|Bash",
         "hooks": [
-          { "type": "command", "command": "archctl check --changed" }
+          { "type": "command", "command": "archctl check --hook", "timeout": 30 }
         ]
       }
     ]
@@ -426,13 +431,26 @@ fn fail(message: &str, code: u8) -> ExitCode {
 /// Chỉ lệnh này chạy lệnh shell, và chỉ khi người gõ nó. `check` không bao
 /// giờ chạy gì, kể cả trong hook của agent: nó chỉ đọc biên nhận.
 pub fn cmd_verify(args: &[String]) -> ExitCode {
-    let parsed = match crate::proto::parse_args(args, &["root"], &["quiet"]) {
+    let parsed = match crate::proto::parse_args(args, &["root", "timeout"], &["quiet"]) {
         Ok(a) => a,
         Err(e) => {
             crate::say_err!("archctl: {e}");
             return ExitCode::from(exit::USAGE);
         }
     };
+    let limit = match parsed.flags.get("timeout") {
+        None => VERIFY_TIMEOUT_DEFAULT,
+        Some(t) => match t.parse::<u64>() {
+            Ok(n) if (1..=VERIFY_TIMEOUT_MAX).contains(&n) => n,
+            _ => {
+                crate::say_err!(
+                    "archctl: `--timeout` cần số giây từ 1 tới {VERIFY_TIMEOUT_MAX}, không phải `{t}`"
+                );
+                return ExitCode::from(exit::USAGE);
+            }
+        },
+    };
+    let limit = std::time::Duration::from_secs(limit);
     let start = parsed.flags.get("root").map_or_else(|| PathBuf::from("."), PathBuf::from);
     let Some(root) = arch_core::find_root(&start) else {
         crate::say_err!("archctl: không tìm thấy `{}`", arch_core::ARCH_FILE);
@@ -513,22 +531,21 @@ pub fn cmd_verify(args: &[String]) -> ExitCode {
             }
         }
         let began = std::time::Instant::now();
-        let status = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&v.command)
-            .current_dir(&root)
-            .stdout(if quiet { std::process::Stdio::null() } else { std::process::Stdio::inherit() })
-            .stderr(if quiet { std::process::Stdio::null() } else { std::process::Stdio::inherit() })
-            .status();
-        let passed = matches!(&status, Ok(s) if s.success());
+        let outcome = run_bounded(&v.command, &root, quiet, limit);
+        let passed = outcome == Outcome::Passed;
         if !passed {
             failed += 1;
         }
-        crate::say!(
-            "  {} · {:.1} giây",
-            if passed { "đạt" } else { "HỎNG" },
-            began.elapsed().as_secs_f64()
-        );
+        let verdict = match outcome {
+            Outcome::Passed => "đạt".to_string(),
+            Outcome::Failed => "HỎNG".to_string(),
+            Outcome::TimedOut(true) => format!("HỎNG (quá hạn {} giây, đã dừng lệnh)", limit.as_secs()),
+            Outcome::TimedOut(false) => format!(
+                "HỎNG (quá hạn {} giây; chỉ dừng được `sh`, tiến trình con của lệnh có thể còn chạy)",
+                limit.as_secs()
+            ),
+        };
+        crate::say!("  {verdict} · {:.1} giây", began.elapsed().as_secs_f64());
         // Lệnh khai là ghi plan Terraform: băm plan và mã module tải về lấy
         // sau khi chạy xong, gắn plan với đúng lệnh này (TM-57).
         let (plans, mods) = if passed && writes_plan {
@@ -566,8 +583,135 @@ pub fn cmd_verify(args: &[String]) -> ExitCode {
     ExitCode::from(if failed > 0 { exit::VIOLATION } else { exit::OK })
 }
 
+/// Giới hạn mặc định cho mỗi lệnh `verify` (bạn chốt 14/11/2026: 30 phút).
+/// Không có giới hạn thì một lệnh treo làm `verify` — và job CI — treo theo.
+const VERIFY_TIMEOUT_DEFAULT: u64 = 30 * 60;
+const VERIFY_TIMEOUT_MAX: u64 = 7 * 24 * 3600;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Passed,
+    Failed,
+    /// Quá hạn. `true`: đã dừng cả cây tiến trình con; `false`: chỉ dừng được
+    /// `sh` (máy thiếu `ps`/`kill`, hay không phải unix).
+    TimedOut(bool),
+}
+
+/// Chạy `sh -c <lệnh>` ở `root`, tối đa `limit`. Quá hạn thì dừng cả cây tiến
+/// trình con rồi coi là hỏng.
+///
+/// Lệnh **không** chạy trong nhóm tiến trình riêng: người gọi archctl (CI,
+/// agent-stack) giết nhóm của archctl khi chính họ quá hạn, và một nhóm riêng
+/// sẽ sống sót qua lần giết đó. Ctrl-C ở terminal cũng tới được lệnh như cũ.
+fn run_bounded(command: &str, root: &Path, quiet: bool, limit: std::time::Duration) -> Outcome {
+    use std::process::{Command, Stdio};
+    let spawned = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(root)
+        .stdout(if quiet { Stdio::null() } else { Stdio::inherit() })
+        .stderr(if quiet { Stdio::null() } else { Stdio::inherit() })
+        .spawn();
+    let Ok(mut child) = spawned else { return Outcome::Failed };
+    let deadline = std::time::Instant::now() + limit;
+    let mut pause = std::time::Duration::from_millis(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return if status.success() { Outcome::Passed } else { Outcome::Failed },
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(std::time::Duration::from_millis(100));
+            }
+            waited => {
+                // `sh` chưa được thu (`try_wait` vừa trả `None` hay lỗi), nên
+                // pid của nó và cây con dưới nó vẫn là của lần chạy này (TM-90).
+                let whole = kill_tree(child.id());
+                let _ = child.kill();
+                let _ = child.wait();
+                return if matches!(waited, Ok(None)) { Outcome::TimedOut(whole) } else { Outcome::Failed };
+            }
+        }
+    }
+}
+
+/// Dừng `pid` và mọi tiến trình con cháu của nó. Đọc cây từ `ps`, gửi STOP
+/// cho cả cây trước (không còn ai sinh thêm con hay mồ côi hoá con mình), đọc
+/// lại để bắt con vừa sinh, rồi mới KILL. Gọi `ps`, `kill` bằng đường dẫn
+/// tuyệt đối: `PATH` là thứ repo và lệnh verify đặt được (TM-90). Con cháu tự
+/// tách khỏi cây (`setsid` rồi fork hai lần) thì không thấy — giới hạn đã nhận.
+/// `false` khi không dừng được cây (thiếu `ps`/`kill`, không phải unix).
+fn kill_tree(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let tool = |names: &[&'static str]| names.iter().copied().find(|p| Path::new(p).is_file());
+        let (Some(ps), Some(kill)) = (tool(&["/bin/ps", "/usr/bin/ps"]), tool(&["/bin/kill", "/usr/bin/kill"]))
+        else {
+            return false;
+        };
+        let send = |signal: &str, pids: &[u32]| {
+            if pids.is_empty() {
+                return;
+            }
+            let _ = std::process::Command::new(kill)
+                .arg(signal)
+                .args(pids.iter().map(u32::to_string))
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        };
+        let mut tree = vec![pid];
+        for _ in 0..3 {
+            let Ok(out) = std::process::Command::new(ps)
+                .args(["-A", "-o", "pid=,ppid="])
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output()
+            else {
+                break;
+            };
+            let pairs: Vec<(u32, u32)> = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(|l| {
+                    let mut it = l.split_whitespace();
+                    Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+                })
+                .collect();
+            let before = tree.len();
+            let mut i = 0;
+            while i < tree.len() {
+                let parent = tree[i];
+                for &(child, ppid) in &pairs {
+                    if ppid == parent && child != pid && !tree.contains(&child) {
+                        tree.push(child);
+                    }
+                }
+                i += 1;
+            }
+            send("-STOP", &tree);
+            if tree.len() == before && before > 1 {
+                break;
+            }
+        }
+        // Chính `sh` để cho `Child::kill` (std biết nó chưa được thu).
+        let rest: Vec<u32> = tree.into_iter().filter(|p| *p != pid).collect();
+        send("-KILL", &rest);
+        true
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn verify_mac_dinh_ba_muoi_phut() {
+        assert_eq!(super::VERIFY_TIMEOUT_DEFAULT, 1800);
+    }
+
     /// Mọi file cho agent quyền tự cho mình qua đều nằm trong danh sách cấm,
     /// theo đúng hằng đường dẫn (claude-security F13: từng lệch `baseline.arch`).
     #[test]

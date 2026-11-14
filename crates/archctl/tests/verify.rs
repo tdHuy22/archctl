@@ -411,3 +411,43 @@ verify plan_a runs \"sh a/ext.sh && cp a/real.json .arch/tf-plan/a.json\" @human
     assert!(out.contains("tf-plan/b.json") && out.contains("chưa chứng nhận"), "{out}");
     assert!(out.contains("registry"), "{out}");
 }
+
+/// Lệnh kiểm treo thì `verify` (và CI) treo theo. Có hạn: quá hạn thì giết cả
+/// nhóm tiến trình — kể cả con cháu mà `sh` sinh ra — và biên nhận là hỏng.
+#[test]
+fn verify_qua_han_thi_giet_ca_nhom_va_ghi_hong() {
+    let arch = "\
+verify treo runs \"sleep 30 & echo $! > .arch/con.pid; wait\"   @human #accepted
+";
+    let p = Project::new("timeout", arch);
+    let began = std::time::Instant::now();
+    let o = p.run(&["verify", "--timeout", "1"]);
+    let took = began.elapsed();
+    let said = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    assert_eq!(o.status.code(), Some(1), "{said}");
+    assert!(took < std::time::Duration::from_secs(10), "chạy {took:?}: {said}");
+    assert!(said.contains("quá hạn"), "{said}");
+    let receipts = std::fs::read_to_string(p.0.join(".arch/.verified")).unwrap_or_default();
+    assert!(receipts.contains("treo hỏng"), "{receipts}");
+    // Tiến trình con của `sh` cũng đã chết, không còn chạy nền.
+    let pid = std::fs::read_to_string(p.0.join(".arch/con.pid")).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let alive = Command::new("kill")
+        .args(["-0", pid.trim()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    assert!(!alive, "tiến trình con {pid} vẫn sống");
+}
+
+#[test]
+fn verify_trong_han_van_dat_va_timeout_sai_bi_tu_choi() {
+    let p = Project::new("timeout-ok", ARCH);
+    let o = p.run(&["verify", "--timeout", "30"]);
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stdout));
+    for bad in ["0", "-1", "abc", "99999999999999999999"] {
+        let o = p.run(&["verify", "--timeout", bad]);
+        assert_eq!(o.status.code(), Some(64), "--timeout {bad}");
+    }
+}

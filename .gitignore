@@ -9,3 +9,5 @@ target/
 .venv/
 **/.arch/tf-plan*
 __pycache__/
+# Thư mục tạm của agent (log, biên nhận kiểm thử).
+.tmp/

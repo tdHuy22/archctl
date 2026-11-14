@@ -116,6 +116,20 @@ fn bo_nho_giua_cac_lan_chay_ghi_va_doc_lai_duoc() {
     assert_eq!(parse_state(&render_state(&state)), state);
 }
 
+/// Dấu file của hook đọc lại được, kể cả tên có dấu cách; tên có xuống dòng
+/// (chèn được dòng `attempt` giả) thì không ghi.
+#[test]
+fn dau_file_cua_hook_ghi_va_doc_lai_duoc() {
+    let mut state = State { arch_hash: "b7e21d04".into(), ..State::default() };
+    state.attempts.insert("Web->Db|a b.ts".into(), 2);
+    state.seen.insert("src/a b.ts".into(), "12:1731571200000000000".into());
+    assert_eq!(parse_state(&render_state(&state)), state);
+    state.seen.insert("x\nattempt Web->Db|a b.ts 99".into(), "1:1".into());
+    let back = parse_state(&render_state(&state));
+    assert_eq!(back.attempts.get("Web->Db|a b.ts"), Some(&2));
+    assert_eq!(back.seen.len(), 1);
+}
+
 #[test]
 fn bo_nho_hong_khong_lam_do_chuong_trinh() {
     let state = parse_state("rác\narch_hash\nattempt thiếu-số\nattempt ok 2\n");

@@ -529,6 +529,18 @@ Thư mục mà `pyproject.toml` khai cũng là gốc: `[tool.hatch.build.targets
 `backend/` với `sources = ["backend"]`: thiếu dòng đó thì 11 component của nó ra
 0 cạnh. Đường dẫn khai ra ngoài project hay tuyệt đối thì bỏ.
 
+File tự thêm vào `sys.path` thì import đứng **sau** dòng đó được tìm thêm ở
+thư mục ấy — `sys.path.insert` trước mọi gốc, `sys.path.append` sau cùng, như
+Python. Chỉ tính đường dẫn suy được tĩnh từ `__file__`:
+`Path(__file__).resolve().parent`, `.parents[k]`, `/ "lib"`, `.joinpath(…)`,
+`os.path.dirname/abspath/realpath/join`, `str()`, `os.fspath()`, và biến gán từ
+các dạng đó (`HERE = Path(__file__).parent`). Lời gọi hay phép gán bẻ qua nhiều
+dòng trong ngoặc (kiểu black) vẫn tính được. Đường dẫn lấy từ biến môi trường,
+tham số, thư mục hiện tại hay ra ngoài repo thì bỏ qua như trước, không báo.
+Thiếu phần này, hook của agent-stack (`sys.path.insert(0, str(HERE.parent /
+"lib"))` rồi `import archgate`) ra toàn "gói ngoài", và luật "hook chỉ gọi lib"
+không bắt được hook nào gọi thẳng script của skill.
+
 Trước đây chỉ gốc repo, `src/` và `lib/` được thử. netbox (mã trong `netbox/`,
 chạy từ đó) và langchain (mỗi package một thư mục trong `libs/`) ra 0 cạnh, 0
 cảnh báo: mọi import tuyệt đối thành gói bên thứ ba.
@@ -565,6 +577,28 @@ cảnh báo: mọi import tuyệt đối thành gói bên thứ ba.
 
 Chia nhỏ được vì luật phụ thuộc, `api` và `store` đều xét **từng file một**.
 Dạng thứ ba dành cho hook: nó đã biết file nào vừa đổi nên không cần hỏi git.
+`archctl check --hook` là đúng dạng đó cho Claude Code: lấy `tool_input.file_path`
+từ payload trên stdin, in kết quả thành
+`{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":…}}`
+và luôn thoát 0 — payload hỏng, quá 16 MB, file ngoài gốc dự án, thư mục không
+có `.arch/` đều im lặng. Chữ trong `additionalContext` là đúng chữ của `check`,
+bỏ thêm ký tự vô hình, cắt ở 8 000 ký tự.
+
+Sau lệnh Bash (không có `file_path`), hook kiểm những file đổi so với HEAD mà
+dấu (cỡ, giờ sửa) khác lần hook trước — dấu ghi trong `.arch/.state`. Lệnh không
+đổi file nào (`ls`, chạy test) thì không kiểm, không báo lại vi phạm đã báo,
+không tính là một lần "gặp lại". Không phải repo git thì hook sau Bash im lặng;
+hook sau Edit, Write, MultiEdit vẫn kiểm từng file. File từng đổi mà nay hết đổi
+(`git checkout --`, `stash`, commit) thì bộ đếm của nó về 0.
+
+Kiểm một phần không làm mất bộ đếm lần gặp lại (`.arch/.state`) của file khác:
+chỉ file vừa kiểm được đếm lại.
+
+`--json` có thêm (từ sau 0.1.1; khoá cũ giữ nguyên): mỗi vi phạm có `baselined`
+(được baseline tha) và `attempts` (lần gặp lại); cấp ngoài có `fresh` (số vi
+phạm mới, đúng số quyết định mã thoát), `baselineStale`, `pending` (đề xuất và
+báo bế tắc đang chờ) và `previousHash` (dấu vân tay luật ở lần kiểm trước, `null`
+nếu chưa có).
 
 Nếu chính `.arch/system.arch` vừa đổi thì `--changed` tự chuyển sang quét toàn
 bộ — luật đổi thì mọi file đều phải xét lại.

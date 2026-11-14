@@ -317,7 +317,7 @@ mod hoa_thuong {
     use super::Repo;
 
     fn resolve(repo: &Repo, lang: Lang, importer: &str, spec: &str) -> Resolved {
-        let import = Import { spec: spec.to_string(), line: 1, system: false, names: Vec::new() };
+        let import = Import { spec: spec.to_string(), line: 1, system: false, names: Vec::new(), py_path: Vec::new() };
         Resolver::new(&repo.0).resolve(lang, importer, &import)
     }
 
@@ -432,7 +432,7 @@ mod goc_crate {
     use super::Repo;
 
     fn at(repo: &Repo, importer: &str, spec: &str) -> Resolved {
-        let import = Import { spec: spec.to_string(), line: 1, system: false, names: Vec::new() };
+        let import = Import { spec: spec.to_string(), line: 1, system: false, names: Vec::new(), py_path: Vec::new() };
         Resolver::new(&repo.0).resolve(Lang::Rust, importer, &import)
     }
 
@@ -863,5 +863,74 @@ allow Src -> O
     .write("src/a.c", "#include <external/api.h>\n");
     let (edges, unresolved) = repo.judge();
     assert_eq!(edges, ["Src -> Inc (1)"], "{edges:?}");
+    assert!(unresolved.is_empty(), "{unresolved:?}");
+}
+
+/// Bố trí của agent-stack: hook trong `plugin/hooks` nạp thư viện qua
+/// `sys.path.insert(...)` tính từ `__file__` rồi `import archgate`. Không đọc
+/// `sys.path` thì mọi import kiểu này là "gói ngoài", và luật "hook chỉ gọi
+/// lib" không bắt được hook nào gọi thẳng script của skill.
+const SYSPATH_ARCH: &str = "\
+component Hooks  at plugin/hooks/**  @human #accepted
+component Lib    at plugin/lib/**    @human #accepted
+component Skills at plugin/skills/** @human #accepted
+allow Hooks -> Lib
+";
+
+fn plugin(name: &str) -> Repo {
+    let repo = Repo::new(name);
+    repo.write(".arch/system.arch", SYSPATH_ARCH)
+        .write("plugin/lib/archgate.py", "def find_root(): pass\n")
+        .write("plugin/skills/done-gate/scripts/risk.py", "def score(): pass\n");
+    repo
+}
+
+#[test]
+fn python_import_sau_sys_path_insert_tinh_tu_file() {
+    let repo = plugin("syspath");
+    repo.write(
+        "plugin/hooks/post_edit.py",
+        "import sys\n\
+         from pathlib import Path\n\
+         \n\
+         HERE = Path(__file__).resolve().parent\n\
+         sys.path.insert(0, str(HERE.parent / \"lib\"))\n\
+         sys.path.insert(0, str(HERE.parent / \"skills\" / \"done-gate\" / \"scripts\"))\n\
+         import archgate  # noqa: E402\n\
+         import risk\n",
+    )
+    .write(
+        "plugin/hooks/plan_exit.py",
+        "import sys\nfrom pathlib import Path\n\
+         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / \"skills\" / \"done-gate\" / \"scripts\"))\n\
+         import risk\n",
+    )
+    .write(
+        "plugin/hooks/old.py",
+        "import os, sys\n\
+         sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'skills', 'done-gate', 'scripts'))\n\
+         from risk import score\n",
+    );
+    let (edges, unresolved) = repo.judge();
+    assert_eq!(edges, ["Hooks -> Skills (3)", "Hooks -> Skills (4)", "Hooks -> Skills (8)"], "{edges:?}");
+    assert!(unresolved.is_empty(), "{unresolved:?}");
+}
+
+#[test]
+fn python_sys_path_chi_ap_cho_import_dung_sau_va_dang_khong_tinh_duoc_thi_im_lang() {
+    let repo = plugin("syspath-order");
+    repo.write(
+        "plugin/hooks/a.py",
+        "import risk\n\
+         import os, sys\n\
+         sys.path.insert(0, os.environ['X'])\n\
+         sys.path.insert(0, str(Path(__file__).parents[40] / 'x'))\n\
+         sys.path.insert(0, sys.argv[1])\n\
+         import archgate\n",
+    )
+    // `__file__` của file khác không lan sang đây.
+    .write("plugin/hooks/b.py", "import risk\n");
+    let (edges, unresolved) = repo.judge();
+    assert!(edges.is_empty(), "{edges:?}");
     assert!(unresolved.is_empty(), "{unresolved:?}");
 }

@@ -137,11 +137,23 @@ phần còn lại tạm để yên. Không cần mô tả cả repo trước khi
 
 ## Chạy trong vòng lặp của agent
 
-`archctl init` sinh sẵn hook chạy sau mỗi lần agent sửa file:
+`archctl init` sinh sẵn hook của Claude Code chạy sau mỗi lần agent sửa file
+hay chạy lệnh shell:
 
 ```json
-{ "type": "command", "command": "archctl check --changed" }
+{
+  "matcher": "Edit|Write|MultiEdit|Bash",
+  "hooks": [{ "type": "command", "command": "archctl check --hook", "timeout": 30 }]
+}
 ```
+
+`check --hook` đọc payload của Claude Code trên stdin, kiểm đúng file vừa sửa
+(sau Bash: file vừa đổi kể từ lần hook trước), và đưa vi phạm mới vào
+`hookSpecificOutput.additionalContext` — chỗ duy nhất model đọc được. Nó luôn
+thoát 0; không có vi phạm mới thì không in gì. Bản 0.1.1 trở về trước sinh
+`archctl check --changed` với matcher `Edit|Write`: lệnh đó thoát 1 khi có vi
+phạm, Claude Code coi là lỗi không chặn và model không bao giờ thấy. Dự án đã
+`init` bằng bản cũ thì sửa tay hai dòng đó trong `.claude/settings.json`.
 
 | Phạm vi | 2000 file TypeScript, 7.8 MB |
 | --- | --- |

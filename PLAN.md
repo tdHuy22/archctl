@@ -5,9 +5,11 @@ Mô tả sản phẩm ở [README.md](README.md); file này chỉ ghi trạng th
 
 ## §0 Đang ở đâu, việc tiếp theo
 
-Cập nhật 2026-10-26.
+Cập nhật 2026-11-15.
 
 ### Đã xong, có bằng chứng
+
+- **Sửa sáu chỗ GĐ3 của agent-stack** (14–15/11/2026; kế hoạch phiên bạn duyệt; đạt 4/4 tiêu chí). (1) `archctl check --hook`: đọc payload PostToolUse trên stdin, đưa vi phạm vào `hookSpecificOutput.additionalContext`, luôn mã 0; Haiku qua `claude -p`: bản 0.1.1 "NONE", bản mới trích `✗ VI PHẠM  Web -> Db` (`.tmp/e2e/`). (2) `init` sinh matcher `Edit|Write|MultiEdit|Bash`, `"timeout": 30`; sau Bash chỉ kiểm file đổi dấu (`seen` trong `.state`), không đếm khống. (3) `sys.path.insert/append` tính tĩnh từ `__file__`; trên bản chép agent-stack thấy 8/9 chỗ `ARCH_BASELINE` (bản cũ 0; chỗ thứ 9 là hook→hook). (4) kiểm một file giữ bộ đếm file khác; hoàn tác bằng git thì về 0. (5) JSON thêm `baselined`, `attempts`, `fresh`, `baselineStale`, `pending`, `previousHash`. (6) `verify --timeout` mặc định 1800 giây, giết cả cây con. Test mới trượt trên code cũ (`fails-before` có biên nhận; `hook.rs`, `verify.rs` khóa mức vừa). Review sonnet·high 7 lỗi, sửa cả 7. Biên nhận trên mã cuối: `cargo test`, clippy, `+1.88 check`, release, bench 36 repo 0 bất nhất 1344/1344 luồng, oracle khớp hết, sabotage 96/96 bắt, `verify` 3/3, `check --strict` 0, `checks.py` 0 lỗi chặn. TM-86..90. Định dạng chữ của `check` và mã thoát không đổi; agent-stack không cần sửa.
 
 - **Sửa phát hiện audit trước phát hành** (2026-10-26; bạn chốt "sửa 6 MEDIUM và LOW rẻ
   rồi phát hành"). Audit claude-security cả repo mức medium (báo cáo ngoài git trong
@@ -53,6 +55,7 @@ Cập nhật 2026-10-26.
    kế hoạch; cây làm việc sạch. Lưu ý cho người dùng 0.1.0: hash luật đổi dạng
    (32 hex), lần đầu chạy 0.1.1 báo "kiến trúc đã thay đổi", cần `verify` lại.
    Việc tiếp: chờ bạn đặt mốc mới. Các mục dưới là lịch sử cũ.
+   (15/11/2026) Phiên chính của agent-stack cập nhật commit ghim của archctl trong `install.sh`/`vetted.lock`, duyệt lại rồi mới cài; phiên này không cài.
 
 
 **Đã quyết (2026-10-03): giữ repo private, CI là

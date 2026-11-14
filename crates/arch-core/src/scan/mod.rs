@@ -62,6 +62,20 @@ pub struct Import {
     /// Chỉ Python điền. Tên nào chính là module con thì cũng là một đích —
     /// xem [`crate::resolve::Resolver::submodules`].
     pub names: Vec<String>,
+    /// Thư mục mà `sys.path.insert(...)`/`append(...)` đứng trước import này
+    /// đã thêm vào đường tìm module, tính tĩnh từ `__file__`. Chỉ Python điền.
+    /// Thứ tự là thứ tự Python tìm: mục `insert` mới nhất trước.
+    pub py_path: Vec<PyPath>,
+}
+
+/// Một thư mục trong `sys.path` do chính file thêm vào.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PyPath {
+    /// Đường dẫn tương đối với thư mục của file, `/` ngăn cách, có thể mở
+    /// đầu bằng `..` (`../lib`). Rỗng là chính thư mục đó.
+    pub dir: String,
+    /// `insert`: Python tìm ở đây trước các gốc thường. `append`: sau cùng.
+    pub front: bool,
 }
 
 /// Java: một lớp dùng không qua `import`. Thử lần lượt `specs` (cùng package
@@ -87,6 +101,7 @@ impl Import {
             line,
             system: false,
             names: Vec::new(),
+            py_path: Vec::new(),
         }
     }
 }

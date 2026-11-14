@@ -275,7 +275,7 @@ impl Resolver {
         let spec = import.spec.as_str();
         match lang {
             Lang::TypeScript => self.typescript(importer, spec),
-            Lang::Python => self.python(importer, spec),
+            Lang::Python => self.python(importer, spec, &import.py_path),
             Lang::C => self.c(importer, spec, import.system),
             Lang::Rust => self.rust(importer, spec),
             Lang::Go => self.go(spec),
@@ -385,16 +385,33 @@ impl Resolver {
     /// một package là `tests` của nó, không phải của package bên cạnh. Rồi mới
     /// tới các package còn lại, và ở đó tên phải là duy nhất: hai package cùng
     /// có `shared` thì đoán một cái là có thể sinh cạnh sai.
-    fn python(&self, importer: &str, spec: &str) -> Resolved {
+    ///
+    /// `py_path`: thư mục mà chính file thêm vào `sys.path` trước import này
+    /// (xem [`crate::scan::PyPath`]). Mục `insert` thử trước mọi gốc, mục
+    /// `append` thử sau cùng — đúng thứ tự Python tìm.
+    fn python(&self, importer: &str, spec: &str, py_path: &[crate::scan::PyPath]) -> Resolved {
         if let Some(rest) = spec.strip_prefix('.') {
             return self.python_relative(importer, rest);
         }
         let path = spec.replace('.', "/");
         let top = spec.split('.').next().unwrap_or(spec);
+        let added = |front: bool| -> Option<String> {
+            py_path
+                .iter()
+                .filter(|p| p.front == front)
+                .filter_map(|p| sys_path_base(importer, &p.dir))
+                .find_map(|base| self.python_in([base.as_str()], &path))
+        };
+        if let Some(found) = added(true) {
+            return Resolved::Path(found);
+        }
         let roots = self.py_roots();
         // `os`, `numpy`: không gốc nào có tên này, khỏi hỏi hệ thống file.
         let Some(bases) = roots.get(top) else {
-            return Resolved::Package(top.to_string());
+            return match added(false) {
+                Some(found) => Resolved::Path(found),
+                None => Resolved::Package(top.to_string()),
+            };
         };
         let (mut own, others): (Vec<_>, Vec<_>) =
             bases.iter().partition(|(project, _)| within(project, importer));
@@ -409,6 +426,9 @@ impl Resolver {
         found.dedup();
         if let [one] = found.as_slice() {
             return Resolved::Path(one.clone());
+        }
+        if let Some(found) = added(false) {
+            return Resolved::Path(found);
         }
         // Không tìm thấy trong dự án thì đây là gói bên thứ ba. Với import
         // tuyệt đối, hai khả năng đó không phân biệt được.
@@ -477,7 +497,7 @@ impl Resolver {
         for name in &import.names {
             let sep = if import.spec.ends_with('.') { "" } else { "." };
             let spec = format!("{}{sep}{name}", import.spec);
-            let found = self.python(importer, &spec);
+            let found = self.python(importer, &spec, &import.py_path);
             self.native_candidate(importer, &spec, &found, &mut natives);
             if let Resolved::Path(found) = found
                 && &found != base
@@ -1920,6 +1940,22 @@ fn find_go_modules(root: &Path) -> Vec<(String, String)> {
 
 fn is_relative(spec: &str) -> bool {
     spec.starts_with("./") || spec.starts_with("../") || spec == "." || spec == ".."
+}
+
+/// Gốc tìm module (dạng `a/b/`, rỗng là gốc repo) cho thư mục `dir` mà file
+/// `importer` thêm vào `sys.path`. `None` khi nó ra ngoài repo.
+fn sys_path_base(importer: &str, dir: &str) -> Option<String> {
+    let mut segs: Vec<&str> = dir_of(importer).split('/').filter(|s| !s.is_empty()).collect();
+    for part in dir.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                segs.pop()?;
+            }
+            p => segs.push(p),
+        }
+    }
+    Some(segs.iter().map(|s| format!("{s}/")).collect())
 }
 
 pub(crate) fn dir_of(path: &str) -> &str {

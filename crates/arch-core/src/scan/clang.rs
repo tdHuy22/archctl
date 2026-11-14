@@ -23,6 +23,7 @@ pub fn extract(toks: &[Token]) -> Vec<Import> {
                 line: pair[1].line,
                 system: true,
                 names: Vec::new(),
+                py_path: Vec::new(),
             }),
             _ => {}
         }

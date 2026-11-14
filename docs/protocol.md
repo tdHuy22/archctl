@@ -36,7 +36,9 @@ Không có nhánh "agent tự nới luật cho vừa mã mình viết".
 ## Bộ đếm lần thử
 
 `.arch/.state` nhớ mỗi vi phạm đã gặp lại bao nhiêu lần. Sửa xong thì bộ đếm
-về không. Tới lần thứ ba, `check` in ra đúng lệnh cần chạy:
+về không. Kiểm một file (`check <file>`, hook) chỉ đếm lại file đó; bộ đếm của
+file khác giữ nguyên, nên agent sửa xen kẽ nhiều file vẫn tới được mốc này. Tới
+lần thứ ba, `check` in ra đúng lệnh cần chạy:
 
 ```
 ✗ VI PHẠM  Native -> Unsafe  (bị cấm, #accepted)

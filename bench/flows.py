@@ -82,7 +82,10 @@ def run_flows(archctl: str, name: str, src: Path, work: Path) -> Flows:
     body = settings.read_text() if settings.exists() else ""
     # Bản cũ của phép kiểm này là `exists() or "..." in read_text()` — vế sau
     # không bao giờ được xét, nên nó chỉ kiểm file có tồn tại.
-    f.check("hook cho agent", "archctl check --changed" in body, body[:120])
+    # Hook phải thoát 0 và đưa vi phạm qua additionalContext (`check --hook`);
+    # `check --changed` thoát 1 nên model không thấy (GĐ3 agent-stack, 14/11/2026).
+    f.check("hook cho agent", "archctl check --hook" in body, body[:120])
+    f.check("hook bắt cả MultiEdit và Bash", '"Edit|Write|MultiEdit|Bash"' in body, body[:120])
     f.check("cấm agent ghi file luật", "Write(./.arch/system.arch)" in body, body[:120])
 
     text = law.read_text()
@@ -178,6 +181,20 @@ def run_flows(archctl: str, name: str, src: Path, work: Path) -> Flows:
         f.check("check --changed", p.returncode in (0, 1), p.stderr)
         p = f.run("check", str(one), *R)
         f.check("check <file>", p.returncode in (0, 1), p.stderr)
+        # Đúng cách Claude Code gọi hook: payload trên stdin, chạy ở gốc dự án.
+        payload = json.dumps({
+            "session_id": "bench", "cwd": str(work), "hook_event_name": "PostToolUse",
+            "tool_name": "Edit", "tool_input": {"file_path": str(one)}, "tool_response": {},
+        })
+        p = subprocess.run([f.archctl, "check", "--hook"], input=payload, capture_output=True, text=True,
+                           timeout=300, cwd=work)
+        out = p.stdout.strip()
+        try:
+            shaped = not out or json.loads(out)["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+        except (ValueError, KeyError, TypeError):
+            shaped = False
+        f.check("check --hook: mã 0, stdout rỗng hay JSON hook", p.returncode == 0 and not p.stderr and shaped,
+                f"mã {p.returncode}: {p.stderr[:80]} {out[:80]}")
 
     p = f.run("check", "--strict", *R)
     f.check("--strict chạy được", p.returncode in (0, 1), f"mã {p.returncode}")

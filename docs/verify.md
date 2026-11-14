@@ -53,7 +53,16 @@ là thứ đáng kiểm thật mà không phải quan hệ giữa hai component 
 archctl verify                  # chạy hết
 archctl verify property_test    # chạy một cái
 archctl verify --quiet          # nuốt đầu ra của lệnh, chỉ giữ kết quả
+archctl verify --timeout 600    # mỗi lệnh tối đa 600 giây (mặc định 1800)
 ```
+
+Mỗi lệnh có hạn, mặc định 30 phút: lệnh treo không kéo `verify` và job CI treo
+theo. Quá hạn thì archctl dừng cả cây tiến trình con của lệnh (đọc từ `ps`), ghi
+biên nhận **hỏng** và in `HỎNG (quá hạn N giây, đã dừng lệnh)`. Lệnh không chạy
+trong nhóm tiến trình riêng, nên CI hay công cụ gọi archctl giết nhóm của nó thì
+lệnh cũng chết theo. Con cháu tự tách khỏi cây (`setsid` rồi fork hai lần) thì
+không thấy. Máy thiếu `ps` hay `kill` (image tối giản, Windows) thì chỉ dừng được
+`sh`, và archctl in đúng như vậy.
 
 ```
 ▸ property_test  npm run test:props

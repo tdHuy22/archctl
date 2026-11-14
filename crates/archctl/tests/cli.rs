@@ -391,7 +391,7 @@ fn init_sinh_hook_cho_agent() {
     assert_eq!(code(&p.run(&["init"])), 0);
     let settings = p.read(".claude/settings.json");
     assert!(settings.contains("PostToolUse"), "{settings}");
-    assert!(settings.contains("archctl check --changed"), "{settings}");
+    assert!(settings.contains("archctl check --hook"), "{settings}");
 }
 
 /// Cấu hình sẵn có là file của người dùng; gộp vào đó là việc rủi ro.
