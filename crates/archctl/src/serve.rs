@@ -2,7 +2,9 @@
 //!
 //! Đây là phần đặc tả gọi là **chiều 3**: người nhìn sơ đồ biến đổi theo lúc
 //! agent làm việc, không cần đọc dòng mã nào. Và là chỗ duy nhất người **thao
-//! tác** được: kéo thả, khoá luật bằng một cú bấm, duyệt đề xuất tại chỗ.
+//! tác** được: vẽ sơ đồ (thêm, sửa, xoá, đổi tên khai báo; nối, gỡ mũi tên —
+//! phần tính bản mới ở `edit.rs`), kéo thả, khoá luật bằng một cú bấm, duyệt
+//! đề xuất tại chỗ.
 //!
 //! Máy chủ HTTP viết tay trên `TcpListener`, chỉ gắn vào `127.0.0.1`. Không
 //! khung web, không gói ngoài, không gọi mạng — mở được khi không có Internet,
@@ -13,7 +15,7 @@ use crate::proto::parse_args;
 use arch_core::check::{Reason, Report, Via};
 use arch_core::layout::{self, Point};
 use arch_core::model::{Owner, Status};
-use arch_core::protocol::{self, PROPOSALS_FILE};
+use arch_core::protocol::{self, DECISIONS_FILE, PROPOSALS_FILE};
 use arch_core::{ARCH_FILE, Document, json, jsonc};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -287,25 +289,22 @@ fn handle(mut stream: TcpStream, root: &Path, clients: &Clients, port: u16, key:
             // đọc-sửa-ghi file luật. Mọi thao tác ghi đi qua một cửa: chúng
             // hiếm, nên xếp hàng không tốn gì, còn mất một lần sửa thì tốn.
             let _writing = WRITES.lock();
+            let simple = |r: Result<(), String>| r.map_err(|e| ("400 Bad Request", failure(&e, "", &[])));
             let result = match path {
-                "/api/layout" => save_position(root, &req.body),
-                "/api/status" => set_status(root, &req.body),
-                "/api/decide" => decide(root, &req.body),
+                "/api/layout" => simple(save_position(root, &req.body)),
+                "/api/status" => simple(set_status(root, &req.body)),
+                "/api/decide" => simple(decide(root, &req.body)),
+                "/api/edit" => edit(root, &req.body),
                 // Chưa có file thì coi như đã xoá xong.
-                "/api/relayout" => match std::fs::remove_file(root.join(LAYOUT_FILE)) {
+                "/api/relayout" => simple(match std::fs::remove_file(root.join(LAYOUT_FILE)) {
                     Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
                     _ => Ok(()),
-                },
-                _ => Err("không có đường dẫn này".into()),
+                }),
+                _ => simple(Err("không có đường dẫn này".into())),
             };
             match result {
                 Ok(()) => respond(&mut stream, "200 OK", "application/json", r#"{"ok":true}"#),
-                Err(e) => respond(
-                    &mut stream,
-                    "400 Bad Request",
-                    "application/json",
-                    &format!(r#"{{"ok":false,"error":{}}}"#, json::string(&e)),
-                ),
+                Err((status, body)) => respond(&mut stream, status, "application/json", &body),
             }
         }
         _ => respond(&mut stream, "404 Not Found", "text/plain; charset=utf-8", "không có"),
@@ -622,9 +621,25 @@ fn model_json(root: &Path) -> String {
         })
         .collect();
 
+    // Mọi khai báo kèm nguyên văn, để giao diện sửa được cả những thứ không
+    // vẽ thành hộp (flow, contract, invariant, verify…) và gửi kèm `expect`.
+    let decls: Vec<String> = crate::edit::declarations(&arch_core::read_config(&root.join(ARCH_FILE)).unwrap_or_default())
+        .iter()
+        .map(|d| {
+            format!(
+                r#"{{"line":{},"keyword":{},"text":{},"locked":{}}}"#,
+                d.line,
+                json::string(&d.keyword),
+                json::string(&d.text),
+                d.locked
+            )
+        })
+        .collect();
+
     format!(
-        r#"{{"archHash":{},"nodes":[{}],"edges":[{}],"boundaries":[{}],"violations":[{}],"missing":[{}],"vacuous":[{}],"unproven":[{}],"deploy":[{}],"proposals":[{}],"stats":{{"files":{},"checked":{},"unchecked":{}}}}}"#,
+        r#"{{"archHash":{},"decls":[{}],"nodes":[{}],"edges":[{}],"boundaries":[{}],"violations":[{}],"missing":[{}],"vacuous":[{}],"unproven":[{}],"deploy":[{}],"proposals":[{}],"stats":{{"files":{},"checked":{},"unchecked":{}}}}}"#,
         json::string(&hash),
+        decls.join(","),
         nodes.join(","),
         edges.join(","),
         boundaries.join(","),
@@ -722,6 +737,98 @@ fn set_status(root: &Path, body: &str) -> Result<(), String> {
         return Err(format!("sửa xong thì file luật hỏng: {}", d.msg));
     }
     arch_core::write_atomic(&path, &updated).map_err(|e| e.to_string())
+}
+
+/// Thân trả lời khi thao tác bị từ chối. `why` để giao diện biết nên hỏi gì
+/// tiếp (xác nhận luật khoá, xoá kèm, tải lại); `refs` là các dòng liên quan.
+fn failure(error: &str, why: &str, refs: &[String]) -> String {
+    format!(
+        r#"{{"ok":false,"error":{},"why":{},"refs":{}}}"#,
+        json::string(error),
+        json::string(why),
+        json::strings(refs.iter().map(String::as_str)),
+    )
+}
+
+/// Sửa sơ đồ: thêm, sửa, xoá, đổi tên khai báo; nối, gỡ mũi tên.
+///
+/// Phần tính bản mới ở `edit.rs`. Ở đây chỉ còn ba việc: bắt buộc lý do,
+/// ghi nguyên tử, và để lại dấu vết trong `decisions.md` như `accept` —
+/// agent đọc file đó để biết vì sao luật đổi.
+fn edit(root: &Path, body: &str) -> Result<(), (&'static str, String)> {
+    let bad = |e: &str| ("400 Bad Request", failure(e, "bad", &[]));
+    let req = jsonc::parse(body).ok_or_else(|| bad("thân yêu cầu không phải JSON"))?;
+    // Một dòng: xuống dòng trong lý do sẽ chèn được một mục giả vào nhật ký.
+    let reason = req
+        .get("reason")
+        .and_then(jsonc::Value::as_str)
+        .unwrap_or("")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if reason.is_empty() {
+        return Err(bad("phải ghi lý do cho mọi thay đổi luật"));
+    }
+
+    let path = root.join(ARCH_FILE);
+    // File rỗng là hợp lệ: vẽ sơ đồ từ đầu bắt đầu từ đó.
+    let src = arch_core::read_for_update(&path).map_err(|e| bad(&e))?;
+    let done = crate::edit::apply(&src, &req).map_err(|r| {
+        let (status, why) = match r.why {
+            crate::edit::Why::Bad => ("400 Bad Request", "bad"),
+            crate::edit::Why::Stale => ("409 Conflict", "stale"),
+            crate::edit::Why::Locked => ("409 Conflict", "locked"),
+            crate::edit::Why::Referenced => ("409 Conflict", "referenced"),
+        };
+        (status, failure(&r.msg, why, &r.refs))
+    })?;
+
+    let mut log = arch_core::read_for_update(&root.join(DECISIONS_FILE)).map_err(|e| bad(&e))?;
+    arch_core::write_atomic(&path, &done.text).map_err(|e| bad(&e.to_string()))?;
+
+    // Nhật ký: dòng đầu là mô tả (agent và `parse_decisions` đọc dòng này),
+    // sau đó là các dòng trước và sau, lùi vào để không dòng nào mở đầu
+    // bằng `##` hay `**` mà làm lệch mục.
+    let mut statement = done.summary.clone();
+    if !done.before.is_empty() || !done.after.is_empty() {
+        statement.push('\n');
+        for line in &done.before {
+            statement.push_str(&format!("\n    - {line}"));
+        }
+        for line in &done.after {
+            statement.push_str(&format!("\n    + {line}"));
+        }
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let decision = protocol::Decision {
+        date: protocol::today(),
+        verdict: protocol::Verdict::Edited,
+        id: protocol::edit_id(&statement, nanos),
+        statement,
+        by: crate::proto::whoami(root),
+        reason,
+    };
+    if log.is_empty() {
+        log.push_str(protocol::DECISIONS_HEADER);
+    }
+    log.push_str(&protocol::render_decision(&decision));
+    arch_core::write_atomic(&root.join(DECISIONS_FILE), &log).map_err(|e| bad(&e.to_string()))?;
+
+    // Đổi tên thì hộp giữ chỗ cũ trên sơ đồ. Hỏng ở đây chỉ làm hộp xếp lại,
+    // luật đã ghi xong, nên không báo lỗi.
+    if let Some((old, new)) = done.moved {
+        let layout_path = root.join(LAYOUT_FILE);
+        if let Ok(text) = arch_core::read_for_update(&layout_path) {
+            let mut saved = layout::parse_saved(&text);
+            if let Some(point) = saved.remove(&old) {
+                saved.insert(new, point);
+                let _ = arch_core::write_atomic(&layout_path, &layout::render_saved(&saved));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Duyệt hoặc từ chối một đề xuất, dùng lại đúng lệnh của `archctl`.

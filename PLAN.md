@@ -5,9 +5,17 @@ Mô tả sản phẩm ở [README.md](README.md); file này chỉ ghi trạng th
 
 ## §0 Đang ở đâu, việc tiếp theo
 
-Cập nhật 2026-11-15.
+Cập nhật 2026-11-17.
+
+### Việc mở
+
+- **Bạn tự bấm thử trọn vòng sửa sơ đồ trong trình duyệt** (`archctl serve` trên bản sao). Agent đã kiểm được: form, dòng xem trước, chặn khi thiếu lý do. Bộ phân loại an toàn của Claude Code chặn agent bấm **Ghi vào system.arch**, kể cả trên bản sao, khớp với giao thức "chỉ người ghi luật". Đường ghi đã có test API trọn vòng.
+- Đổi trạng thái (`/api/status`) vẫn chưa bắt lý do và chưa ghi nhật ký như các thao tác sửa khác: chờ bạn quyết có làm không.
+- Hook agent-stack đọc nhầm `cargo test -p archctl --test serve` thành `archctl serve` (`pretool_guard.py` `check_arch_argv`); dùng `cargo test --workspace` thay.
 
 ### Đã xong, có bằng chứng
+
+- **Sửa sơ đồ đầy đủ trong `archctl serve`** (17/11/2026, chưa push). Tiêu chí ghi từ đầu việc (nguồn: phiên gọi giao; bạn chốt (a)–(d) qua câu hỏi). Đạt 3/4, tiêu chí 1 đạt một phần: (1) trọn vòng thêm component, nối mũi tên, đổi đường dẫn, xoá luật chạy qua API thật (`tests/serve.rs` `ve_so_do_tron_vong_qua_giao_dien`, `check` phản ánh ngay); trong trình duyệt mới kiểm form và chặn thiếu lý do; (2) có test cho từng ca từ chối; (3) lý do bắt buộc, mục `SỬA` trong `decisions.md`, `#locked` hỏi xác nhận, xoá kèm liệt kê chỗ nhắc; (4) biên nhận trên mã cuối: `cargo test --workspace` (serve 35/35), clippy, `+1.88 check`, `verify` 3/3, `check --strict` 0, `checks.py` 0. Mã: `crates/archctl/src/edit.rs` (mới), `serve.rs` (`POST /api/edit`, `decls`), `ui.html` (**+ Thêm**, **Nối mũi tên**, bấm mũi tên để gỡ, tab **Khai báo**), `protocol.rs` (`Verdict::Edited`). Review sonnet · high tìm 5 lỗi (4 vừa, 1 thấp), đã sửa cả 5 kèm 4 test. TM-91..95. Docs: `serve.md`, `protocol.md`, README.
 
 - **Sửa sáu chỗ GĐ3 của agent-stack** (14–15/11/2026; kế hoạch phiên bạn duyệt; đạt 4/4 tiêu chí). (1) `archctl check --hook`: đọc payload PostToolUse trên stdin, đưa vi phạm vào `hookSpecificOutput.additionalContext`, luôn mã 0; Haiku qua `claude -p`: bản 0.1.1 "NONE", bản mới trích `✗ VI PHẠM  Web -> Db` (`.tmp/e2e/`). (2) `init` sinh matcher `Edit|Write|MultiEdit|Bash`, `"timeout": 30`; sau Bash chỉ kiểm file đổi dấu (`seen` trong `.state`), không đếm khống. (3) `sys.path.insert/append` tính tĩnh từ `__file__`; trên bản chép agent-stack thấy 8/9 chỗ `ARCH_BASELINE` (bản cũ 0; chỗ thứ 9 là hook→hook). (4) kiểm một file giữ bộ đếm file khác; hoàn tác bằng git thì về 0. (5) JSON thêm `baselined`, `attempts`, `fresh`, `baselineStale`, `pending`, `previousHash`. (6) `verify --timeout` mặc định 1800 giây, giết cả cây con. Test mới trượt trên code cũ (`fails-before` có biên nhận; `hook.rs`, `verify.rs` khóa mức vừa). Review sonnet·high 7 lỗi, sửa cả 7; review lại phần sửa 1 lỗi (symlink tới thư mục làm hook sau Bash im lặng), đã sửa kèm test. Biên nhận trên mã cuối: `cargo test`, clippy, `+1.88 check`, release, bench 36 repo 0 bất nhất 1344/1344 luồng, oracle khớp hết, sabotage 96/96 bắt, `verify` 3/3, `check --strict` 0, `checks.py` 0 lỗi chặn. TM-86..90. Định dạng chữ của `check` và mã thoát không đổi; agent-stack không cần sửa.
 

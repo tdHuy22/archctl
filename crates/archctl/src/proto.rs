@@ -84,7 +84,7 @@ fn write(root: &Path, rel: &str, body: &str) -> Result<(), String> {
 
 /// Ai đang quyết định. Lấy từ git để nhật ký ghi được tên thật, nhờ đó một
 /// quyết định do agent tự bấm vẫn hiện ra trong review.
-fn whoami(root: &Path) -> String {
+pub(crate) fn whoami(root: &Path) -> String {
     std::process::Command::new("git")
         .arg("-C")
         .arg(root)
@@ -336,7 +336,8 @@ pub fn cmd_decide(args: &[String], verdict: Verdict) -> ExitCode {
             "Đã ghi nhận. Luật chặn vẫn còn — sửa `{}` nếu muốn gỡ.",
             arch_core::ARCH_FILE
         ),
-        (Verdict::Rejected, _) => {
+        // `cmd_decide` chỉ được gọi với duyệt hay từ chối; `SỬA` là của `serve`.
+        (Verdict::Rejected | Verdict::Edited, _) => {
             crate::say!("Đã ghi vào `{DECISIONS_FILE}`. Agent sẽ không đề xuất lại.")
         }
     }

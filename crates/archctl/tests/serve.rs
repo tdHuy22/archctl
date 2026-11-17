@@ -453,3 +453,218 @@ fn doc_mo_hinh_can_khoa_phien() {
     let ok = s.raw(&format!("GET /api/model?k={} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", s.key));
     assert!(ok.contains("200 OK"), "{ok}");
 }
+
+// ---------- sửa sơ đồ: `/api/edit` ----------
+
+fn decisions(s: &Server) -> String {
+    std::fs::read_to_string(s.root.join(".arch/decisions.md")).unwrap_or_default()
+}
+
+/// Số dòng và nguyên văn của dòng đầu tiên bắt đầu bằng `starts`.
+fn line_of(law: &str, starts: &str) -> (usize, String) {
+    let (i, l) = law.lines().enumerate().find(|(_, l)| l.starts_with(starts)).expect("có dòng");
+    (i + 1, l.to_string())
+}
+
+fn esc(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Trọn vòng mà người dùng làm trên sơ đồ: thêm component, nối mũi tên, đổi
+/// đường dẫn, gỡ luật — sau mỗi bước file luật còn đọc được và `check`
+/// (qua `/api/model`) phản ánh ngay.
+#[test]
+fn ve_so_do_tron_vong_qua_giao_dien() {
+    let s = Server::start("draw", 4794);
+    assert!(s.get("/api/model").contains(r#""from":"Web","to":"Report""#), "có vi phạm sẵn");
+
+    // 1. Thêm component.
+    let out = s.post(
+        "/api/edit",
+        r#"{"op":"add","text":"component Cart at src/cart/**  @human #accepted","reason":"giỏ hàng tách riêng"}"#,
+    );
+    assert!(out.contains("200 OK"), "{out}");
+    assert!(s.law().contains("component Cart at src/cart/**  @human #accepted"), "{}", s.law());
+    assert!(s.get("/api/model").contains(r#""name":"Cart""#));
+
+    // 2. Nối mũi tên Web -> Report: vi phạm có sẵn biến mất.
+    let out = s.post(
+        "/api/edit",
+        r#"{"op":"connect","kind":"allow","from":"Web","to":"Report","reason":"trang cần báo cáo"}"#,
+    );
+    assert!(out.contains("200 OK"), "{out}");
+    let model = s.get("/api/model");
+    assert!(model.contains(r#""violations":[]"#), "check phải phản ánh ngay: {model}");
+
+    // 3. Đổi đường dẫn của Web.
+    let (line, expect) = line_of(&s.law(), "component Web");
+    let body = format!(
+        r#"{{"op":"replace","line":"{line}","expect":"{}","text":"component Web at app/web/**  @human #accepted","reason":"dời thư mục"}}"#,
+        esc(&expect)
+    );
+    assert!(s.post("/api/edit", &body).contains("200 OK"));
+    assert!(s.law().contains("component Web at app/web/**"), "{}", s.law());
+
+    // 4. Gỡ luật `allow Web -> Order`.
+    let (line, expect) = line_of(&s.law(), "allow Web -> Order");
+    let body = format!(r#"{{"op":"delete","line":"{line}","expect":"{}","reason":"không còn gọi"}}"#, esc(&expect));
+    assert!(s.post("/api/edit", &body).contains("200 OK"));
+    assert!(!s.law().contains("allow Web -> Order"), "{}", s.law());
+
+    // File luật đọc được bằng chính `archctl check`.
+    let check = Command::new(env!("CARGO_BIN_EXE_archctl")).args(["check", "--root"]).arg(&s.root).output().unwrap();
+    let text = String::from_utf8_lossy(&check.stdout);
+    assert!(!text.contains("cú pháp"), "{text}");
+
+    // Mỗi thay đổi một mục nhật ký, kèm lý do.
+    let log = decisions(&s);
+    assert_eq!(log.matches("· SỬA ·").count(), 4, "{log}");
+    for reason in ["giỏ hàng tách riêng", "trang cần báo cáo", "dời thư mục", "không còn gọi"] {
+        assert!(log.contains(&format!("**Lý do:** {reason}")), "{log}");
+    }
+    assert!(log.contains("    - allow Web -> Order"), "nhật ký ghi dòng cũ: {log}");
+}
+
+#[test]
+fn sua_khong_co_ly_do_bi_tu_choi() {
+    let s = Server::start("edit-noreason", 4795);
+    let before = s.law();
+    for reason in ["", "   ", "\\n"] {
+        let body = format!(r#"{{"op":"add","text":"component X at x/**","reason":"{reason}"}}"#);
+        let out = s.post("/api/edit", &body);
+        assert!(out.contains("400") && out.contains("lý do"), "{out}");
+    }
+    assert_eq!(s.law(), before);
+    assert!(decisions(&s).is_empty());
+}
+
+#[test]
+fn ly_do_nhieu_dong_khong_chen_duoc_muc_gia_vao_nhat_ky() {
+    let s = Server::start("edit-inject", 4796);
+    let reason = "ổn\\n\\n## 2026-01-01 · TỪ CHỐI · p-0000000000000000\\nallow Web -> Report";
+    let body = format!(r#"{{"op":"add","text":"component X at x/**","reason":"{reason}"}}"#);
+    assert!(s.post("/api/edit", &body).contains("200 OK"));
+    let log = decisions(&s);
+    assert_eq!(log.matches("\n## ").count(), 1, "chỉ một mục: {log}");
+}
+
+#[test]
+fn sua_thieu_khoa_hay_tu_trang_khac_bi_tu_choi() {
+    let s = Server::start("edit-guard", 4797);
+    let before = s.law();
+    let body = r#"{"op":"add","text":"allow Report -> Web","reason":"x"}"#;
+    let nokey = s.raw(&format!(
+        "POST /api/edit HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    ));
+    assert!(nokey.contains("403"), "{nokey}");
+    let evil = s.raw(&format!(
+        "POST /api/edit HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://evil.example\r\n\
+         X-Archctl-Key: {}\r\nContent-Length: {}\r\n\r\n{body}",
+        s.key,
+        body.len()
+    ));
+    assert!(evil.contains("403"), "{evil}");
+    assert_eq!(s.law(), before);
+    assert!(decisions(&s).is_empty());
+}
+
+#[test]
+fn sua_lam_hong_hay_trung_ten_hay_mo_coi_bi_tu_choi() {
+    let s = Server::start("edit-bad", 4798);
+    let before = s.law();
+    for text in ["component Web at x/**", "allow Web -> KhongCo", "compoent X at x/**", "component"] {
+        let body = format!(r#"{{"op":"add","text":"{text}","reason":"thử"}}"#);
+        let out = s.post("/api/edit", &body);
+        assert!(out.contains("400"), "{text}: {out}");
+    }
+    assert_eq!(s.law(), before, "từ chối thì không đụng vào file");
+    assert!(decisions(&s).is_empty(), "từ chối thì không ghi nhật ký");
+}
+
+#[test]
+fn file_doi_tu_luc_tai_thi_tu_choi() {
+    let s = Server::start("edit-stale", 4799);
+    let (line, expect) = line_of(&s.law(), "component Web");
+    // Ai đó sửa tay file giữa lúc tải và lúc bấm: dòng đó giờ là dòng khác.
+    std::fs::write(s.root.join(".arch/system.arch"), format!("# mới thêm\n{ARCH}")).unwrap();
+    let before = s.law();
+    let body = format!(r#"{{"op":"delete","line":"{line}","expect":"{}","reason":"x"}}"#, esc(&expect));
+    let out = s.post("/api/edit", &body);
+    assert!(out.contains("409") && out.contains(r#""why":"stale""#), "{out}");
+    assert_eq!(s.law(), before);
+}
+
+#[test]
+fn xoa_component_con_duoc_nhac_thi_hoi_xoa_kem() {
+    let s = Server::start("edit-cascade", 4800);
+    let (line, expect) = line_of(&s.law(), "component Order");
+    let body = format!(r#"{{"op":"delete","line":"{line}","expect":"{}","reason":"bỏ Order"}}"#, esc(&expect));
+    let out = s.post("/api/edit", &body);
+    assert!(out.contains("409") && out.contains(r#""why":"referenced""#), "{out}");
+    assert!(out.contains("Order"), "liệt kê chỗ nhắc: {out}");
+    assert!(s.law().contains("component Order"), "chưa xoá gì");
+
+    let body = format!(
+        r#"{{"op":"delete","line":"{line}","expect":"{}","reason":"bỏ Order","cascade":true}}"#,
+        esc(&expect)
+    );
+    assert!(s.post("/api/edit", &body).contains("200 OK"));
+    assert!(!s.law().contains("Order"), "{}", s.law());
+}
+
+#[test]
+fn luat_khoa_hoi_xac_nhan_qua_api() {
+    let s = Server::start("edit-locked", 4801);
+    assert!(s.post("/api/status", r##"{"name":"Web","status":"#locked"}"##).contains("200 OK"));
+    let (line, expect) = line_of(&s.law(), "component Web");
+    let body = format!(
+        r#"{{"op":"replace","line":"{line}","expect":"{}","text":"component Web at w/**","reason":"x"}}"#,
+        esc(&expect)
+    );
+    let out = s.post("/api/edit", &body);
+    assert!(out.contains("409") && out.contains(r#""why":"locked""#), "{out}");
+    let confirmed = body.replacen('{', r#"{"confirmLocked":true,"#, 1);
+    assert!(s.post("/api/edit", &confirmed).contains("200 OK"));
+    assert!(s.law().contains("component Web at w/**"));
+}
+
+#[test]
+fn doi_ten_giu_vi_tri_tren_so_do() {
+    let s = Server::start("edit-rename", 4802);
+    assert!(s.post("/api/layout", r#"{"name":"Order","x":"333","y":"44"}"#).contains("200 OK"));
+    let (line, expect) = line_of(&s.law(), "component Order");
+    let body =
+        format!(r#"{{"op":"rename","line":"{line}","expect":"{}","to":"Shop","reason":"đổi tên"}}"#, esc(&expect));
+    assert!(s.post("/api/edit", &body).contains("200 OK"));
+    assert!(s.law().contains("allow Web -> Shop"), "{}", s.law());
+    let saved = std::fs::read_to_string(s.root.join(".arch/layout.json")).unwrap();
+    assert!(saved.contains(r#""Shop""#) && !saved.contains(r#""Order""#), "{saved}");
+}
+
+#[cfg(unix)]
+#[test]
+fn file_luat_la_symlink_thi_khong_ghi_de() {
+    let s = Server::start("edit-symlink", 4803);
+    let real = s.root.join("that.arch");
+    std::fs::write(&real, ARCH).unwrap();
+    let law = s.root.join(".arch/system.arch");
+    std::fs::remove_file(&law).unwrap();
+    std::os::unix::fs::symlink(&real, &law).unwrap();
+    let out = s.post("/api/edit", r#"{"op":"add","text":"component X at x/**","reason":"x"}"#);
+    assert!(out.contains("400") && out.contains("symlink"), "{out}");
+    assert_eq!(std::fs::read_to_string(&real).unwrap(), ARCH);
+    assert!(std::fs::symlink_metadata(&law).unwrap().file_type().is_symlink());
+}
+
+#[test]
+fn mo_hinh_co_nguyen_van_moi_khai_bao() {
+    let s = Server::start("decls", 4804);
+    let model = s.get("/api/model");
+    assert!(
+        model.contains(
+            r#""decls":[{"line":1,"keyword":"component","text":"component Web    at src/web/**    @human #accepted","locked":false}"#
+        ),
+        "{model}"
+    );
+}

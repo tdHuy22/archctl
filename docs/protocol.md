@@ -9,9 +9,9 @@ luật một cách sáng tạo, hoặc kẹt vô hạn.
 
 | File | Ai ghi | Qua lệnh |
 | --- | --- | --- |
-| `system.arch` | người | `accept` |
+| `system.arch` | người | `accept`, sửa sơ đồ trong `serve` |
 | `proposals.arch` | agent | `propose`, `block` |
-| `decisions.md` | cả hai | `accept`, `reject` |
+| `decisions.md` | cả hai | `accept`, `reject`, sửa sơ đồ trong `serve` (mục `SỬA`) |
 | `.state` | archctl | `check` |
 
 Agent **không bao giờ ghi `system.arch`**. Một file một người ghi thì không còn

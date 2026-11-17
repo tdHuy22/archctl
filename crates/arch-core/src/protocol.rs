@@ -167,6 +167,8 @@ pub fn render_proposals(proposals: &[Proposal]) -> String {
 pub enum Verdict {
     Accepted,
     Rejected,
+    /// Người sửa luật thẳng trên sơ đồ (`archctl serve`), không qua đề xuất.
+    Edited,
 }
 
 impl Verdict {
@@ -174,8 +176,16 @@ impl Verdict {
         match self {
             Verdict::Accepted => "DUYỆT",
             Verdict::Rejected => "TỪ CHỐI",
+            Verdict::Edited => "SỬA",
         }
     }
+}
+
+/// Danh tính của một lần sửa trên sơ đồ: không có đề xuất nào để lấy id, nên
+/// băm nội dung kèm thời điểm.
+pub fn edit_id(content: &str, nanos: u128) -> String {
+    let digest = sha256::hex(format!("edit|{nanos}|{content}").as_bytes());
+    format!("e-{}", &digest[..16])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,6 +211,7 @@ pub fn parse_decisions(src: &str) -> Vec<Decision> {
             let verdict = match *verdict {
                 v if v == Verdict::Accepted.label() => Verdict::Accepted,
                 v if v == Verdict::Rejected.label() => Verdict::Rejected,
+                v if v == Verdict::Edited.label() => Verdict::Edited,
                 _ => continue,
             };
             out.push(Decision {

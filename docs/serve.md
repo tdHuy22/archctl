@@ -12,6 +12,10 @@ chỉ làm được vế sau. Đây là vế đầu.
 
 | Thao tác | Ghi vào đâu |
 | --- | --- |
+| **+ Thêm** component, store, luật, service, flow… | `.arch/system.arch`, mục `SỬA` trong `.arch/decisions.md` |
+| **Nối mũi tên**: kéo từ hộp này sang hộp kia | thêm `allow`/`deny` (hay `link` giữa hai service), như trên |
+| Bấm một mũi tên → Gỡ, Sửa luật, Xoá cả dòng | như trên |
+| Bấm một hộp, hay tab **Khai báo** → Sửa, Đổi tên, Xoá | như trên |
 | Kéo thả hộp | `.arch/layout.json` |
 | Bấm `#locked` / `#accepted` / `#draft` | đúng một dòng trong `.arch/system.arch` |
 | Tab **Lạc hậu** | chỉ đọc — tên khai báo nhưng không có trong mã |
@@ -21,6 +25,49 @@ chỉ làm được vế sau. Đây là vế đầu.
 Và quan sát: sơ đồ **tự cập nhật** khi mã hoặc luật đổi. Agent sửa file, sơ đồ
 đổi theo trong vòng nửa giây — không cần tải lại trang. Đây là "chiều 3" trong
 đặc tả: nhìn sơ đồ là biết agent đang làm tới đâu và chỗ nào đang hỏng.
+
+## Vẽ sơ đồ
+
+Ý gốc của công cụ: **người vẽ kiến trúc, agent viết mã theo**. Nên mọi thứ
+trong `system.arch` thêm, sửa, xoá được ngay trên sơ đồ, không phải mở file.
+
+- **Khai báo một dòng** (`component`, `external`, `store`, `allow`, `deny`,
+  `api`, `service`, `link`, `view`) có form; dòng sinh ra hiện ngay bên dưới.
+  Bấm **Sửa dạng chữ** để gõ thẳng.
+- **Khai báo nhiều dòng hay có biểu thức** (`flow`, `contract`, `boundary`,
+  `invariant`, `verify`) sửa bằng ô chữ. Gõ sai thì máy chủ nói dòng nào sai.
+- **Đổi tên** đổi cả mọi chỗ nhắc tới, đúng không gian tên: đổi component
+  `Web` thì `allow`, `store … owned_by`, `service … runs`, `view`, `boundary`,
+  `contract Web.x`, bước `Web` của `flow`, `invariant [Web]` đổi theo, còn
+  `service Web` (không gian tên khác) giữ nguyên. Hộp giữ chỗ cũ trên sơ đồ.
+- **Xoá một tên còn được nhắc** thì bị từ chối kèm danh sách chỗ nhắc. Bấm
+  **Xoá kèm** thì tên được gỡ khỏi danh sách đích, luật chỉ còn trỏ tới nó bị
+  xoá. Chỗ không gỡ tự động được — `store` thuộc component đó, bước của
+  `flow`, `contract`, phạm vi `invariant` — vẫn bị từ chối: sửa chúng trước.
+- **Bấm vào một vi phạm** (cạnh đỏ) → **Cho phép**: thêm `allow` cho đúng cặp
+  đó, khi đó là quyết định kiến trúc chứ không phải lỗi của mã.
+
+Mỗi thao tác đều phải ghi **lý do**, như `archctl accept --reason`: máy chủ ghi
+một mục `## <ngày> · SỬA · e-…` vào `decisions.md`, gồm dòng mô tả, các dòng cũ
+(`-`) và mới (`+`), người sửa, lý do. Agent đọc file đó để biết vì sao luật đổi.
+
+Luật `#locked` sửa được, nhưng giao diện hỏi lại một lần: khoá là để không ai lỡ
+tay đổi.
+
+### Không làm hỏng file luật
+
+| | |
+| --- | --- |
+| Bản sửa làm file không đọc được, trùng tên, hay để `allow` trỏ vào tên không còn | từ chối, nói dòng nào; không ghi gì |
+| File đã đổi từ lúc tải sơ đồ (agent hay người sửa tay) | từ chối (409): mỗi thao tác gửi kèm số dòng **và** nguyên văn cả khai báo, kể cả thân khối |
+| Xoá kèm | chỉ viết lại dòng thật sự nhắc tên bị xoá; dòng khác giữ nguyên từng byte |
+| Xoá tên mà chỉ bước `flow`, `retry` của `boundary` hay `verify` của `invariant`/`contract` còn nhắc | từ chối và liệt kê, kể cả khi bấm Xoá kèm: bộ đọc luật không báo lỗi cho những chỗ này, xoá xong chúng thành mồ côi lặng lẽ |
+| Dòng không đụng tới | giữ nguyên từng byte, kể cả chú thích, `\r\n`, BOM |
+| `system.arch` là symlink | không ghi đè |
+| Lý do nhiều dòng | gộp thành một dòng: không chèn được mục giả vào nhật ký |
+
+Khai báo mới đứng ngay sau khai báo cuối cùng cùng loại (component cạnh
+component, luật cạnh luật), không thì ở cuối file.
 
 ## Đọc sơ đồ
 
@@ -205,9 +252,8 @@ Mọi lệnh `archctl` ghi file đều theo cách này, không riêng máy chủ
 
 - **Một người dùng.** Hai người cùng sửa thì không mất file, nhưng người sau
   vẫn ghi đè quyết định của người trước — không có hợp nhất.
-- **Không sửa được cấu trúc.** Thêm component hay vẽ quan hệ mới vẫn phải sửa
-  `.arch/system.arch`. Giao diện chỉ đổi *trạng thái*, vị trí, và quyết định
-  trên đề xuất.
+- **Đổi trạng thái (`#locked`…) chưa cần lý do** và chưa ghi nhật ký như các
+  thao tác sửa sơ đồ.
 - **Dò thay đổi bằng cách quét lại** thay vì gọi API theo dõi của hệ điều
   hành, để không thêm dependency nào.
 - **File luật hỏng thì sơ đồ dừng** và hiện lỗi cú pháp kèm số dòng, thay vì vẽ

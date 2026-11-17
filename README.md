@@ -56,9 +56,13 @@ lặng nói dối từ đó.
 
 ## Sơ đồ để thao tác, không chỉ để nhìn
 
-`archctl serve` mở sơ đồ ở `127.0.0.1:4000`: kéo thả, khoá luật bằng một cú
-bấm, duyệt đề xuất tại chỗ. Sơ đồ **tự cập nhật** khi agent sửa mã — nhìn là
-biết nó đang làm tới đâu và chỗ nào đang hỏng.
+`archctl serve` mở sơ đồ ở `127.0.0.1:4000`: người **vẽ** kiến trúc ngay trên
+đó — thêm component, kéo mũi tên giữa hai hộp thành `allow`/`deny`, đổi tên,
+đổi đường dẫn, gỡ luật, sửa cả `flow`, `contract`, `boundary` bằng ô chữ có
+kiểm — rồi agent viết mã theo. Mọi thay đổi ghi vào `.arch/system.arch` sau
+khi qua bộ đọc luật, và để lại lý do trong `decisions.md`. Ngoài ra: kéo thả,
+khoá luật bằng một cú bấm, duyệt đề xuất tại chỗ. Sơ đồ **tự cập nhật** khi
+agent sửa mã — nhìn là biết nó đang làm tới đâu và chỗ nào đang hỏng.
 
 Giao diện là một file HTML tự chứa, tự vẽ SVG, không framework và không gọi
 mạng. Người dùng cuối chỉ cần đúng một binary.

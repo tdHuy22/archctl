@@ -13,6 +13,7 @@ use arch_core::{Document, json};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod edit;
 mod proto;
 mod serve;
 mod setup;

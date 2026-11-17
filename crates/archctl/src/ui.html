@@ -95,6 +95,32 @@
   #fault { padding: 24px; color: var(--bad); white-space: pre-wrap; }
   .node { cursor: pointer; }
   .node text { pointer-events: none; user-select: none; }
+  #canvas.connecting, #canvas.connecting .node { cursor: crosshair; }
+  button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  .edge-hit { cursor: pointer; }
+  dialog {
+    width: min(560px, calc(100vw - 32px)); border: 1px solid var(--line); border-radius: 12px;
+    background: var(--panel); color: var(--ink); padding: 18px 20px;
+  }
+  dialog::backdrop { background: rgb(0 0 0 / .35); }
+  dialog h3 { margin: 0 0 12px; font-size: 15px; }
+  .field { display: block; margin: 0 0 10px; }
+  .field > span { display: block; color: var(--muted); margin-bottom: 3px; }
+  input[type=text], select {
+    width: 100%; font: inherit; padding: 6px 8px; border: 1px solid var(--line);
+    border-radius: 7px; background: var(--bg); color: var(--ink);
+  }
+  textarea.code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; min-height: 110px; }
+  pre.preview {
+    margin: 4px 0 12px; padding: 8px 10px; border-radius: 7px; background: var(--bg);
+    border: 1px dashed var(--line); white-space: pre-wrap; word-break: break-word;
+  }
+  .ed-error { color: var(--bad); background: var(--bad-soft); border-radius: 7px; padding: 8px 10px; margin: 0 0 10px; white-space: pre-wrap; }
+  .row.end { justify-content: flex-end; }
+  .decl { border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; margin-bottom: 8px; }
+  .decl pre { margin: 0 0 6px; white-space: pre-wrap; word-break: break-word; }
+  .decl button, .actions button { padding: 3px 9px; }
+  .badge { font-size: 11px; color: var(--muted); }
 </style>
 
 <header>
@@ -105,6 +131,8 @@
   <span class="pill warn" id="waiting" hidden></span>
   <span class="pill warn" id="stale" hidden></span>
   <span class="spacer"></span>
+  <button id="add" class="primary" title="Thêm component, luật hay khai báo khác vào system.arch">+ Thêm</button>
+  <button id="connect" aria-pressed="false" title="Bật rồi kéo từ hộp này sang hộp kia để thêm allow, deny hay link">Nối mũi tên</button>
   <button id="relayout">Sắp xếp lại</button>
 </header>
 
@@ -116,13 +144,30 @@
       <button data-tab="violations" aria-selected="false">Vi phạm</button>
       <button data-tab="stale" aria-selected="false">Lạc hậu</button>
       <button data-tab="proposals" aria-selected="false">Đề xuất</button>
+      <button data-tab="decls" aria-selected="false">Khai báo</button>
     </nav>
     <div class="tab" data-tab="detail" data-on></div>
     <div class="tab" data-tab="violations"></div>
     <div class="tab" data-tab="stale"></div>
     <div class="tab" data-tab="proposals"></div>
+    <div class="tab" data-tab="decls"></div>
   </aside>
 </main>
+
+<dialog id="editor">
+  <form id="ed-form">
+    <h3 id="ed-title"></h3>
+    <div id="ed-body"></div>
+    <label class="field"><span>Lý do — bắt buộc, ghi vào <code>decisions.md</code> để agent biết vì sao luật đổi</span>
+      <textarea id="ed-reason"></textarea></label>
+    <div id="ed-error" class="ed-error" hidden></div>
+    <div class="row end">
+      <button type="button" id="ed-cancel">Huỷ</button>
+      <button type="button" id="ed-extra" class="danger" hidden></button>
+      <button type="submit" class="primary" id="ed-ok">Ghi vào system.arch</button>
+    </div>
+  </form>
+</dialog>
 
 <div class="legend">
   <span class="lg-component">component</span>
@@ -146,6 +191,9 @@ const STATUS_ORDER = ["#draft", "#proposed", "#accepted", "#locked"];
 const canvas = document.getElementById("canvas");
 const view = { x: 0, y: 0, k: 1 };
 let model = null, selected = null, drag = null, fitNext = true;
+// Mũi tên đang chọn, và chế độ "Nối mũi tên": kéo từ hộp này sang hộp kia.
+let selectedEdge = null, connectMode = false;
+const sameEdge = (a, b) => a.from === b.from && a.to === b.to && a.kind === b.kind;
 // Người đã tự kéo hoặc phóng thì đừng canh lại nữa — đó là khung nhìn của họ.
 let userMoved = false;
 // Nhãn cạnh hay rơi trùng chỗ khi nhiều cạnh cùng đi qua một vùng.
@@ -176,8 +224,10 @@ const el = (name, attrs = {}, text) => {
   if (text !== undefined) node.textContent = text;
   return node;
 };
-const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) =>
-  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+// Mọi chữ đưa vào HTML đi qua đây: tên, đường dẫn, đề xuất đều có thể do
+// agent viết, và một script lọt vào trang này chạy được với khoá phiên.
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
 // Khoá phiên nằm trong địa chỉ mà `archctl serve` in ra. Nó phân biệt người
 // đang mở trang với agent đang chạy cùng máy — `curl` vào đây không có nó.
@@ -200,6 +250,17 @@ async function refresh() {
   if (next.error) { showFault(next); return; }
   model = next;
   model.byName = Object.fromEntries(model.nodes.map((n) => [n.name, n]));
+  model.byLine = Object.fromEntries((model.decls || []).map((d) => [d.line, d]));
+  // Phần tử đã chọn có thể vừa bị xoá hay đổi tên.
+  if (selected && !model.byName[selected]) selected = null;
+  // Mũi tên đang chọn lấy lại số dòng mới: thêm một dòng phía trên là luật
+  // của nó dời xuống, và bảng chi tiết sẽ hiện nhầm luật khác.
+  if (selectedEdge && selectedEdge.kind !== "violation") {
+    const now = model.edges.find((e) => sameEdge(e, selectedEdge));
+    selectedEdge = now ? { ...selectedEdge, line: now.line } : null;
+  } else if (selectedEdge && !model.violations.some((v) => v.from === selectedEdge.from && v.to === selectedEdge.to)) {
+    selectedEdge = null;
+  }
   document.getElementById("fault")?.remove();
   if (fitNext) { fitNext = false; fitToView(); }
   draw();
@@ -338,16 +399,28 @@ function drawEdge(root, e, broken) {
   const draft = e.status && e.status !== "#accepted" && e.status !== "#locked";
   // `runs` không phải phụ thuộc mà là "chạy ở đâu": vẽ mờ để không lẫn với luật.
   const runs = e.kind === "runs";
+  const picked = selectedEdge && sameEdge(e, selectedEdge);
 
   root.append(el("path", {
     d, fill: "none",
     stroke: violation ? "var(--bad)" : e.kind === "deny" ? "var(--warn)"
       : e.kind === "link" || runs ? "var(--svc)" : "var(--muted)",
-    "stroke-width": violation ? 2.5 : e.kind === "link" ? 1.8 : 1.4,
+    "stroke-width": picked ? 3.4 : violation ? 2.5 : e.kind === "link" ? 1.8 : 1.4,
     "stroke-dasharray": runs ? "1 4" : draft ? "5 4" : e.kind === "deny" ? "2 3" : "",
     "marker-end": runs ? "" : `url(#arrow-${violation ? "bad" : "a"})`,
-    opacity: violation ? 1 : runs ? 0.45 : draft ? 0.6 : 0.85,
+    opacity: picked || violation ? 1 : runs ? 0.45 : draft ? 0.6 : 0.85,
   }));
+  // Vùng bấm rộng hơn nét vẽ, để chọn được mũi tên mà gỡ hay sửa luật.
+  const hit = el("path", { d, fill: "none", stroke: "transparent", "stroke-width": 12, class: "edge-hit" });
+  hit.addEventListener("pointerdown", (ev) => {
+    ev.stopPropagation();
+    selectedEdge = { from: e.from, to: e.to, kind: e.kind, line: e.line };
+    selected = null;
+    showTab("detail");
+    renderTabs();
+    draw();
+  });
+  root.append(hit);
 
   const label = view.k < 0.45 ? ""
     : violation ? (e.count > 1 ? `${e.count} vi phạm` : "vi phạm") : e.kind === "deny" ? "cấm" : "";
@@ -434,12 +507,21 @@ function toWorld(ev) {
 function startDrag(ev, node) {
   ev.stopPropagation();
   const at = toWorld(ev);
+  canvas.setPointerCapture(ev.pointerId);
+  if (connectMode) {
+    drag = { link: node, at };
+    return;
+  }
   drag = { node, dx: at.x - node.x, dy: at.y - node.y, moved: false };
   selected = node.name;
+  selectedEdge = null;
+  showTab("detail");
   renderTabs();
   draw();
-  canvas.setPointerCapture(ev.pointerId);
 }
+
+const nodeAt = (p) => model.nodes.find((n) =>
+  p.x >= n.x && p.x <= n.x + NODE_W && p.y >= n.y && p.y <= n.y + NODE_H);
 
 canvas.addEventListener("pointerdown", (ev) => {
   drag = { pan: true, x: ev.clientX - view.x, y: ev.clientY - view.y };
@@ -449,6 +531,17 @@ canvas.addEventListener("pointerdown", (ev) => {
 
 canvas.addEventListener("pointermove", (ev) => {
   if (!drag) return;
+  if (drag.link) {
+    // Dây cao su từ hộp nguồn tới con trỏ.
+    drag.at = toWorld(ev);
+    draw();
+    const from = drag.link;
+    canvas.lastChild.append(el("line", {
+      x1: from.x + NODE_W / 2, y1: from.y + NODE_H / 2, x2: drag.at.x, y2: drag.at.y,
+      stroke: "var(--accent)", "stroke-width": 2, "stroke-dasharray": "4 3", "pointer-events": "none",
+    }));
+    return;
+  }
   userMoved = true;
   if (drag.pan) {
     view.x = ev.clientX - drag.x;
@@ -465,6 +558,13 @@ canvas.addEventListener("pointermove", (ev) => {
 canvas.addEventListener("pointerup", (ev) => {
   canvas.classList.remove("panning");
   canvas.releasePointerCapture(ev.pointerId);
+  if (drag?.link) {
+    const from = drag.link, to = nodeAt(toWorld(ev));
+    drag = null;
+    draw();
+    if (to && to !== from) openConnect(from, to);
+    return;
+  }
   if (drag && !drag.pan && drag.moved) {
     // Lưu vị trí để lần sau mở lại sơ đồ không nhảy chỗ.
     post("/api/layout", { name: drag.node.name, x: String(drag.node.x), y: String(drag.node.y) });
@@ -488,13 +588,19 @@ document.getElementById("relayout").addEventListener("click", async () => {
   if (await post("/api/relayout", {})) { fitNext = true; userMoved = false; refresh(); }
 });
 
-document.querySelectorAll("nav button").forEach((button) => {
-  button.addEventListener("click", () => {
-    document.querySelectorAll("nav button").forEach((b) =>
-      b.setAttribute("aria-selected", String(b === button)));
-    document.querySelectorAll(".tab").forEach((t) =>
-      t.toggleAttribute("data-on", t.dataset.tab === button.dataset.tab));
-  });
+function showTab(name) {
+  document.querySelectorAll("nav button").forEach((b) =>
+    b.setAttribute("aria-selected", String(b.dataset.tab === name)));
+  document.querySelectorAll(".tab").forEach((t) => t.toggleAttribute("data-on", t.dataset.tab === name));
+}
+document.querySelectorAll("nav button").forEach((button) =>
+  button.addEventListener("click", () => showTab(button.dataset.tab)));
+
+document.getElementById("add").addEventListener("click", () => openDeclEditor(null));
+document.getElementById("connect").addEventListener("click", (ev) => {
+  connectMode = !connectMode;
+  ev.currentTarget.setAttribute("aria-pressed", String(connectMode));
+  canvas.classList.toggle("connecting", connectMode);
 });
 
 // ---------- bảng bên phải ----------
@@ -506,6 +612,7 @@ function renderTabs() {
   renderViolations();
   renderStale();
   renderProposals();
+  renderDecls();
 }
 
 // Khai báo nói một đằng, mã làm một nẻo. Không phải vi phạm luật, nhưng là
@@ -547,11 +654,18 @@ function renderStale() {
 
 function renderDetail() {
   const box = tab("detail");
+  if (selectedEdge) { renderEdge(box, selectedEdge); return; }
   const n = selected && model.byName[selected];
   if (!n) {
-    box.innerHTML = `<p class="empty">Bấm vào một hộp trên sơ đồ để xem chi tiết.</p>`;
+    box.innerHTML = model.nodes.length
+      ? `<p class="empty">Bấm vào một hộp hay một mũi tên trên sơ đồ để xem chi tiết và sửa.</p>`
+      : `<p class="empty">Sơ đồ còn trống. Bấm <b>+ Thêm</b> để vẽ component đầu tiên.</p>`;
     return;
   }
+  // Dòng của hộp phải đúng là khai báo của hộp đó: nút "lối vào từ ngoài"
+  // mang số dòng của một `link`, sửa nó qua đây là sửa nhầm.
+  const own = { component: ["component"], external: ["external"], store: ["store"], api: ["api"], service: ["service"] };
+  const decl = (own[n.kind] || []).includes(model.byLine[n.line]?.keyword) ? model.byLine[n.line] : null;
   const mine = model.violations.filter((v) => v.from === n.name && !v.baselined);
   const kinds = { component: "component", store: "kho dữ liệu", api: "nhóm api", external: "bên ngoài", service: "service" };
   box.innerHTML = `
@@ -566,12 +680,53 @@ function renderDetail() {
     <div class="row">${STATUS_ORDER.map((s) =>
       `<button data-status="${s}" ${s === n.status ? "disabled" : ""}>${s}</button>`).join("")}</div>
     <p class="muted" style="margin-top:8px">Từ <code>#accepted</code> trở lên là luật có hiệu lực.</p>
+    ${decl ? `<pre class="preview mono">${esc(decl.text)}</pre>
+    <div class="row actions">
+      <button data-act="edit">Sửa</button>
+      ${NAMED.includes(decl.keyword) ? `<button data-act="rename">Đổi tên</button>` : ""}
+      <button data-act="delete" class="danger">Xoá</button>
+    </div>` : ""}
     ${mine.length ? `<h4 style="margin:18px 0 8px">${mine.length} vi phạm từ đây</h4>` + mine.map(violationCard).join("") : ""}
   `;
   box.querySelectorAll("[data-status]").forEach((b) =>
     b.addEventListener("click", async () => {
       if (await post("/api/status", { name: n.name, status: b.dataset.status })) refresh();
     }));
+  if (decl) bindDeclActions(box, decl);
+}
+
+/// Một mũi tên: luật nào sinh ra nó, gỡ riêng nó hay sửa cả luật.
+function renderEdge(box, e) {
+  const KIND = { allow: "được phép gọi", deny: "bị cấm gọi", link: "nối mạng tới", runs: "chạy mã của", violation: "vi phạm: đang gọi" };
+  const decl = e.kind !== "violation" ? model.byLine[e.line] : null;
+  const head = `<h3 style="margin:0 0 10px">${esc(label(e.from))} → ${esc(label(e.to))}</h3>
+    <p class="muted">${esc(label(e.from))} ${KIND[e.kind] || esc(e.kind)} ${esc(label(e.to))}</p>`;
+  if (e.kind === "violation") {
+    const list = model.violations.filter((v) => v.from === e.from && v.to === e.to && !v.baselined);
+    // Biến một vi phạm thành luật là quyết định kiến trúc: vẫn hỏi lý do.
+    const canAllow = !e.from.startsWith(SVC) && !e.to.startsWith(SVC);
+    box.innerHTML = head + list.map(violationCard).join("") +
+      (canAllow ? `<div class="row actions"><button data-act="allow">Cho phép: thêm allow ${esc(e.from)} -> ${esc(e.to)}</button></div>` : "");
+    box.querySelector('[data-act="allow"]')?.addEventListener("click", () =>
+      openConnect(model.byName[e.from], model.byName[e.to], "allow"));
+    return;
+  }
+  box.innerHTML = head + (decl ? `
+    <p class="where mono">system.arch:${decl.line}${decl.locked ? " · đã khoá" : ""}</p>
+    <pre class="preview mono">${esc(decl.text)}</pre>
+    <div class="row actions">
+      <button data-act="unlink" class="danger">Gỡ mũi tên này</button>
+      <button data-act="edit">Sửa luật</button>
+      <button data-act="delete" class="danger">Xoá cả dòng</button>
+    </div>` : `<p class="muted">Không tìm thấy dòng sinh ra mũi tên này — tải lại trang.</p>`);
+  if (!decl) return;
+  bindDeclActions(box, decl);
+  box.querySelector('[data-act="unlink"]').addEventListener("click", () => {
+    const body = document.createElement("div");
+    body.innerHTML = `<p>Bỏ <b class="mono">${esc(label(e.to))}</b> khỏi dòng này; hết đích thì xoá cả dòng.</p>
+      <pre class="preview mono">${esc(decl.text)}</pre>`;
+    openEditor("Gỡ mũi tên", body, () => ({ op: "disconnect", ...at(decl), to: e.to }));
+  });
 }
 
 const VIA = {
@@ -628,6 +783,307 @@ function renderProposals() {
         if (await post("/api/decide", { id, verdict, reason })) refresh();
       }));
   }
+}
+
+// ---------- sửa sơ đồ ----------
+//
+// Mọi thay đổi đi qua `/api/edit`. Máy chủ chạy lại bộ đọc luật trước khi
+// ghi, nên form ở đây chỉ là cách gõ cho nhanh: gõ sai thì máy chủ từ chối
+// và nói dòng nào sai, file luật không bao giờ hỏng.
+
+const NAMED = ["component", "external", "store", "api", "service", "view", "boundary", "flow", "verify"];
+// `expect` là nguyên văn cả khai báo, kể cả thân khối: máy chủ so cả khối để
+// không ghi đè một thân `flow` đã đổi từ lúc tải.
+const at = (decl) => ({ line: String(decl.line), expect: decl.text });
+const field = (body, name) => body.querySelector(`[name="${name}"]`)?.value.trim() ?? "";
+
+// Khai báo một dòng có form. Mỗi loại: các ô, cách ghép thành dòng, và cách
+// tách một dòng có sẵn ra các ô (cùng cách cắt với bộ đọc luật).
+const cut = (s, sep) => { const i = s.indexOf(sep); return i < 0 ? [s, ""] : [s.slice(0, i), s.slice(i + sep.length)]; };
+const FORMS = {
+  component: {
+    help: "Một khối mã. Đường dẫn là glob, cách nhau bằng dấu phẩy.",
+    fields: [["name", "Tên", "Order"], ["paths", "Đường dẫn", "src/order/**"]],
+    build: (f) => `component ${f.name}${f.paths ? ` at ${f.paths}` : ""}`,
+    parse: (b) => { const [n, p] = cut(b, " at "); return { name: n.trim(), paths: p.trim() }; },
+  },
+  external: {
+    help: "Thư viện hay dịch vụ ngoài tầm kiểm soát: không soi bên trong.",
+    fields: [["name", "Tên", "Stripe"], ["paths", "Đường dẫn (tuỳ chọn)", ""]],
+    build: (f) => `external ${f.name}${f.paths ? ` at ${f.paths}` : ""}`,
+    parse: (b) => { const [n, p] = cut(b, " at "); return { name: n.trim(), paths: p.trim() }; },
+  },
+  store: {
+    help: "Kho dữ liệu: chỉ component chủ được truy cập trực tiếp.",
+    fields: [["name", "Tên", "Orders"], ["owner", "Component chủ", "Order"], ["tables", "Bảng (tuỳ chọn)", "\"orders\", \"order_items\""]],
+    build: (f) => `store ${f.name} owned_by ${f.owner}${f.tables ? ` at ${f.tables}` : ""}`,
+    parse: (b) => { const [n, r] = cut(b, " owned_by "); const [o, t] = cut(r, " at "); return { name: n.trim(), owner: o.trim(), tables: t.trim() }; },
+  },
+  allow: {
+    help: "Nguồn được phép gọi các đích. Không có allow là cấm.",
+    fields: [["from", "Nguồn", "Web"], ["to", "Đích (phẩy)", "Order, Pay"]],
+    build: (f) => `allow ${f.from} -> ${f.to}`,
+    parse: (b) => { const [fr, t] = cut(b, "->"); return { from: fr.trim(), to: t.trim() }; },
+  },
+  deny: {
+    help: "Cấm gọi, để nhấn mạnh và cho thông báo lỗi rõ hơn. Nguồn `*` là mọi component.",
+    fields: [["from", "Nguồn", "*"], ["to", "Đích (phẩy)", "Db"], ["except", "Trừ (tuỳ chọn)", "Repo"]],
+    build: (f) => `deny ${f.from} -> ${f.to}${f.except ? ` except ${f.except}` : ""}`,
+    parse: (b) => { const [fr, r] = cut(b, "->"); const [t, e] = cut(r, " except "); return { from: fr.trim(), to: t.trim(), except: e.trim() }; },
+  },
+  api: {
+    help: "Nhóm hàm hay từ khoá bị theo dõi, như strcpy, eval.",
+    fields: [["name", "Tên", "Unsafe"], ["symbols", "Ký hiệu", "\"strcpy\", \"gets\""]],
+    build: (f) => `api ${f.name} at ${f.symbols}`,
+    parse: (b) => { const [n, s] = cut(b, " at "); return { name: n.trim(), symbols: s.trim() }; },
+  },
+  service: {
+    help: "Một đơn vị triển khai. Nguồn: compose:<tên>, k8s:<tên>, tf:<địa chỉ>, dockerfile:<đường dẫn>.",
+    fields: [["name", "Tên", "Api"], ["from", "Nguồn (tuỳ chọn)", "compose:api"], ["runs", "Chạy component (tuỳ chọn)", "Web, Order"]],
+    build: (f) => `service ${f.name}${f.from ? ` from ${f.from}` : ""}${f.runs ? ` runs ${f.runs}` : ""}`,
+    parse: (b) => { const [h, r] = cut(b, " runs "); const [n, fr] = cut(h, " from "); return { name: n.trim(), from: fr.trim(), runs: r.trim() }; },
+  },
+  link: {
+    help: "Cạnh mạng được phép giữa hai service. `Internet` ở đầu là lộ ra ngoài.",
+    fields: [["from", "Từ service", "Api"], ["to", "Tới service (phẩy)", "Db"]],
+    build: (f) => `link ${f.from} -> ${f.to}`,
+    parse: (b) => { const [fr, t] = cut(b, "->"); return { from: fr.trim(), to: t.trim() }; },
+  },
+  view: {
+    help: "Lát cắt để xem riêng một phần. Không phải luật.",
+    fields: [["name", "Tên", "Checkout"], ["members", "Component (phẩy)", "Web, Order"]],
+    build: (f) => `view ${f.name}: ${f.members}`,
+    parse: (b) => { const [n, m] = cut(b, ":"); return { name: n.trim(), members: m.trim() }; },
+  },
+};
+// Khai báo nhiều dòng hay có biểu thức: sửa dạng chữ, máy chủ kiểm cú pháp.
+const TEMPLATES = {
+  flow: "flow Checkout:\n  Web -> Order.reserveStock -> Payment.charge",
+  contract: "contract Payment.charge:\n  errors CardDeclined, Timeout",
+  boundary: "boundary Checkout contains Order, Payment:\n  contain Timeout",
+  invariant: "invariant data [system] mệnh đề cần giữ",
+  verify: "verify unit runs \"cargo test\"",
+};
+const KINDS = [...Object.keys(FORMS), ...Object.keys(TEMPLATES)];
+
+/// Tách chú thích `@owner #status` ở cuối dòng.
+function splitMeta(line) {
+  const tail = line.match(/(\s+[@#]\S*)+\s*$/);
+  const meta = tail ? tail[0].trim().split(/\s+/) : [];
+  return {
+    body: tail ? line.slice(0, tail.index) : line.trimEnd(),
+    owner: meta.find((t) => t === "@ai" || t === "@human") || "@human",
+    status: meta.find((t) => STATUS_ORDER.includes(t)) || "#accepted",
+  };
+}
+
+const dialog = document.getElementById("editor");
+const edBody = document.getElementById("ed-body");
+const edError = document.getElementById("ed-error");
+const edReason = document.getElementById("ed-reason");
+const edExtra = document.getElementById("ed-extra");
+let editing = null;
+
+function showError(msg, refs = []) {
+  edError.hidden = false;
+  edError.textContent = msg + (refs.length ? "\n\n" + refs.join("\n") : "");
+}
+
+/// Mở hộp thoại. `build()` trả về yêu cầu gửi `/api/edit` (chưa có lý do),
+/// hay ném lỗi khi ô nhập còn thiếu.
+function openEditor(title, body, build) {
+  document.getElementById("ed-title").textContent = title;
+  edBody.replaceChildren(body);
+  edError.hidden = true;
+  edExtra.hidden = true;
+  editing = { build };
+  dialog.showModal();
+  (body.querySelector("input, select, textarea") || edReason).focus();
+}
+
+document.getElementById("ed-cancel").addEventListener("click", () => dialog.close());
+document.getElementById("ed-form").addEventListener("submit", (ev) => { ev.preventDefault(); send({}); });
+edExtra.addEventListener("click", () => send({ cascade: true }));
+
+async function send(extra) {
+  const reason = edReason.value.trim();
+  if (!reason) { showError("Phải ghi lý do: nó vào nhật ký quyết định cùng thay đổi này."); edReason.focus(); return; }
+  let payload;
+  try { payload = editing.build(); } catch (e) { showError(String(e.message || e)); return; }
+  const res = await fetch("/api/edit", {
+    method: "POST",
+    headers: { "X-Archctl-Key": sessionKey },
+    body: JSON.stringify({ ...payload, ...extra, reason }),
+  });
+  const data = await res.json().catch(() => ({ ok: false, error: "máy chủ không trả lời" }));
+  if (data.ok) {
+    dialog.close();
+    edReason.value = "";
+    refresh();
+    return;
+  }
+  if (data.why === "locked") {
+    const yes = confirm(`Thao tác này sửa luật đã khoá (#locked):\n\n${data.refs.join("\n")}\n\nKhoá là để không ai lỡ tay đổi. Vẫn sửa?`);
+    if (yes) send({ ...extra, confirmLocked: true });
+    return;
+  }
+  showError(data.error, data.refs || []);
+  if (data.why === "referenced" && !extra.cascade) {
+    // Xoá kèm: gỡ tên khỏi danh sách đích, xoá luật chỉ còn trỏ tới nó.
+    edExtra.textContent = "Xoá kèm các chỗ nhắc";
+    edExtra.hidden = false;
+  }
+  if (data.why === "stale") refresh();
+}
+
+/// Thêm (`decl` null) hay sửa một khai báo. Khai báo một dòng có form; còn
+/// lại, hay khi người muốn, sửa dạng chữ.
+function openDeclEditor(decl, kind) {
+  const body = document.createElement("div");
+  const editingKind = decl ? decl.keyword : kind || "component";
+  const single = decl ? !decl.text.includes("\n") : true;
+  let mode = FORMS[editingKind] && single ? "form" : "text";
+  const meta = decl ? splitMeta(decl.text.split("\n")[0]) : { owner: "@human", status: "#accepted" };
+
+  const kindRow = document.createElement("label");
+  kindRow.className = "field";
+  kindRow.innerHTML = `<span>Loại</span>`;
+  const select = document.createElement("select");
+  for (const k of KINDS) select.append(new Option(k, k, false, k === editingKind));
+  select.disabled = Boolean(decl);
+  kindRow.append(select);
+
+  const zone = document.createElement("div");
+  const preview = document.createElement("pre");
+  preview.className = "preview mono";
+  const toggleText = document.createElement("button");
+  toggleText.type = "button";
+  toggleText.textContent = "Sửa dạng chữ";
+
+  const statusRow = document.createElement("label");
+  statusRow.className = "field";
+  statusRow.innerHTML = `<span>Trạng thái</span>`;
+  const status = document.createElement("select");
+  for (const s of STATUS_ORDER) status.append(new Option(s, s, false, s === meta.status));
+  statusRow.append(status);
+
+  const formLine = () => {
+    const spec = FORMS[select.value];
+    const f = Object.fromEntries(spec.fields.map(([n]) => [n, field(zone, n)]));
+    return `${spec.build(f)}  ${meta.owner} ${status.value}`;
+  };
+  const current = () => mode === "form" ? formLine() : zone.querySelector("textarea").value;
+
+  function renderZone(text) {
+    zone.replaceChildren();
+    const spec = FORMS[select.value];
+    if (mode === "form" && spec) {
+      const help = document.createElement("p");
+      help.className = "muted";
+      help.textContent = spec.help;
+      zone.append(help);
+      const values = decl ? spec.parse(splitMeta(decl.text).body.slice(decl.keyword.length)) : {};
+      for (const [name, text, hint] of spec.fields) {
+        const row = document.createElement("label");
+        row.className = "field";
+        row.innerHTML = `<span>${esc(text)}</span>`;
+        const input = document.createElement("input");
+        input.type = "text";
+        input.name = name;
+        input.placeholder = hint;
+        input.value = values[name] || "";
+        input.addEventListener("input", () => { preview.textContent = formLine(); });
+        row.append(input);
+        zone.append(row);
+      }
+      zone.append(statusRow);
+      zone.append(preview);
+      preview.textContent = formLine();
+      toggleText.hidden = false;
+    } else {
+      const area = document.createElement("textarea");
+      area.className = "code";
+      area.spellcheck = false;
+      area.value = text ?? (decl ? decl.text : TEMPLATES[select.value] ?? `${select.value} `);
+      const help = document.createElement("p");
+      help.className = "muted";
+      help.textContent = "Đúng một khai báo; dòng thân lùi vào. Máy chủ kiểm cú pháp và tham chiếu trước khi ghi.";
+      zone.append(help, area);
+      toggleText.hidden = true;
+    }
+  }
+  status.addEventListener("change", () => { preview.textContent = formLine(); });
+  select.addEventListener("change", () => { mode = FORMS[select.value] ? "form" : "text"; renderZone(); });
+  toggleText.addEventListener("click", () => { const text = formLine(); mode = "text"; renderZone(text); });
+
+  body.append(kindRow, zone, toggleText);
+  renderZone();
+  openEditor(decl ? `Sửa dòng ${decl.line}` : "Thêm vào sơ đồ", body, () => {
+    const text = current();
+    if (mode === "form") {
+      const spec = FORMS[select.value];
+      const missing = spec.fields.filter(([n, t]) => !t.includes("tuỳ chọn") && !field(zone, n));
+      if (missing.length) throw new Error(`Còn thiếu: ${missing.map(([, t]) => t).join(", ")}`);
+    }
+    return decl ? { op: "replace", ...at(decl), text } : { op: "add", text };
+  });
+}
+
+function bindDeclActions(box, decl) {
+  box.querySelector('[data-act="edit"]')?.addEventListener("click", () => openDeclEditor(decl));
+  box.querySelector('[data-act="rename"]')?.addEventListener("click", () => {
+    const body = document.createElement("div");
+    body.innerHTML = `<p class="muted">Đổi cả tên ở mọi chỗ nhắc tới: luật, store, service, view, boundary, contract, flow.</p>
+      <label class="field"><span>Tên mới</span><input type="text" name="to"></label>`;
+    body.querySelector("input").value = splitMeta(decl.text).body.split(/\s+/)[1]?.replace(/[:.].*$/, "") || "";
+    openEditor(`Đổi tên (dòng ${decl.line})`, body, () => {
+      const to = field(body, "to");
+      if (!to) throw new Error("Chưa có tên mới");
+      return { op: "rename", ...at(decl), to };
+    });
+  });
+  box.querySelector('[data-act="delete"]')?.addEventListener("click", () => {
+    const body = document.createElement("div");
+    body.innerHTML = `<p>Xoá khai báo này khỏi <code>system.arch</code>:</p><pre class="preview mono">${esc(decl.text)}</pre>`;
+    openEditor(`Xoá dòng ${decl.line}`, body, () => ({ op: "delete", ...at(decl) }));
+  });
+}
+
+/// Nối hai hộp: component, store, api dùng `allow`/`deny`; hai service dùng `link`.
+function openConnect(from, to, preset) {
+  const services = from.kind === "service" && to.kind === "service";
+  if (from.kind === "service" !== (to.kind === "service")) {
+    alert("Chỉ nối được hai service với nhau (link), hay hai hộp mã với nhau (allow/deny). Service chạy component nào thì sửa service.");
+    return;
+  }
+  const body = document.createElement("div");
+  body.innerHTML = `<p><b class="mono">${esc(label(from.name))}</b> → <b class="mono">${esc(label(to.name))}</b></p>
+    <label class="field"><span>Loại</span><select name="kind"></select></label>`;
+  const select = body.querySelector("select");
+  for (const [k, t] of services ? [["link", "link — được nối mạng"]]
+    : [["allow", "allow — được phép gọi"], ["deny", "deny — cấm gọi"]]) {
+    select.append(new Option(t, k, false, k === preset));
+  }
+  openEditor("Nối mũi tên", body, () => ({ op: "connect", kind: select.value, from: from.name, to: to.name }));
+}
+
+/// Mọi khai báo trong file, theo thứ tự, kể cả thứ không vẽ thành hộp.
+function renderDecls() {
+  const box = tab("decls");
+  const list = model.decls || [];
+  box.innerHTML = `<div class="row" style="margin:0 0 12px"><button class="primary" data-add>+ Thêm khai báo</button></div>` +
+    (list.length ? list.map((d) => `
+      <div class="decl" data-line="${d.line}">
+        <div class="badge">dòng ${d.line} · ${esc(d.keyword)}${d.locked ? " · đã khoá" : ""}</div>
+        <pre class="mono">${esc(d.text)}</pre>
+        <div class="row">
+          <button data-act="edit">Sửa</button>
+          ${NAMED.includes(d.keyword) ? `<button data-act="rename">Đổi tên</button>` : ""}
+          <button data-act="delete" class="danger">Xoá</button>
+        </div>
+      </div>`).join("") : `<p class="empty">File luật chưa có khai báo nào.</p>`);
+  box.querySelector("[data-add]").addEventListener("click", () => openDeclEditor(null));
+  box.querySelectorAll(".decl").forEach((card) => bindDeclActions(card, model.byLine[card.dataset.line]));
 }
 
 // ---------- cập nhật trực tiếp ----------
