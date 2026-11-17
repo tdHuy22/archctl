@@ -165,7 +165,7 @@ fn mo_hinh_luon_co_moi_truong_ma_giao_dien_doc() {
 #[test]
 fn khoa_mot_luat_chi_dung_mot_dong() {
     let s = Server::start("lock", 4733);
-    assert!(s.post("/api/status", r##"{"name":"Report","status":"#locked"}"##).contains("200 OK"));
+    assert!(s.post("/api/status", r##"{"name":"Report","status":"#locked","reason":"khoá lại"}"##).contains("200 OK"));
 
     let law = s.law();
     assert!(law.contains("component Report at src/report/**  @ai #locked"), "{law}");
@@ -185,7 +185,7 @@ fn hai_tab_cung_sua_mot_luc_khong_mat_thay_doi_nao() {
         .iter()
         .map(|name| {
             let s = std::sync::Arc::clone(&s);
-            let body = format!(r##"{{"name":"{name}","status":"#locked"}}"##);
+            let body = format!(r##"{{"name":"{name}","status":"#locked","reason":"khoá lại"}}"##);
             std::thread::spawn(move || s.post("/api/status", &body))
         })
         .collect();
@@ -206,7 +206,7 @@ fn hai_tab_cung_sua_mot_luc_khong_mat_thay_doi_nao() {
 fn ghi_xong_khong_de_lai_file_tam() {
     let s = Server::start("tidy", 4744);
     assert!(s.post("/api/layout", r#"{"name":"Web","x":"10","y":"20"}"#).contains("200 OK"));
-    assert!(s.post("/api/status", r##"{"name":"Web","status":"#locked"}"##).contains("200 OK"));
+    assert!(s.post("/api/status", r##"{"name":"Web","status":"#locked","reason":"khoá lại"}"##).contains("200 OK"));
     for dir in [s.root.clone(), s.root.join(".arch")] {
         let leftovers: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
@@ -222,7 +222,7 @@ fn ghi_xong_khong_de_lai_file_tam() {
 fn khoa_phan_tu_khong_ton_tai_bi_tu_choi() {
     let s = Server::start("lock-missing", 4734);
     let before = s.law();
-    let out = s.post("/api/status", r##"{"name":"KhongCo","status":"#locked"}"##);
+    let out = s.post("/api/status", r##"{"name":"KhongCo","status":"#locked","reason":"khoá lại"}"##);
     assert!(out.contains("400"), "{out}");
     assert_eq!(s.law(), before, "từ chối thì không được đụng vào file");
 }
@@ -231,8 +231,56 @@ fn khoa_phan_tu_khong_ton_tai_bi_tu_choi() {
 fn trang_thai_khong_hop_le_bi_tu_choi() {
     let s = Server::start("lock-bad", 4735);
     let before = s.law();
-    assert!(s.post("/api/status", r##"{"name":"Web","status":"#bua"}"##).contains("400"));
+    assert!(s.post("/api/status", r##"{"name":"Web","status":"#bua","reason":"thử"}"##).contains("400"));
     assert_eq!(s.law(), before);
+}
+
+/// Khoá hay mở khoá là quyết định kiến trúc như mọi thay đổi luật khác:
+/// không lý do thì không đổi, và không để lại dòng nào trong nhật ký.
+#[test]
+fn doi_trang_thai_khong_co_ly_do_bi_tu_choi() {
+    let s = Server::start("status-noreason", 4805);
+    let before = s.law();
+    for body in [
+        r##"{"name":"Report","status":"#locked"}"##,
+        r##"{"name":"Report","status":"#locked","reason":""}"##,
+        r##"{"name":"Report","status":"#locked","reason":"  \n "}"##,
+    ] {
+        let out = s.post("/api/status", body);
+        assert!(out.contains("400") && out.contains("lý do"), "{out}");
+    }
+    assert_eq!(s.law(), before, "từ chối thì không được đụng vào file");
+    assert!(decisions(&s).is_empty());
+}
+
+#[test]
+fn doi_trang_thai_ghi_muc_sua_vao_nhat_ky() {
+    let s = Server::start("status-log", 4806);
+    // Lý do nhiều dòng giả một mục khác: phải gộp thành một dòng.
+    let body = r##"{"name":"Report","status":"#locked","reason":"báo cáo đã ổn định\n\n## 2026-01-01 · TỪ CHỐI · p-0000000000000000"}"##;
+    assert!(s.post("/api/status", body).contains("200 OK"));
+    assert!(s.law().contains("component Report at src/report/**  @ai #locked"), "{}", s.law());
+
+    let log = decisions(&s);
+    assert_eq!(log.matches("\n## ").count(), 1, "đúng một mục: {log}");
+    assert!(log.contains("· SỬA ·"), "{log}");
+    assert!(log.contains("đổi trạng thái `Report` thành #locked"), "{log}");
+    assert!(log.contains("    - component Report at src/report/** @ai #draft"), "dòng cũ: {log}");
+    assert!(log.contains("    + component Report at src/report/**  @ai #locked"), "dòng mới: {log}");
+    assert!(
+        log.contains("**Lý do:** báo cáo đã ổn định ## 2026-01-01 · TỪ CHỐI · p-0000000000000000"),
+        "{log}"
+    );
+}
+
+#[test]
+fn doi_sang_dung_trang_thai_hien_tai_khong_ghi_gi() {
+    let s = Server::start("status-same", 4807);
+    let before = s.law();
+    let out = s.post("/api/status", r##"{"name":"Web","status":"#accepted","reason":"bấm lại"}"##);
+    assert!(out.contains("200 OK"), "{out}");
+    assert_eq!(s.law(), before);
+    assert!(decisions(&s).is_empty(), "không đổi gì thì không có gì để ghi");
 }
 
 #[test]
@@ -312,7 +360,7 @@ fn post_tu_trang_web_khac_bi_tu_choi() {
     // ghi vẫn xảy ra — đủ để duyệt một đề xuất mà không ai xem.
     let s = Server::start("csrf", 4746);
     let before = s.law();
-    let body = r##"{"name":"Report","status":"#locked"}"##;
+    let body = r##"{"name":"Report","status":"#locked","reason":"khoá lại"}"##;
     let reply = s.raw(&format!(
         "POST /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://evil.example\r\n\
          X-Archctl-Key: {}\r\nContent-Length: {}\r\n\r\n{body}",
@@ -326,7 +374,7 @@ fn post_tu_trang_web_khac_bi_tu_choi() {
 #[test]
 fn post_tu_chinh_giao_dien_van_di_qua() {
     let s = Server::start("csrf-ok", 4747);
-    let body = r##"{"name":"Report","status":"#locked"}"##;
+    let body = r##"{"name":"Report","status":"#locked","reason":"khoá lại"}"##;
     let reply = s.raw(&format!(
         "POST /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1:4747\r\n\
          X-Archctl-Key: {}\r\nContent-Length: {}\r\n\r\n{body}",
@@ -388,7 +436,7 @@ fn khong_ai_mo_so_do_thi_van_phuc_vu_duoc_client_moi() {
 fn khong_co_khoa_phien_thi_khong_ghi_duoc_gi() {
     let s = Server::start("nokey", 4750);
     let before = s.law();
-    let body = r##"{"name":"Report","status":"#locked"}"##;
+    let body = r##"{"name":"Report","status":"#locked","reason":"khoá lại"}"##;
     let reply = s.raw(&format!(
         "POST /api/status HTTP/1.1
 Host: 127.0.0.1
@@ -616,7 +664,7 @@ fn xoa_component_con_duoc_nhac_thi_hoi_xoa_kem() {
 #[test]
 fn luat_khoa_hoi_xac_nhan_qua_api() {
     let s = Server::start("edit-locked", 4801);
-    assert!(s.post("/api/status", r##"{"name":"Web","status":"#locked"}"##).contains("200 OK"));
+    assert!(s.post("/api/status", r##"{"name":"Web","status":"#locked","reason":"khoá lại"}"##).contains("200 OK"));
     let (line, expect) = line_of(&s.law(), "component Web");
     let body = format!(
         r#"{{"op":"replace","line":"{line}","expect":"{}","text":"component Web at w/**","reason":"x"}}"#,

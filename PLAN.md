@@ -9,11 +9,13 @@ Cập nhật 2026-11-17.
 
 ### Việc mở
 
-- **Bạn tự bấm thử trọn vòng sửa sơ đồ trong trình duyệt** (`archctl serve` trên bản sao). Agent đã kiểm được: form, dòng xem trước, chặn khi thiếu lý do. Bộ phân loại an toàn của Claude Code chặn agent bấm **Ghi vào system.arch**, kể cả trên bản sao, khớp với giao thức "chỉ người ghi luật". Đường ghi đã có test API trọn vòng.
-- Đổi trạng thái (`/api/status`) vẫn chưa bắt lý do và chưa ghi nhật ký như các thao tác sửa khác: chờ bạn quyết có làm không.
+- **Bạn tự bấm thử trọn vòng sửa sơ đồ trong trình duyệt** (`archctl serve` trên bản sao), giờ gồm cả nút trạng thái: bấm `#locked` phải hiện hộp hỏi lý do, Huỷ thì không đổi gì, có lý do thì `decisions.md` thêm mục `SỬA`. Agent không bấm ghi thay được (bộ phân loại an toàn chặn, khớp giao thức "chỉ người ghi luật"). Đường ghi đã có test API trọn vòng.
+- `set_status` viết lại cả file bằng `lines().join("\n")`, nên file luật có `\r\n` hay BOM bị đổi ở mọi dòng khi bấm nút trạng thái (khác `/api/edit`, giữ nguyên từng byte). Có từ trước, chưa sửa.
 - Hook agent-stack đọc nhầm `cargo test -p archctl --test serve` thành `archctl serve` (`pretool_guard.py` `check_arch_argv`); dùng `cargo test --workspace` thay.
 
 ### Đã xong, có bằng chứng
+
+- **Lý do cho nút trạng thái + test tự động TM-92** (17/11/2026, commit tại chỗ, chưa push). Bạn chọn "làm cả 1 và 2"; tiêu chí ghi trước khi code, đạt 4/4: (a) `/api/status` thiếu lý do → 400, không ghi; có lý do → mục `SỬA` (lý do gộp một dòng, dòng `-`/`+`), cùng hàm `record` với `/api/edit`; đổi sang đúng trạng thái hiện có thì không ghi gì; (b) `ui.html` hỏi lý do bằng `prompt`, Huỷ thì thôi; (c) `tests/ui_html.rs` quét `<script>` của `ui.html` (73 chỗ chèn trong HTML), 14 lỗi gài đều bị bắt; bọc thêm `esc()` cho 3 chỗ tra bảng hằng; (d) biên nhận trên mã cuối: `cargo test --workspace` (serve 38/38, ui_html 2/2), clippy, `+1.88 check`, release, `verify` 3/3, `check --strict` 0, `checks.py` 0. Docs `serve.md`, TM-92/95. Review: mức thấp, hạn mức tuần 83% nên done-gate bỏ reviewer, tự rà diff.
 
 - **Sửa sơ đồ đầy đủ trong `archctl serve`** (17/11/2026, chưa push). Tiêu chí ghi từ đầu việc (nguồn: phiên gọi giao; bạn chốt (a)–(d) qua câu hỏi). Đạt 3/4, tiêu chí 1 đạt một phần: (1) trọn vòng thêm component, nối mũi tên, đổi đường dẫn, xoá luật chạy qua API thật (`tests/serve.rs` `ve_so_do_tron_vong_qua_giao_dien`, `check` phản ánh ngay); trong trình duyệt mới kiểm form và chặn thiếu lý do; (2) có test cho từng ca từ chối; (3) lý do bắt buộc, mục `SỬA` trong `decisions.md`, `#locked` hỏi xác nhận, xoá kèm liệt kê chỗ nhắc; (4) biên nhận trên mã cuối: `cargo test --workspace` (serve 35/35), clippy, `+1.88 check`, `verify` 3/3, `check --strict` 0, `checks.py` 0. Mã: `crates/archctl/src/edit.rs` (mới), `serve.rs` (`POST /api/edit`, `decls`), `ui.html` (**+ Thêm**, **Nối mũi tên**, bấm mũi tên để gỡ, tab **Khai báo**), `protocol.rs` (`Verdict::Edited`). Review sonnet · high tìm 5 lỗi (4 vừa, 1 thấp), đã sửa cả 5 kèm 4 test. TM-91..95. Docs: `serve.md`, `protocol.md`, README.
 

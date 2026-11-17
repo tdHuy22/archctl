@@ -17,7 +17,7 @@ chỉ làm được vế sau. Đây là vế đầu.
 | Bấm một mũi tên → Gỡ, Sửa luật, Xoá cả dòng | như trên |
 | Bấm một hộp, hay tab **Khai báo** → Sửa, Đổi tên, Xoá | như trên |
 | Kéo thả hộp | `.arch/layout.json` |
-| Bấm `#locked` / `#accepted` / `#draft` | đúng một dòng trong `.arch/system.arch` |
+| Bấm `#locked` / `#accepted` / `#draft` | đúng một dòng trong `.arch/system.arch`, mục `SỬA` trong `.arch/decisions.md` |
 | Tab **Lạc hậu** | chỉ đọc — tên khai báo nhưng không có trong mã |
 | Duyệt hoặc từ chối đề xuất | `.arch/system.arch` và `.arch/decisions.md` |
 | Sắp xếp lại | xoá `.arch/layout.json` |
@@ -47,7 +47,9 @@ trong `system.arch` thêm, sửa, xoá được ngay trên sơ đồ, không ph�
 - **Bấm vào một vi phạm** (cạnh đỏ) → **Cho phép**: thêm `allow` cho đúng cặp
   đó, khi đó là quyết định kiến trúc chứ không phải lỗi của mã.
 
-Mỗi thao tác đều phải ghi **lý do**, như `archctl accept --reason`: máy chủ ghi
+Mỗi thao tác đều phải ghi **lý do**, như `archctl accept --reason`, kể cả bấm
+nút trạng thái (`#draft`, `#accepted`, `#locked`) — khoá hay mở khoá cũng là
+quyết định kiến trúc: máy chủ ghi
 một mục `## <ngày> · SỬA · e-…` vào `decisions.md`, gồm dòng mô tả, các dòng cũ
 (`-`) và mới (`+`), người sửa, lý do. Agent đọc file đó để biết vì sao luật đổi.
 
@@ -65,6 +67,16 @@ tay đổi.
 | Dòng không đụng tới | giữ nguyên từng byte, kể cả chú thích, `\r\n`, BOM |
 | `system.arch` là symlink | không ghi đè |
 | Lý do nhiều dòng | gộp thành một dòng: không chèn được mục giả vào nhật ký |
+
+### Chữ do agent viết không chạy được trong trang
+
+Tên, đường dẫn, đề xuất, lý do đều có thể do agent viết, mà script lọt vào trang
+chạy được với khoá phiên — tức là tự sửa được luật. Giao diện dựng HTML bằng
+chuỗi template, nên mọi `${...}` rơi vào HTML phải qua `esc()` hoặc chắc chắn ra
+số hay chữ viết sẵn trong mã. Test `tests/ui_html.rs` đọc `ui.html` và bắt mọi
+chỗ khác, cả `innerHTML = <biến>` khi biến từng được gán chữ thô, giá trị thuộc
+tính không có nháy, `href`/`on…` lấy từ dữ liệu, `insertAdjacentHTML`, `eval`.
+Bộ quét bảo thủ: báo nhầm thì bọc `esc()`, đừng nới luật.
 
 Khai báo mới đứng ngay sau khai báo cuối cùng cùng loại (component cạnh
 component, luật cạnh luật), không thì ở cuối file.
@@ -252,8 +264,6 @@ Mọi lệnh `archctl` ghi file đều theo cách này, không riêng máy chủ
 
 - **Một người dùng.** Hai người cùng sửa thì không mất file, nhưng người sau
   vẫn ghi đè quyết định của người trước — không có hợp nhất.
-- **Đổi trạng thái (`#locked`…) chưa cần lý do** và chưa ghi nhật ký như các
-  thao tác sửa sơ đồ.
 - **Dò thay đổi bằng cách quét lại** thay vì gọi API theo dõi của hệ điều
   hành, để không thêm dependency nào.
 - **File luật hỏng thì sơ đồ dừng** và hiện lỗi cú pháp kèm số dòng, thay vì vẽ

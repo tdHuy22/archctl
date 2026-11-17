@@ -696,9 +696,15 @@ fn save_position(root: &Path, body: &str) -> Result<(), String> {
 /// Đổi trạng thái một phần tử ngay trên sơ đồ — đây là nút khoá.
 ///
 /// Sửa đúng dòng của phần tử đó trong `system.arch`, giữ nguyên mọi dòng khác.
+/// Như mọi thay đổi luật khác: bắt buộc lý do, để lại mục `SỬA` trong
+/// `decisions.md` — khoá hay mở khoá là quyết định kiến trúc, agent cần biết vì sao.
 fn set_status(root: &Path, body: &str) -> Result<(), String> {
     let name = field(body, "name").ok_or("thiếu `name`")?;
     let wanted = field(body, "status").ok_or("thiếu `status`")?;
+    let reason = one_line(&field(body, "reason").unwrap_or_default());
+    if reason.is_empty() {
+        return Err("phải ghi lý do cho mọi thay đổi luật".into());
+    }
     let status = match wanted.as_str() {
         "#draft" => Status::Draft,
         "#proposed" => Status::Proposed,
@@ -724,8 +730,14 @@ fn set_status(root: &Path, body: &str) -> Result<(), String> {
 
     let mut lines: Vec<String> = src.lines().map(str::to_string).collect();
     let index = element.line.checked_sub(1).ok_or("phần tử không có số dòng")?;
-    let line = lines.get(index).ok_or("số dòng vượt ngoài file")?;
-    lines[index] = arch_core::parser::rewrite_annotations(line, element.owner, status);
+    // Đã ở đúng trạng thái đó: không có gì để ghi, cũng không có gì để kể.
+    // (So trạng thái chứ không so dòng: viết lại dòng có thể đổi khoảng trắng.)
+    if element.status == status {
+        return Ok(());
+    }
+    let old = lines.get(index).ok_or("số dòng vượt ngoài file")?.clone();
+    let new = arch_core::parser::rewrite_annotations(&old, element.owner, status);
+    lines[index] = new.clone();
 
     let updated = format!("{}\n", lines.join("\n"));
     // Không ghi nếu kết quả hỏng: thà không làm gì còn hơn làm hỏng file luật.
@@ -736,7 +748,59 @@ fn set_status(root: &Path, body: &str) -> Result<(), String> {
     {
         return Err(format!("sửa xong thì file luật hỏng: {}", d.msg));
     }
-    arch_core::write_atomic(&path, &updated).map_err(|e| e.to_string())
+    // Đọc nhật ký trước khi ghi luật: nhật ký không ghi được (symlink…) thì
+    // luật cũng chưa đổi, không để lại thay đổi không dấu vết.
+    let log = arch_core::read_for_update(&root.join(DECISIONS_FILE))?;
+    arch_core::write_atomic(&path, &updated).map_err(|e| e.to_string())?;
+    let summary = format!("đổi trạng thái `{name}` thành {wanted}");
+    record(root, log, summary, &[old], &[new], reason)
+}
+
+/// Lý do gộp thành một dòng: xuống dòng trong lý do sẽ chèn được một mục giả
+/// vào nhật ký.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Thêm một mục `SỬA` vào `decisions.md` (nội dung cũ là `log`).
+///
+/// Dòng đầu là mô tả (agent và `parse_decisions` đọc dòng này), sau đó là các
+/// dòng trước và sau, lùi vào để không dòng nào mở đầu bằng `##` hay `**` mà
+/// làm lệch mục.
+fn record(
+    root: &Path,
+    mut log: String,
+    summary: String,
+    before: &[String],
+    after: &[String],
+    reason: String,
+) -> Result<(), String> {
+    let mut statement = summary;
+    if !before.is_empty() || !after.is_empty() {
+        statement.push('\n');
+        for line in before {
+            statement.push_str(&format!("\n    - {line}"));
+        }
+        for line in after {
+            statement.push_str(&format!("\n    + {line}"));
+        }
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let decision = protocol::Decision {
+        date: protocol::today(),
+        verdict: protocol::Verdict::Edited,
+        id: protocol::edit_id(&statement, nanos),
+        statement,
+        by: crate::proto::whoami(root),
+        reason,
+    };
+    if log.is_empty() {
+        log.push_str(protocol::DECISIONS_HEADER);
+    }
+    log.push_str(&protocol::render_decision(&decision));
+    arch_core::write_atomic(&root.join(DECISIONS_FILE), &log).map_err(|e| e.to_string())
 }
 
 /// Thân trả lời khi thao tác bị từ chối. `why` để giao diện biết nên hỏi gì
@@ -758,14 +822,7 @@ fn failure(error: &str, why: &str, refs: &[String]) -> String {
 fn edit(root: &Path, body: &str) -> Result<(), (&'static str, String)> {
     let bad = |e: &str| ("400 Bad Request", failure(e, "bad", &[]));
     let req = jsonc::parse(body).ok_or_else(|| bad("thân yêu cầu không phải JSON"))?;
-    // Một dòng: xuống dòng trong lý do sẽ chèn được một mục giả vào nhật ký.
-    let reason = req
-        .get("reason")
-        .and_then(jsonc::Value::as_str)
-        .unwrap_or("")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let reason = one_line(req.get("reason").and_then(jsonc::Value::as_str).unwrap_or(""));
     if reason.is_empty() {
         return Err(bad("phải ghi lý do cho mọi thay đổi luật"));
     }
@@ -783,38 +840,9 @@ fn edit(root: &Path, body: &str) -> Result<(), (&'static str, String)> {
         (status, failure(&r.msg, why, &r.refs))
     })?;
 
-    let mut log = arch_core::read_for_update(&root.join(DECISIONS_FILE)).map_err(|e| bad(&e))?;
+    let log = arch_core::read_for_update(&root.join(DECISIONS_FILE)).map_err(|e| bad(&e))?;
     arch_core::write_atomic(&path, &done.text).map_err(|e| bad(&e.to_string()))?;
-
-    // Nhật ký: dòng đầu là mô tả (agent và `parse_decisions` đọc dòng này),
-    // sau đó là các dòng trước và sau, lùi vào để không dòng nào mở đầu
-    // bằng `##` hay `**` mà làm lệch mục.
-    let mut statement = done.summary.clone();
-    if !done.before.is_empty() || !done.after.is_empty() {
-        statement.push('\n');
-        for line in &done.before {
-            statement.push_str(&format!("\n    - {line}"));
-        }
-        for line in &done.after {
-            statement.push_str(&format!("\n    + {line}"));
-        }
-    }
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let decision = protocol::Decision {
-        date: protocol::today(),
-        verdict: protocol::Verdict::Edited,
-        id: protocol::edit_id(&statement, nanos),
-        statement,
-        by: crate::proto::whoami(root),
-        reason,
-    };
-    if log.is_empty() {
-        log.push_str(protocol::DECISIONS_HEADER);
-    }
-    log.push_str(&protocol::render_decision(&decision));
-    arch_core::write_atomic(&root.join(DECISIONS_FILE), &log).map_err(|e| bad(&e.to_string()))?;
+    record(root, log, done.summary, &done.before, &done.after, reason).map_err(|e| bad(&e))?;
 
     // Đổi tên thì hộp giữ chỗ cũ trên sơ đồ. Hỏng ở đây chỉ làm hộp xếp lại,
     // luật đã ghi xong, nên không báo lỗi.

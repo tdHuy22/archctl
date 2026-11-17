@@ -671,14 +671,14 @@ function renderDetail() {
   box.innerHTML = `
     <h3 style="margin:0 0 10px">${esc(label(n.name))}</h3>
     <dl>
-      <dt>loại</dt><dd>${kinds[n.kind]}</dd>
+      <dt>loại</dt><dd>${esc(kinds[n.kind])}</dd>
       <dt>phạm vi</dt><dd class="mono">${esc(n.sub) || "—"}</dd>
       <dt>trạng thái</dt><dd class="mono">${esc(n.status)}</dd>
       <dt>nguồn gốc</dt><dd>${n.owner === "ai" ? "agent đề xuất" : "người viết"}</dd>
       <dt>dòng</dt><dd>${n.line} trong system.arch</dd>
     </dl>
     <div class="row">${STATUS_ORDER.map((s) =>
-      `<button data-status="${s}" ${s === n.status ? "disabled" : ""}>${s}</button>`).join("")}</div>
+      `<button data-status="${esc(s)}" ${s === n.status ? "disabled" : ""}>${esc(s)}</button>`).join("")}</div>
     <p class="muted" style="margin-top:8px">Từ <code>#accepted</code> trở lên là luật có hiệu lực.</p>
     ${decl ? `<pre class="preview mono">${esc(decl.text)}</pre>
     <div class="row actions">
@@ -690,7 +690,12 @@ function renderDetail() {
   `;
   box.querySelectorAll("[data-status]").forEach((b) =>
     b.addEventListener("click", async () => {
-      if (await post("/api/status", { name: n.name, status: b.dataset.status })) refresh();
+      // Như mọi thay đổi luật: lý do vào nhật ký quyết định cùng thay đổi này.
+      const answer = prompt(`Lý do đổi ${n.name} thành ${b.dataset.status} (bắt buộc, ghi vào decisions.md):`);
+      if (answer === null) return; // bấm Huỷ: không đổi gì
+      const reason = answer.trim();
+      if (!reason) { alert("Phải ghi lý do: nó vào nhật ký quyết định cùng thay đổi này."); return; }
+      if (await post("/api/status", { name: n.name, status: b.dataset.status, reason })) refresh();
     }));
   if (decl) bindDeclActions(box, decl);
 }
@@ -700,7 +705,7 @@ function renderEdge(box, e) {
   const KIND = { allow: "được phép gọi", deny: "bị cấm gọi", link: "nối mạng tới", runs: "chạy mã của", violation: "vi phạm: đang gọi" };
   const decl = e.kind !== "violation" ? model.byLine[e.line] : null;
   const head = `<h3 style="margin:0 0 10px">${esc(label(e.from))} → ${esc(label(e.to))}</h3>
-    <p class="muted">${esc(label(e.from))} ${KIND[e.kind] || esc(e.kind)} ${esc(label(e.to))}</p>`;
+    <p class="muted">${esc(label(e.from))} ${esc(KIND[e.kind] || e.kind)} ${esc(label(e.to))}</p>`;
   if (e.kind === "violation") {
     const list = model.violations.filter((v) => v.from === e.from && v.to === e.to && !v.baselined);
     // Biến một vi phạm thành luật là quyết định kiến trúc: vẫn hỏi lý do.
