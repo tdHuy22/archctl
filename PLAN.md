@@ -9,7 +9,7 @@ Cập nhật 2026-11-17.
 
 ### Việc mở
 
-- **Bạn tự bấm thử trọn vòng sửa sơ đồ trong trình duyệt** (`archctl serve` trên bản sao), giờ gồm cả nút trạng thái: bấm `#locked` phải hiện hộp hỏi lý do, Huỷ thì không đổi gì, có lý do thì `decisions.md` thêm mục `SỬA`. Agent không bấm ghi thay được (bộ phân loại an toàn chặn, khớp giao thức "chỉ người ghi luật"). Đường ghi đã có test API trọn vòng.
+- Bạn đã bấm thử trong trình duyệt (17/11/2026, bản sao `/tmp/archctl-thu`): khoá `Scan` và gỡ `Model` khỏi một `deny`, cả hai ghi đúng dòng và có mục `SỬA` kèm lý do trong `decisions.md`; `check` trên bản sao 0 vi phạm, 3 cảnh báo "chưa chứng minh" đúng như mong đợi (luật đổi thì biên nhận `verify` hết hạn). Chưa thử: **+ Thêm**, **Nối mũi tên**, đổi tên, xoá kèm trong trình duyệt (đã có test API).
 - Test `grpc_java_addservice_doi_khang_khong_treo` (arch-core, đo dưới 5 giây) trượt một lần trong `archctl verify` khi máy vừa build release, chạy lại thì đạt: test đo giờ dễ chập chờn khi máy tải nặng.
 - Hook agent-stack đọc nhầm `cargo test -p archctl --test serve` thành `archctl serve` (`pretool_guard.py` `check_arch_argv`); dùng `cargo test --workspace` thay.
 
