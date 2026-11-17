@@ -175,6 +175,23 @@ fn khoa_mot_luat_chi_dung_mot_dong() {
     assert_eq!(law.lines().count(), ARCH.lines().count(), "không thêm bớt dòng nào");
 }
 
+/// File luật viết trên Windows (`\r\n`, BOM): khoá một luật chỉ được đổi đúng
+/// dòng đó, như `/api/edit`. Trước đây cả file bị viết lại bằng `\n` và mọi
+/// dòng hiện là đã đổi trong `git diff`.
+#[test]
+fn khoa_mot_luat_giu_nguyen_crlf_va_bom() {
+    let s = Server::start("lock-crlf", 4808);
+    let original = format!("\u{feff}{}# chú thích cuối, không xuống dòng", ARCH.replace('\n', "\r\n"));
+    std::fs::write(s.root.join(".arch/system.arch"), &original).unwrap();
+
+    let out = s.post("/api/status", r##"{"name":"Report","status":"#locked","reason":"khoá lại"}"##);
+    assert!(out.contains("200 OK"), "{out}");
+    let expected = original
+        .replace("component Report at src/report/** @ai #draft", "component Report at src/report/**  @ai #locked");
+    assert_ne!(expected, original);
+    assert_eq!(s.law(), expected, "chỉ dòng Report được đổi, từng byte khác giữ nguyên");
+}
+
 #[test]
 fn hai_tab_cung_sua_mot_luc_khong_mat_thay_doi_nao() {
     // Mỗi kết nối một luồng, nên đọc-sửa-ghi của hai yêu cầu có thể xen vào

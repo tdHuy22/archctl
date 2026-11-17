@@ -10,10 +10,12 @@ Cập nhật 2026-11-17.
 ### Việc mở
 
 - **Bạn tự bấm thử trọn vòng sửa sơ đồ trong trình duyệt** (`archctl serve` trên bản sao), giờ gồm cả nút trạng thái: bấm `#locked` phải hiện hộp hỏi lý do, Huỷ thì không đổi gì, có lý do thì `decisions.md` thêm mục `SỬA`. Agent không bấm ghi thay được (bộ phân loại an toàn chặn, khớp giao thức "chỉ người ghi luật"). Đường ghi đã có test API trọn vòng.
-- `set_status` viết lại cả file bằng `lines().join("\n")`, nên file luật có `\r\n` hay BOM bị đổi ở mọi dòng khi bấm nút trạng thái (khác `/api/edit`, giữ nguyên từng byte). Có từ trước, chưa sửa.
+- Test `grpc_java_addservice_doi_khang_khong_treo` (arch-core, đo dưới 5 giây) trượt một lần trong `archctl verify` khi máy vừa build release, chạy lại thì đạt: test đo giờ dễ chập chờn khi máy tải nặng.
 - Hook agent-stack đọc nhầm `cargo test -p archctl --test serve` thành `archctl serve` (`pretool_guard.py` `check_arch_argv`); dùng `cargo test --workspace` thay.
 
 ### Đã xong, có bằng chứng
+
+- **Nút trạng thái giữ nguyên `\r\n`, BOM, dòng cuối không xuống dòng** (17/11/2026, bạn bảo "sửa ở đây"). `set_status` trước viết lại cả file bằng `\n`; giờ chỉ thay đúng đoạn byte của dòng đó. Tái hiện bằng test `khoa_mot_luat_giu_nguyen_crlf_va_bom` (`fails-before` có biên nhận: trượt trên code cũ, đạt sau sửa). Biên nhận trên mã cuối: `cargo test --workspace` (serve 39/39), clippy, `+1.88 check`, release, `verify` 3/3, `check --strict` 0, `checks.py` 0.
 
 - **Lý do cho nút trạng thái + test tự động TM-92** (17/11/2026, commit tại chỗ, chưa push). Bạn chọn "làm cả 1 và 2"; tiêu chí ghi trước khi code, đạt 4/4: (a) `/api/status` thiếu lý do → 400, không ghi; có lý do → mục `SỬA` (lý do gộp một dòng, dòng `-`/`+`), cùng hàm `record` với `/api/edit`; đổi sang đúng trạng thái hiện có thì không ghi gì; (b) `ui.html` hỏi lý do bằng `prompt`, Huỷ thì thôi; (c) `tests/ui_html.rs` quét `<script>` của `ui.html` (73 chỗ chèn trong HTML), 14 lỗi gài đều bị bắt; bọc thêm `esc()` cho 3 chỗ tra bảng hằng; (d) biên nhận trên mã cuối: `cargo test --workspace` (serve 38/38, ui_html 2/2), clippy, `+1.88 check`, release, `verify` 3/3, `check --strict` 0, `checks.py` 0. Docs `serve.md`, TM-92/95. Review: mức thấp, hạn mức tuần 83% nên done-gate bỏ reviewer, tự rà diff.
 

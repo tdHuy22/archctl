@@ -64,7 +64,7 @@ tay đổi.
 | File đã đổi từ lúc tải sơ đồ (agent hay người sửa tay) | từ chối (409): mỗi thao tác gửi kèm số dòng **và** nguyên văn cả khai báo, kể cả thân khối |
 | Xoá kèm | chỉ viết lại dòng thật sự nhắc tên bị xoá; dòng khác giữ nguyên từng byte |
 | Xoá tên mà chỉ bước `flow`, `retry` của `boundary` hay `verify` của `invariant`/`contract` còn nhắc | từ chối và liệt kê, kể cả khi bấm Xoá kèm: bộ đọc luật không báo lỗi cho những chỗ này, xoá xong chúng thành mồ côi lặng lẽ |
-| Dòng không đụng tới | giữ nguyên từng byte, kể cả chú thích, `\r\n`, BOM |
+| Dòng không đụng tới (mọi thao tác, kể cả nút trạng thái) | giữ nguyên từng byte, kể cả chú thích, `\r\n`, BOM |
 | `system.arch` là symlink | không ghi đè |
 | Lý do nhiều dòng | gộp thành một dòng: không chèn được mục giả vào nhật ký |
 

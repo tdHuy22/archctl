@@ -728,18 +728,25 @@ fn set_status(root: &Path, body: &str) -> Result<(), String> {
         .find(|e| e.key == key && (e.kind == "service") == service)
         .ok_or_else(|| format!("không có phần tử nào tên `{name}`"))?;
 
-    let mut lines: Vec<String> = src.lines().map(str::to_string).collect();
     let index = element.line.checked_sub(1).ok_or("phần tử không có số dòng")?;
     // Đã ở đúng trạng thái đó: không có gì để ghi, cũng không có gì để kể.
     // (So trạng thái chứ không so dòng: viết lại dòng có thể đổi khoảng trắng.)
     if element.status == status {
         return Ok(());
     }
-    let old = lines.get(index).ok_or("số dòng vượt ngoài file")?.clone();
+    // Chỉ thay đúng đoạn byte của dòng đó: mọi byte khác — `\r\n`, BOM, dòng
+    // cuối không xuống dòng — giữ nguyên, như `/api/edit`. Đếm dòng giống
+    // `str::lines`, là cách bộ đọc luật đánh số dòng.
+    let mut start = 0;
+    let mut rows = src.split_inclusive('\n');
+    for _ in 0..index {
+        start += rows.next().ok_or("số dòng vượt ngoài file")?.len();
+    }
+    let raw = rows.next().ok_or("số dòng vượt ngoài file")?;
+    let raw = raw.strip_suffix('\n').unwrap_or(raw);
+    let old = raw.strip_suffix('\r').unwrap_or(raw).to_string();
     let new = arch_core::parser::rewrite_annotations(&old, element.owner, status);
-    lines[index] = new.clone();
-
-    let updated = format!("{}\n", lines.join("\n"));
+    let updated = format!("{}{new}{}", &src[..start], &src[start + old.len()..]);
     // Không ghi nếu kết quả hỏng: thà không làm gì còn hơn làm hỏng file luật.
     if let Some(d) = arch_core::load(&updated)
         .1
