@@ -932,6 +932,25 @@ view Shop: Web, Order
         }
     }
 
+    /// Ô chữ chỉ chặn được những gì bộ đọc luật chặn. Trước đây khoá lạ trong
+    /// thân `boundary`/`contract` được ghi im lặng (thử trong trình duyệt ngày
+    /// 17/11/2026 với `chaosmonkey bat len moi dem`).
+    #[test]
+    fn o_chu_tu_choi_khoa_la_trong_than_khoi() {
+        let src = format!("{LAW}boundary B contains Order:\n  contain  Timeout\n  verify   x\n");
+        for text in [
+            "boundary B contains Order:\n  contain  Timeout\n  chaosmonkey bat len moi dem\n",
+            "boundary B contains Order:\n  contian  Timeout\n",
+        ] {
+            let r = at(&src, "replace", "boundary B", &[("text", text)]);
+            let err = run(&src, &r).map(|e| e.text).unwrap_err();
+            assert_eq!(err.why, Why::Bad, "phải từ chối: {text:?}");
+            assert!(err.refs.iter().any(|r| r.contains("không hiểu khoá")), "{:?}", err.refs);
+        }
+        let r = req(&[("op", "add"), ("text", "contract Order.place:\n  requiers ok\n")]);
+        assert_eq!(run(LAW, &r).map(|e| e.text).unwrap_err().why, Why::Bad);
+    }
+
     #[test]
     fn sua_duong_dan_chi_dung_mot_dong() {
         let r = at(LAW, "replace", "component Web", &[("text", "component Web at app/web/**  @human #accepted")]);

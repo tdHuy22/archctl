@@ -858,7 +858,7 @@ fn parse_contract(
     doc.contracts.push(Contract {
         component: component.to_string(),
         capability: capability.to_string(),
-        fields: parse_fields(body),
+        fields: parse_fields(body, "contract", CONTRACT_KEYS, diags),
         meta,
     });
 }
@@ -885,14 +885,70 @@ fn parse_boundary(
     doc.boundaries.push(Boundary {
         name: name.trim().to_string(),
         contains: split_list(members),
-        fields: parse_fields(body),
+        fields: parse_fields(body, "boundary", BOUNDARY_KEYS, diags),
         meta,
     });
 }
 
+/// Khoá hợp lệ trong thân từng loại khối. Khoá ngoài danh sách là lỗi: gõ nhầm
+/// `requiers` hay `contian` mà được nhận im lặng thì luật đó biến mất mà không
+/// ai hay — đúng kiểu sơ đồ nói dối mà công cụ này sinh ra để chặn.
+const CONTRACT_KEYS: &[&str] = &[
+    "requires",
+    "ensures",
+    "errors",
+    "idempotent_by",
+    "latency",
+    "consistency",
+    "verify",
+];
+const BOUNDARY_KEYS: &[&str] = &[
+    "isolation",
+    "propagate",
+    "contain",
+    "retry",
+    "timeout",
+    "compensate",
+    "verify",
+];
+
+/// Khoá hợp lệ gần nhất với khoá gõ nhầm, nếu đủ gần để đáng gợi ý.
+fn closest_key<'k>(key: &str, allowed: &[&'k str]) -> Option<&'k str> {
+    fn distance(a: &str, b: &str) -> usize {
+        let b: Vec<char> = b.chars().collect();
+        let mut prev: Vec<usize> = (0..=b.len()).collect();
+        for (i, ca) in a.chars().enumerate() {
+            let mut cur = vec![i + 1];
+            for (j, cb) in b.iter().enumerate() {
+                let cost = usize::from(ca != *cb);
+                cur.push((prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1));
+            }
+            prev = cur;
+        }
+        prev[b.len()]
+    }
+    // Trần độ dài: khoá là chữ người gõ, nhưng một dòng dài bất thường không
+    // được biến phép so khoảng cách thành việc tốn bậc hai.
+    if key.chars().count() > 64 {
+        return None;
+    }
+    allowed
+        .iter()
+        .map(|k| (distance(key, k), *k))
+        .filter(|(d, _)| *d <= 2)
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, k)| k)
+}
+
 /// Thân `contract` và `boundary`: `khoá giá trị`, dòng lùi sâu hơn là tiếp nối
-/// giá trị của khoá liền trước. Giai đoạn này chưa hiểu ngữ nghĩa từng khoá.
-fn parse_fields(body: &[Line<'_>]) -> Vec<Field> {
+/// giá trị của khoá liền trước. Khoá phải nằm trong `allowed`; ngữ nghĩa từng
+/// khoá do `validate` và `check` lo.
+fn parse_fields(
+    body: &[Line<'_>],
+    kind: &str,
+    allowed: &[&str],
+    diags: &mut Vec<Diag>,
+) -> Vec<Field> {
     let base = body.first().map_or(0, |l| l.indent);
     let mut fields: Vec<Field> = Vec::new();
     for line in body {
@@ -906,8 +962,19 @@ fn parse_fields(body: &[Line<'_>]) -> Vec<Field> {
             Some((k, v)) => (k, v.trim()),
             None => (line.text, ""),
         };
+        let key = key.trim_end_matches(':');
+        if !allowed.contains(&key) {
+            let hint = match closest_key(key, allowed) {
+                Some(k) => format!("có phải `{k}`? Khoá hợp lệ: {}", allowed.join(", ")),
+                None => format!("khoá hợp lệ: {}", allowed.join(", ")),
+            };
+            diags.push(
+                Diag::error(line.no, format!("không hiểu khoá `{key}` trong {kind}"))
+                    .with_hint(hint),
+            );
+        }
         fields.push(Field {
-            key: key.trim_end_matches(':').to_string(),
+            key: key.to_string(),
             values: if value.is_empty() {
                 Vec::new()
             } else {

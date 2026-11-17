@@ -9,11 +9,14 @@ Cập nhật 2026-11-17.
 
 ### Việc mở
 
+- **Gộp và đẩy việc sửa sơ đồ trong `serve`** (chờ bạn bảo; 17/11/2026). Hai nhánh cục bộ chưa push: `claude/trusting-chebyshev-fb77b4` (`d0cb1bc`) và `claude/nice-curie-e88a4f` (`ea0f284`, đã chứa nhánh kia nên chỉ cần gộp nhánh này vào `main`). Trên `ea0f284` tôi chạy lại `cargo test` ngày 17/11: mọi nhóm đạt, `serve` 39/39; clippy và `+1.88 check` chỉ có báo cáo của phiên con. Trên `main` đã bỏ bản sửa §0 cũ chưa commit để khỏi xung đột khi gộp. Còn có trang đọc `.agent/trang/archctl-huong-dan.html` (hướng dẫn archctl 10 bước, chưa commit trên `main`; nội dung nói "chưa vẽ được hộp mới" nay đã lỗi thời, cần sửa bước 10 và bảng "thao tác" sau khi gộp).
 - Bạn đã bấm thử trong trình duyệt (17/11/2026, bản sao `/tmp/archctl-thu`): khoá `Scan` và gỡ `Model` khỏi một `deny`, cả hai ghi đúng dòng và có mục `SỬA` kèm lý do trong `decisions.md`; `check` trên bản sao 0 vi phạm, 3 cảnh báo "chưa chứng minh" đúng như mong đợi (luật đổi thì biên nhận `verify` hết hạn). Chưa thử: **+ Thêm**, **Nối mũi tên**, đổi tên, xoá kèm trong trình duyệt (đã có test API).
 - Test `grpc_java_addservice_doi_khang_khong_treo` (arch-core, đo dưới 5 giây) trượt một lần trong `archctl verify` khi máy vừa build release, chạy lại thì đạt: test đo giờ dễ chập chờn khi máy tải nặng.
 - Hook agent-stack đọc nhầm `cargo test -p archctl --test serve` thành `archctl serve` (`pretool_guard.py` `check_arch_argv`); dùng `cargo test --workspace` thay.
 
 ### Đã xong, có bằng chứng
+
+- **Khoá lạ trong thân `contract`/`boundary` là lỗi** (17/11/2026, bạn bảo "sửa ở đây", bạn xác nhận tiêu chí; đạt 3/3; chưa commit). Tái hiện trong trình duyệt: dòng `chaosmonkey bat len moi dem` thêm vào `boundary Checkout` qua ô chữ được ghi, `archctl parse` (cả 0.1.1) im lặng. Sửa `parse_fields` (`parser.rs`): danh sách khoá đóng cho từng khối, khoá lạ là lỗi có số dòng và gợi ý khoá gần nhất (`requiers` → `requires`). Test `parse.rs` (3 test, 2 test trượt trên code cũ ở assert số lỗi) và `edit.rs` `o_chu_tu_choi_khoa_la_trong_than_khoi`; `docs/declarations.md` có bảng khoá. Biên nhận trên mã cuối: `cargo test --workspace`, clippy, `+1.88 check`, `archctl verify` 3/3, `check --strict` 0, `checks.py` 0 lỗi chặn; mọi file `.arch` theo dõi trong repo đọc sạch. Review: mức thấp, bỏ reviewer vì hạn mức tuần 88%, tự rà diff.
 
 - **Nút trạng thái giữ nguyên `\r\n`, BOM, dòng cuối không xuống dòng** (17/11/2026, bạn bảo "sửa ở đây"). `set_status` trước viết lại cả file bằng `\n`; giờ chỉ thay đúng đoạn byte của dòng đó. Tái hiện bằng test `khoa_mot_luat_giu_nguyen_crlf_va_bom` (`fails-before` có biên nhận: trượt trên code cũ, đạt sau sửa). Biên nhận trên mã cuối: `cargo test --workspace` (serve 39/39), clippy, `+1.88 check`, release, `verify` 3/3, `check --strict` 0, `checks.py` 0.
 

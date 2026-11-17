@@ -29,6 +29,16 @@ của `contract`, `contain` và `compensate` của `boundary`, các trạng thá
 `invariant state`. Những trường còn lại là văn xuôi; moi tên ra từ đó chỉ sinh
 kỳ vọng rác.
 
+Khoá trong thân khối là danh sách đóng. Khoá ngoài danh sách là **lỗi**, kèm
+gợi ý khoá gần nhất: gõ nhầm `contian` mà được nhận im lặng thì luật `contain`
+biến mất mà không ai hay. Dòng lùi sâu hơn khoá là tiếp nối giá trị của nó.
+
+| Khối | Khoá hợp lệ |
+| --- | --- |
+| `contract` | `requires`, `ensures`, `errors`, `idempotent_by`, `latency`, `consistency`, `verify` |
+| `boundary` | `isolation`, `propagate`, `contain`, `retry`, `timeout`, `compensate`, `verify` |
+| `flow` | dòng `a -> b`, `parallel: …`, `if <đk>: …`, `on_fail(a): …` |
+
 ## Một bước của flow trỏ vào đâu
 
 Một bước có thể là ba thứ khác nhau, và chỉ một trong ba nói gì về mã:

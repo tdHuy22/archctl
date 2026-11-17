@@ -126,6 +126,56 @@ fn contract_gom_dong_tiep_noi_vao_dung_khoa() {
     assert_eq!(fields[1].values, ["ok  => CAPTURED", "err => không chuyển tiền"]);
 }
 
+/// Gõ nhầm khoá (`requiers`, `contian`) trước đây được nhận im lặng: luật đó
+/// biến mất mà không ai hay, và ô chữ của `serve` cũng để lọt.
+#[test]
+fn khoa_la_trong_contract_la_loi_dung_dong() {
+    let errs = errors(
+        "component Payment at p/**\n\
+         contract Payment.charge:\n\
+        \x20 requiers  order.status == RESERVED\n\
+        \x20 verify    contract_test\n",
+    );
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].starts_with("3:") && errs[0].contains("requiers"), "{errs:?}");
+}
+
+#[test]
+fn khoa_la_trong_boundary_la_loi_dung_dong() {
+    let errs = errors(
+        "component P at p/**\n\
+         boundary B contains P:\n\
+        \x20 contain     Timeout\n\
+        \x20 chaosmonkey bat len moi dem\n\
+        \x20 contian     Unavailable\n",
+    );
+    assert_eq!(errs.len(), 2, "{errs:?}");
+    assert!(errs[0].starts_with("4:") && errs[0].contains("chaosmonkey"), "{errs:?}");
+    assert!(errs[1].starts_with("5:") && errs[1].contains("contian"), "{errs:?}");
+}
+
+#[test]
+fn moi_khoa_hop_le_cua_contract_va_boundary_doc_sach() {
+    ok("component P at p/**\n\
+        contract P.charge:\n\
+       \x20 requires      a\n\
+       \x20 ensures       ok  => b\n\
+       \x20               err => c\n\
+       \x20 errors        X | Y\n\
+       \x20 idempotent_by id\n\
+       \x20 latency       p99 < 1s\n\
+       \x20 consistency   strong\n\
+       \x20 verify        t\n\
+        boundary B contains P:\n\
+       \x20 isolation   P.down => vẫn chạy\n\
+       \x20 propagate   X -> user\n\
+       \x20 contain     Y\n\
+       \x20 retry       P.charge: 3 lần\n\
+       \x20 timeout     < 3s\n\
+       \x20 compensate  charge.fail => undo\n\
+       \x20 verify      t\n");
+}
+
 #[test]
 fn invariant_co_pham_vi_va_verify() {
     let doc = ok("invariant money [system] tổng tiền khớp verify tla_model, daily_reconcile");
