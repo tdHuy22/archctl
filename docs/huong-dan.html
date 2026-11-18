@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hướng dẫn archctl từng bước</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+:root {
+  --bg: #f5f6f3; --panel: #ffffff; --fg: #1f2421; --muted: #5c665f; --line: #d8ddd6;
+  --accent: #2f6a52; --accent-soft: #e1eee7;
+  --ok: #2f6a52; --ok-soft: #e1eee7; --warn: #8a5a12; --warn-soft: #f8edd8; --bad: #a3402c; --bad-soft: #f7e3dd;
+  --code-bg: #eceee9;
+  --f-body: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #151916; --panel: #1d221f; --fg: #e3e8e4; --muted: #9aa69e; --line: #313a34;
+  --accent: #79c2a2; --accent-soft: #203a2f;
+  --ok: #79c2a2; --ok-soft: #203a2f; --warn: #e0b260; --warn-soft: #3a2f1a; --bad: #e58b75; --bad-soft: #402520;
+  --code-bg: #111512; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #151916; --panel: #1d221f; --fg: #e3e8e4; --muted: #9aa69e; --line: #313a34;
+  --accent: #79c2a2; --accent-soft: #203a2f;
+  --ok: #79c2a2; --ok-soft: #203a2f; --warn: #e0b260; --warn-soft: #3a2f1a; --bad: #e58b75; --bad-soft: #402520;
+  --code-bg: #111512; color-scheme: dark }
+* { box-sizing: border-box }
+body { background: var(--bg); color: var(--fg); font-family: var(--f-body); font-size: 16px; line-height: 1.65; margin: 0;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 32px 64px }
+main { max-width: 960px; margin: 0 auto; display: grid; gap: 40px }
+section, header, footer { display: grid; gap: 14px; min-width: 0 }
+h1, h2, h3 { margin: 0; line-height: 1.25; text-wrap: balance }
+h1 { font-size: clamp(1.6rem, 4vw, 2.1rem); font-weight: 700 }
+h2 { font-size: 1.3rem; font-weight: 600 }
+h3 { font-size: 1.05rem; font-weight: 600 }
+p, li, dd { max-width: 70ch }
+p, ul, ol, dl { margin: 0 }
+ul, ol { padding-left: 1.3em; display: grid; gap: 6px }
+.eyebrow { font-size: .78rem; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); font-weight: 600 }
+code, pre, kbd { font-family: var(--f-mono); font-size: .88em }
+code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere }
+pre { background: var(--code-bg); padding: 12px 14px; border-radius: 6px; overflow-x: auto; margin: 0; line-height: 1.5 }
+pre code { background: none; padding: 0 }
+dfn { font-style: normal; font-weight: 600 }
+.summary { background: var(--panel); border: 1px solid var(--accent); border-radius: 10px; padding: 18px 20px }
+.ladder { gap: 10px }
+.ladder b { color: var(--accent) }
+.glossary { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px }
+.glossary dt { font-weight: 600; font-family: var(--f-mono); font-size: .92em }
+.glossary dd { margin: 0 }
+@media (max-width: 520px) { .glossary { grid-template-columns: 1fr } .glossary dd { margin-bottom: 8px } }
+.examples, .steps { display: grid; gap: 14px }
+.example, .step { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 16px 18px; display: grid; gap: 10px; align-content: start; min-width: 0 }
+.step h3 { display: flex; gap: 10px; align-items: baseline }
+.num { flex: none; background: var(--accent); color: var(--bg); border-radius: 999px; min-width: 1.9em; text-align: center;
+  font-size: .85rem; padding: 1px 8px; font-weight: 700 }
+.try { border-left: 4px solid var(--accent); padding-left: 12px }
+.try b, .see b, .why b { font-size: .78rem; letter-spacing: .05em; text-transform: uppercase; color: var(--muted) }
+.why { background: var(--accent-soft); border-radius: 6px; padding: 8px 12px }
+.warnbox { background: var(--warn-soft); color: var(--warn); border-radius: 6px; padding: 8px 12px }
+.scroll { overflow-x: auto }
+table { border-collapse: collapse; width: 100%; font-size: .93rem }
+th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line) }
+thead th { font-size: .8rem; color: var(--muted); letter-spacing: .03em }
+.note { font-size: .9rem; color: var(--muted) }
+svg { max-width: 100%; height: auto }
+svg text { font-family: var(--f-body); fill: var(--fg) }
+a { color: var(--accent) }
+</style>
+</head>
+<body>
+<main data-loai="giai-thich">
+  <header>
+    <div class="eyebrow">archctl 0.1.1 · viết 16/11/2026, cập nhật 18/11/2026</div>
+    <h1>archctl là gì, và cách dùng nó từng bước</h1>
+  </header>
+
+  <section class="summary" data-phan="tom-tat">
+    <h2>Tóm tắt</h2>
+    <p>archctl là một chương trình dòng lệnh đọc một file luật kiến trúc do bạn viết, rồi kiểm xem mã nguồn có đi ngược luật đó không. Nó sinh ra để dùng cạnh một agent lập trình (Claude Code, Codex): agent viết mã, archctl là người gác cổng. Trang này đưa bạn đi qua 11 bước, mỗi bước có lệnh để gõ và kết quả thật tôi đã chạy trên bản sao dự án mẫu <code>examples/shop</code>; bước 10 là vẽ và sửa luật ngay trên sơ đồ trong trình duyệt. Phần cuối dạy cách viết file luật: mỗi loại khai báo có một câu nói nó để làm gì và một ví dụ đã qua bộ đọc của archctl. Bản archctl mới nhất đã nằm sẵn trong máy bạn, không cần cài thêm. Không có việc nào bạn cần chốt; đây là trang đọc và làm theo.</p>
+  </section>
+
+  <section data-phan="nen-tang">
+    <h2>Từ gốc</h2>
+    <h3>Hệ thống đang làm gì</h3>
+    <p>Khi để một agent tự viết mã, kiến trúc dễ trôi: hôm nay module kho hàng chỉ gọi module thông báo, tuần sau agent thấy tiện nên cho nó gọi thẳng module thanh toán. Không ai thấy vì mã vẫn chạy. archctl chặn việc này như sau. Bạn viết ra một file nhỏ (<code>.arch/system.arch</code>) nói "ai được gọi ai". archctl đọc mã, lần ra mọi chỗ một module nạp module khác, và so với file đó. Chỗ nào lệch thì in ra tên file, số dòng và cách sửa.</p>
+    <div class="scroll">
+    <svg viewBox="0 0 760 250" role="img" aria-label="Luồng làm việc: bạn viết luật, agent viết mã, archctl đối chiếu, vi phạm thì agent sửa hoặc đề xuất và bạn duyệt">
+      <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+      <g fill="none" stroke="currentColor" stroke-width="1.5" style="color:var(--muted)">
+        <rect x="20" y="20" width="170" height="60" rx="8" style="fill:var(--accent-soft);stroke:var(--accent)"/>
+        <rect x="295" y="20" width="170" height="60" rx="8" style="fill:var(--panel);stroke:var(--line)"/>
+        <rect x="570" y="20" width="170" height="60" rx="8" style="fill:var(--panel);stroke:var(--line)"/>
+        <rect x="295" y="165" width="170" height="60" rx="8" style="fill:var(--accent-soft);stroke:var(--accent)"/>
+        <rect x="570" y="165" width="170" height="60" rx="8" style="fill:var(--panel);stroke:var(--line)"/>
+        <rect x="20" y="165" width="170" height="60" rx="8" style="fill:var(--panel);stroke:var(--line)"/>
+        <path d="M190 50 H293" marker-end="url(#ar)"/>
+        <path d="M465 50 H568" marker-end="url(#ar)"/>
+        <path d="M655 80 V125 H400 V163" marker-end="url(#ar)"/>
+        <path d="M240 80 V125 H350 V163" marker-end="url(#ar)" stroke-dasharray="4 3"/>
+        <path d="M570 195 H467" marker-end="url(#ar)"/>
+        <path d="M295 195 H192" marker-end="url(#ar)"/>
+      </g>
+      <g text-anchor="middle" font-size="14">
+        <text x="105" y="46">Bạn</text><text x="105" y="65" font-size="12">viết system.arch</text>
+        <text x="380" y="46">Agent</text><text x="380" y="65" font-size="12">viết mã</text>
+        <text x="655" y="46">Mã nguồn</text><text x="655" y="65" font-size="12">src/…</text>
+        <text x="380" y="191">archctl check</text><text x="380" y="210" font-size="12">đối chiếu mã với luật</text>
+        <text x="655" y="191">Báo vi phạm</text><text x="655" y="210" font-size="12">file, dòng, cách sửa</text>
+        <text x="105" y="191">Bạn duyệt</text><text x="105" y="210" font-size="12">accept hoặc reject</text>
+      </g>
+    </svg>
+    </div>
+    <p class="note">Hình: nét liền là luồng chạy; nét đứt là luật bạn viết, archctl đọc. Vi phạm quay lại agent; agent sửa mã hoặc <code>propose</code> một luật mới cho bạn duyệt.</p>
+
+    <h3>Vấn đề hôm nay</h3>
+    <p>Nếu bạn chỉ dặn agent "đừng để kho hàng gọi thanh toán" bằng lời, nó có thể quên, hoặc làm sai mà vẫn báo xong. Luật nằm trong file thì máy kiểm được, mỗi lần agent sửa file, và nhắc nó ngay trong lúc làm. Khi luật thật sự sai (kho hàng cần gọi thanh toán), agent cũng cần một đường hợp lệ để xin đổi luật, nếu không nó sẽ lách luật hoặc kẹt mãi. Đường đó là lệnh <code>propose</code> ở bước 7.</p>
+
+    <h3>Cần biết trước</h3>
+    <ol class="ladder">
+      <li><b>Component (thành phần)</b>: một khối mã gắn với một nhóm đường dẫn. Ví dụ: <code>component Stock at src/stock/**</code> nghĩa là mọi file dưới <code>src/stock/</code> là khối "Stock". Cần để hiểu: mọi luật khác đều nói về component.</li>
+      <li><b>allow và deny</b>: <code>allow Order -&gt; Stock, Payment</code> cho Order gọi Stock và Payment. <code>deny * -&gt; Stripe except Payment</code> cấm mọi component trừ Payment đụng tới thư viện <code>stripe</code>. Cần để hiểu: các vi phạm ở bước 3. Một component đã có <code>allow</code> mà gọi sang chỗ không được liệt kê là vi phạm.</li>
+      <li><b>Trạng thái</b> <code>#draft</code>, <code>#proposed</code>, <code>#accepted</code>, <code>#locked</code>: <code>#draft</code> là bản nháp và <code>#proposed</code> là đang đề xuất, cả hai chưa có hiệu lực; <code>#accepted</code> là đã duyệt, đang được kiểm; <code>#locked</code> cũng được kiểm, và giao diện sơ đồ hỏi lại trước khi cho sửa. Cần để hiểu: bước 8 (áp lên dự án có sẵn) và bước 10.</li>
+      <li><b>Người ghi và dấu</b> <code>@human</code> / <code>@ai</code>: mỗi dòng luật ghi ai đặt ra nó. Agent không được ghi <code>system.arch</code>; nó chỉ ghi <code>proposals.arch</code>. Cần để hiểu: bước 7.</li>
+      <li><b>Mã thoát</b>: số mà lệnh trả về cho shell. 0 là sạch, 1 là có vi phạm, 3 là có đề xuất đang chờ bạn. Cần để hiểu: vì sao CI (hệ thống tự chạy kiểm sau mỗi lần đẩy mã) biết đỏ hay xanh.</li>
+    </ol>
+
+    <div data-phan="thuat-ngu">
+      <h3>Thuật ngữ</h3>
+      <dl class="glossary">
+        <dt>.arch/</dt><dd>Thư mục ở gốc dự án chứa mọi thứ của archctl. Gốc dự án là thư mục gần nhất đi lên có <code>.arch/system.arch</code>.</dd>
+        <dt>system.arch</dt><dd>File luật. Chỉ người sửa.</dd>
+        <dt>proposals.arch</dt><dd>File đề xuất. Chỉ agent ghi, qua <code>propose</code> và <code>block</code>.</dd>
+        <dt>decisions.md</dt><dd>Nhật ký mọi lần bạn duyệt hay từ chối, kèm lý do. Agent đọc nó để không đề xuất lại thứ đã bị từ chối.</dd>
+        <dt>.state</dt><dd>File máy tự ghi: nhớ mỗi vi phạm đã gặp mấy lần. Không đưa vào git.</dd>
+        <dt>hook</dt><dd>Lệnh mà Claude Code tự chạy sau mỗi lần agent sửa file. archctl dùng nó để nhắc agent ngay lúc vừa vi phạm.</dd>
+        <dt>baseline</dt><dd>Danh sách vi phạm có sẵn từ trước, được tha để dự án cũ có thể bật archctl mà không phải sửa hàng trăm chỗ cùng lúc.</dd>
+        <dt>biên nhận (verify)</dt><dd>Kết quả một lệnh kiểm do bạn khai báo trong luật (ví dụ chạy test), ghi lại sau khi nó chạy thật.</dd>
+        <dt>HEAD</dt><dd>Tên của commit mới nhất trong git. <code>archctl diff</code> so luật hiện tại với nó.</dd>
+        <dt>CI</dt><dd>Hệ thống tự chạy kiểm sau mỗi lần đẩy mã lên GitHub. Nằm ngoài tầm với của agent.</dd>
+        <dt>Mermaid</dt><dd>Định dạng chữ để vẽ sơ đồ; GitHub tự vẽ thành hình.</dd>
+      </dl>
+    </div>
+  </section>
+
+  <section>
+    <h2>Hướng dẫn từng bước</h2>
+    <p>Làm theo thứ tự. Mọi lệnh dưới đây chạy trong một thư mục bản sao, nên không làm hỏng repo thật. Kết quả hiện ra là kết quả thật của lần chạy tôi làm sáng nay; ngày tháng và mã băm của bạn sẽ khác.</p>
+
+    <div class="steps">
+      <article class="step">
+        <h3><span class="num">1</span> Kiểm máy bạn có archctl</h3>
+        <div class="try"><b>Gõ</b>
+<pre><code>archctl</code></pre></div>
+        <div class="see"><b>Bạn sẽ thấy</b>
+<pre><code>archctl 0.1.1 — sơ đồ kiến trúc là luật
+
+Bắt đầu:
+  archctl init [--from-code] [--no-hooks] Dựng .arch/ cho dự án
+  archctl baseline                        Tha vi phạm có sẵn, chỉ chặn cái mới
+…</code></pre></div>
+        <p class="why"><b>Vì sao</b> Chương trình nằm ở <code>~/.cargo/bin/archctl</code>, do bạn dựng từ repo này. Nếu một ngày lệnh báo "không tìm thấy", dựng lại bằng <code>cargo install --locked --path crates/archctl</code> trong repo.</p>
+      </article>
+
+      <article class="step">
+        <h3><span class="num">2</span> Dựng một dự án mẫu để thử</h3>
+        <p>Dự án mẫu <code>shop</code> là một cửa hàng TypeScript nhỏ, cố ý cài sẵn vi phạm. Chép nó ra chỗ khác để mọi thao tác sau không đụng vào repo.</p>
+        <div class="try"><b>Gõ</b>
+<pre><code>mkdir -p ~/archctl-thu
+cp -R /Users/macos/Documents/Claude/archctl/examples/shop ~/archctl-thu/shop
+cd ~/archctl-thu/shop
+rm -f .arch/.state
+ls -a .arch</code></pre></div>
+        <div class="see"><b>Bạn sẽ thấy</b>
+<pre><code>.   ..   system.arch</code></pre></div>
+        <p class="why"><b>Vì sao</b> Dự án mẫu đi kèm một <code>.state</code> cũ ghi "đã gặp lại 17 lần"; xóa nó để bộ đếm của bạn bắt đầu từ 0 như dự án thật. Chỉ mình <code>system.arch</code> là file luật.</p>
+      </article>
+
+      <article class="step">
+        <h3><span class="num">3</span> Đọc file luật rồi chạy <code>check</code></h3>
+        <p>Mở <code>.arch/system.arch</code>. Phần quan trọng nhất là bảy dòng này:</p>
+<pre><code>component Web      at src/web/**       @human #locked
+component Stock    at src/stock/**     @human #accepted
+component Payment  at src/payment/**   @human #accepted
+external  Stripe   at "stripe"         @human #accepted
+
+allow Web     -&gt; Order, User
+allow Stock   -&gt; Notify
+deny  * -&gt; Stripe   except Payment</code></pre>
+        <p>Đọc thành lời: Stock chỉ được gọi Notify. Chỉ Payment được dùng thư viện <code>stripe</code>. (Từng loại khai báo được dạy kỹ ở phần <a href="#cu-phap">Cú pháp system.arch</a> cuối trang.) Giờ cho archctl kiểm:</p>
+        <div class="try"><b>Gõ</b>
+<pre><code>archctl check</code></pre></div>
+        <div class="see"><b>Bạn sẽ thấy</b> (rút gọn)
+<pre><code>kiến trúc cc0e13c3… · 7 file quét (7 TypeScript) · 4/6 component trong diện kiểm
+
+✗ VI PHẠM  Stock -&gt; Payment  (không được phép, #accepted)
+  src/stock/reserve.ts:5  import '../payment/charge'
+  luật: không có allow nào cho Stock -&gt; Payment
+  → Stock chỉ được gọi: Notify
+
+✗ VI PHẠM  Web -&gt; Stripe  (bị cấm, #accepted)
+  src/web/checkout-page.ts:5  import 'stripe'
+  luật: deny * -&gt; Stripe except Payment
+  → gọi Payment thay vì truy cập thẳng Stripe
+
+✗ VI PHẠM  Web -&gt; Timeout  (lọt ra ngoài vùng, #accepted)
+  src/web/checkout-page.ts:12  dùng `Timeout` (2 lần trong file)
+…
+⚠ KHAI BÁO LẠC HẬU  bước của flow PlaceOrder `updateAnalytics`
+⚠ CHƯA PHÂN GIẢI  '../shared/cart-types'
+⚠ CHƯA CHỨNG MINH  cách kiểm `contract_test` — chưa chạy lần nào
+
+3 vi phạm mới, 11 cảnh báo</code></pre></div>
+        <p class="why"><b>Cách đọc</b> Dấu <code>✗</code> là vi phạm luật đang có hiệu lực: phải sửa. Dấu <code>⚠</code> là cảnh báo, chưa làm lệnh thất bại. "Khai báo lạc hậu" nghĩa là luật nhắc tới một bước tên <code>updateAnalytics</code> mà mã không có; sơ đồ đang nói dối. "Chưa phân giải" nghĩa là archctl không tìm ra file mà dòng import trỏ tới. Dòng "→" là cách sửa gợi ý. Lệnh trả mã thoát 1 vì có vi phạm.</p>
+        <p class="note">Lần đầu bạn có thể thấy thêm một dòng "Kiến trúc đã thay đổi kể từ lần kiểm trước". Đó là archctl nhắc bạn (hoặc agent) đọc lại file luật khi hash của nó đổi; không phải lỗi.</p>
+      </article>
+
+      <article class="step">
+        <h3><span class="num">4</span> Xem archctl đọc mã ra sao</h3>
+        <p>Khi một vi phạm làm bạn ngạc nhiên, hỏi thẳng archctl nó thấy gì trong file đó.</p>
+        <div class="try"><b>Gõ</b>
+<pre><code>archctl scan src/stock/reserve.ts</code></pre></div>
+        <div class="see"><b>Bạn sẽ thấy</b>
+<pre><code>src/stock/reserve.ts (TypeScript)
+      1  ../notify/send  → src/notify/send.ts
+      5  ../payment/charge  → src/payment/charge.ts</code></pre></div>
+        <p class="why"><b>Vì sao</b> Dòng 5 chính là nguồn của vi phạm ở bước 3: file kho hàng nạp thẳng file thanh toán. <code>scan</code> không cần <code>.arch/</code>, nên dùng được ở bất kỳ thư mục mã nào để xem archctl hiểu gì. Thêm <code>--json</code> nếu muốn máy khác đọc.</p>
+      </article>
+
+      <article class="step">
+        <h3><span class="num">5</span> Để ý bộ đếm lần thử</h3>
+        <p>Chạy <code>archctl check</code> thêm lần nữa, rồi lần nữa.</p>
+        <div class="see"><b>Bạn sẽ thấy</b> (lần thứ hai)
+<pre><code>✗ VI PHẠM  Stock -&gt; Payment  (không được phép, #accepted)
+  src/stock/reserve.ts:5  import '../payment/charge'
+  …
+  (lần thứ 2)</code></pre></div>
+        <p class="why"><b>Vì sao</b> Vi phạm chưa sửa mà gặp lại thì bộ đếm tăng. Tới lần thứ 3, archctl in thêm đúng lệnh agent nên chạy ("! đã gặp lại 3 lần — không sửa được thì dừng lại và: <code>archctl propose …</code>"). Đây là cách nó chặn agent cố sửa mãi một chỗ mà không được.</p>
+      </article>
+
+      <article class="step">
+        <h3><span class="num">6</span> Sửa vi phạm thật</h3>
+        <p>Cách mặc định luôn là sửa mã cho đúng luật. Với vi phạm <code>Stock -&gt; Payment</code>, hướng đúng là bỏ import ở <code>src/stock/reserve.ts</code> dòng 5, để <code>Order</code> (component được phép gọi cả Stock lẫn Payment) điều phối. Sau mỗi lần sửa:</p>
+        <div class="try"><b>Gõ</b>
+<pre><code>archctl check src/stock/reserve.ts</code></pre></div>
+        <p class="why"><b>Vì sao</b> Đưa tên file vào thì kiểm cực nhanh (khoảng 11 mili giây trên 2000 file TypeScript, theo README), nên agent chạy được sau mỗi lần sửa. Sửa xong, vi phạm biến mất và bộ đếm của nó về 0.</p>
+      </article>
+
+      <article class="step">
+        <h3><span class="num">7</span> Khi luật sai: agent đề xuất, bạn quyết</h3>
+        <p>Giả sử bạn thấy kho hàng thật sự cần hỏi thanh toán. Agent không được tự sửa <code>system.arch</code>. Nó chạy lệnh dưới và dừng việc đó lại.</p>
+        <div class="try"><b>Gõ</b> (vai agent)
+<pre><code>archctl propose 'allow Stock -&gt; Payment' --reason "reserve cần kiểm hạn mức thanh toán"</code></pre></div>
+        <div class="see"><b>Bạn sẽ thấy</b>
+<pre><code>Đã ghi đề xuất `p-6938d093fae0d371`: allow Stock -&gt; Payment
+→ DỪNG phần việc này lại và làm việc khác. Chờ người quyết định.</code></pre></div>
+        <p>Mã thoát là 3. Giờ vai bạn: xem danh sách chờ.</p>
+        <div class="try"><b>Gõ</b> (vai bạn)
+<pre><code>archctl proposals</code></pre></div>
+        <div class="see"><b>Bạn sẽ thấy</b>
+<pre><code>ĐỀ XUẤT p-6938d093fae0d371  allow Stock -&gt; Payment
+  lý do: reserve cần kiểm hạn mức thanh toán
+1 đang chờ. Duyệt: archctl accept &lt;id&gt; --reason "..." · Từ chối: archctl reject &lt;id&gt; --reason "..."</code></pre></div>
+        <p>Bạn có hai lựa chọn, và <code>--reason</code> là bắt buộc cho cả hai.</p>
+        <div class="try"><b>Từ chối</b>
+<pre><code>archctl reject p-6938d093fae0d371 --reason "Stock không được biết Payment. Để Order gọi Payment rồi truyền kết quả cho Stock."</code></pre></div>
+        <div class="try"><b>Hoặc duyệt</b>
+<pre><code>archctl accept p-6938d093fae0d371 --reason "Chỉ đọc hạn mức, an toàn"</code></pre></div>
+        <p>Khi duyệt, archctl tự thêm dòng <code>allow Stock -&gt; Payment @ai #accepted</code> vào cuối <code>system.arch</code>. Khi từ chối, nó ghi vào <code>decisions.md</code>. Bạn thử để agent đề xuất lại đúng luật đó:</p>
+        <div class="see"><b>Bạn sẽ thấy</b>
+<pre><code>Đề xuất này đã bị từ chối ngày 2026-11-16 bởi tdHuy22.
+Lý do: Stock không được biết Payment. Để Order gọi Payment rồi truyền kết quả cho Stock.
+
+→ Đừng đề xuất lại. Tìm hướng khác, hoặc hỏi người dùng.</code></pre></div>
+        <p class="why"><b>Vì sao</b> Agent không nhớ gì giữa các phiên. Nếu không có <code>decisions.md</code>, ngày mai nó đề xuất lại y hệt. Viết lại luật với khoảng trắng khác cũng bị nhận ra, vì mã nhận diện được tính trên nội dung đã chuẩn hóa. Lệnh <code>archctl block --on '&lt;luật&gt;' --reason "…"</code> là anh em của <code>propose</code>: dùng khi đã có một luật <code>deny</code> chặn agent và nó kẹt.</p>
+      </article>
+
+      <article class="step">
+        <h3><span class="num">8</span> Áp lên dự án đã có mã: <code>init --from-code</code> và <code>baseline</code></h3>
+        <p>Dự án thật không có sẵn file luật và có thể có hàng trăm vi phạm cũ. Hai lệnh giải đúng hai vấn đề đó. Thử trên một thư mục mới chỉ có mã:</p>
+        <div class="try"><b>Gõ</b>
+<pre><code>mkdir ~/archctl-thu/shop2 &amp;&amp; cp -R ~/archctl-thu/shop/src ~/archctl-thu/shop2/src
+cd ~/archctl-thu/shop2 &amp;&amp; git init -q
+archctl init --from-code --no-hooks</code></pre></div>
+        <div class="see"><b>Bạn sẽ thấy</b>
+<pre><code>Đã đọc 7 file (7 TypeScript) · gốc mã nguồn: src
+Dựng được 7 component và 7 quan hệ, tất cả ở `#draft`.
+
+  tạo  .arch/system.arch
+  tạo  .arch/proposals.arch
+  tạo  .arch/decisions.md
+  tạo  .arch/ARCHITECTURE.md
+  sửa  AGENTS.md
+  sửa  CLAUDE.md
+  sửa  .gitignore</code></pre></div>
+        <p>Nó chia mỗi thư mục con của <code>src/</code> thành một component và ghi lại mọi quan hệ import có thật thành <code>allow</code>, tất cả ở <code>#draft</code>. Chạy <code>archctl check</code> lúc này cho "0/7 component trong diện kiểm": chưa luật nào có hiệu lực, vì file đang mô tả hiện trạng chứ chưa phải thiết kế. Việc của bạn:</p>
+        <ol>
+          <li>Mở <code>.arch/system.arch</code>. Xóa quan hệ không nên tồn tại (ví dụ <code>allow Stock -&gt; Payment</code>).</li>
+          <li>Đổi <code>@ai #draft</code> thành <code>@human #accepted</code> ở phần bạn chắc. Component nào có <code>allow</code> đang có hiệu lực thì bắt đầu bị kiểm; phần còn lại tạm để yên.</li>
+          <li>Chạy <code>archctl check</code>. Nếu còn quá nhiều vi phạm cũ, chạy <code>archctl baseline</code> để tha chúng.</li>
+        </ol>
+        <div class="try"><b>Thử baseline trên bản shop ở bước 2</b>
+<pre><code>cd ~/archctl-thu/shop
+archctl baseline</code></pre></div>
+        <div class="see"><b>Bạn sẽ thấy</b>
+<pre><code>Đã ghi .arch/baseline: 3 vi phạm được tha.</code></pre></div>
+        <p class="why"><b>Vì sao</b> File <code>.arch/baseline</code> liệt kê ba vi phạm theo dạng <code>Stock-&gt;Payment|src/stock/reserve.ts|../payment/charge</code>. Chạy <code>check</code> lại: ba vi phạm cũ không còn bị báo, mã thoát về 0, nhưng một import sai mới sẽ bị chặn. Thêm <code>import '../web/checkout-page'</code> vào cuối <code>src/stock/reserve.ts</code> và chạy <code>archctl check src/stock/reserve.ts</code>: bạn thấy dòng "✗ vi phạm Stock -&gt; Web" và mã thoát 1. Lưu ý <code>check --strict</code> vẫn trả 1 sau baseline vì các cảnh báo "chưa chứng minh" còn đó; đó là lý do CI phải chạy <code>verify</code> trước (bước 11). Sửa được một cái cũ thì chạy <code>baseline</code> lại để siết; đã bỏ khỏi danh sách thì không quay lại được.</p>
+        <p class="warnbox"><b>Lưu ý:</b> không dùng <code>--no-hooks</code> thì <code>init</code> còn ghi hook vào <code>.claude/settings.json</code> của dự án (bước 9). Tôi thêm cờ đó ở đây để thử không đổi cấu hình Claude Code nào cả.</p>
+      </article>
+
+      <article class="step">
+        <h3><span class="num">9</span> Gắn vào Claude Code để nó nhắc agent tự động</h3>
+        <p>Chạy <code>archctl init</code> (không có <code>--no-hooks</code>) sinh ra đoạn này trong <code>.claude/settings.json</code>:</p>
+<pre><code>{
+  "matcher": "Edit|Write|MultiEdit|Bash",
+  "hooks": [{ "type": "command", "command": "archctl check --hook", "timeout": 30 }]
+}</code></pre>
+        <p>Nghĩa là sau mỗi lần Claude Code sửa file hay chạy lệnh shell, nó chạy <code>archctl check --hook</code>. Lệnh này đọc thông tin lần sửa từ Claude Code, kiểm đúng file đó, rồi đưa vi phạm vào ngữ cảnh mà model đọc được. Thử tự tay, giả làm Claude Code vừa sửa <code>reserve.ts</code> (thay <code>/đường/dẫn/shop</code> bằng đường dẫn thật của bạn):</p>
+        <div class="try"><b>Gõ</b>
+<pre><code>echo '{"tool_name":"Edit","tool_input":{"file_path":"/đường/dẫn/shop/src/stock/reserve.ts"}}' | archctl check --hook</code></pre></div>
+        <div class="see"><b>Bạn sẽ thấy</b> (rút gọn, một dòng JSON)
+<pre><code>{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"archctl: vi phạm luật kiến trúc … ✗ VI PHẠM  Stock -&gt; Web …"}}</code></pre></div>
+        <p class="why"><b>Vì sao</b> Lệnh luôn thoát 0 và không in gì nếu không có vi phạm mới. Lý do thiết kế: Claude Code chỉ đưa vi phạm cho model khi hook trả JSON theo dạng này; một lệnh thoát 1 bị coi là lỗi không chặn và model không bao giờ thấy. README ghi: dự án init bằng bản 0.1.1 trở về trước thì hook cũ vô hiệu, phải sửa tay hai dòng đó.</p>
+      </article>
+
+      <article class="step" id="serve">
+        <h3><span class="num">10</span> Vẽ và sửa luật trên sơ đồ: <code>archctl serve</code></h3>
+        <p><code>archctl serve</code> mở một máy chủ chỉ máy bạn thấy, rồi in ra địa chỉ để mở trong trình duyệt. Mọi thứ trong <code>system.arch</code> đều thêm, sửa, xoá được ngay trên sơ đồ, không phải mở file. Sơ đồ tự cập nhật trong khoảng nửa giây khi agent sửa mã hay luật.</p>
+        <div class="try"><b>Gõ</b> (trong <code>~/archctl-thu/shop</code>)
+<pre><code>archctl serve --port 4123</code></pre></div>
+        <div class="see"><b>Bạn sẽ thấy</b> (khoá của bạn khác)
+<pre><code>archctl serve · http://127.0.0.1:4123/?k=f93986017075681d53133f31f37c8b95</code></pre></div>
+        <p class="warnbox"><b>Mở đúng địa chỉ có <code>?k=…</code>.</b> Phần sau <code>?k=</code> là <dfn>khoá phiên</dfn>: một chuỗi ngẫu nhiên sinh mỗi lần chạy <code>serve</code>, chỉ in ra màn hình của bạn, không ghi vào file. Thiếu khoá thì máy chủ từ chối mọi yêu cầu đọc và ghi. Lý do: agent chạy trên cùng máy, không có khoá thì một lệnh <code>curl</code> là nó tự duyệt được đề xuất của chính nó.</p>
+        <div class="scroll">
+        <table>
+          <thead><tr><th>Bạn muốn</th><th>Bấm gì</th><th>Ghi vào đâu</th></tr></thead>
+          <tbody>
+            <tr><td>Thêm một khai báo</td><td><b>+ Thêm</b>, chọn một trong 14 loại (<code>component</code>, <code>external</code>, <code>store</code>, <code>allow</code>, <code>deny</code>, <code>api</code>, <code>service</code>, <code>link</code>, <code>view</code>, <code>flow</code>, <code>contract</code>, <code>boundary</code>, <code>invariant</code>, <code>verify</code>). Loại một dòng có ô điền sẵn, dòng sinh ra hiện ngay bên dưới.</td><td><code>.arch/system.arch</code></td></tr>
+            <tr><td>Cho hộp này gọi hộp kia (hay cấm)</td><td>Bật <b>Nối mũi tên</b>, kéo từ hộp nguồn sang hộp đích, chọn <code>allow</code> hay <code>deny</code> (giữa hai service là <code>link</code>)</td><td><code>.arch/system.arch</code></td></tr>
+            <tr><td>Gỡ hay sửa một luật</td><td>Bấm vào mũi tên: <b>Gỡ mũi tên này</b> (chỉ bỏ đích đó khỏi dòng), <b>Sửa luật</b>, hay <b>Xoá cả dòng</b></td><td><code>.arch/system.arch</code></td></tr>
+            <tr><td>Gõ thẳng chữ, nhất là khai báo nhiều dòng</td><td>Trong ô sửa, bấm <b>Sửa dạng chữ</b>. <code>flow</code>, <code>contract</code>, <code>boundary</code>, <code>invariant</code>, <code>verify</code> luôn sửa bằng ô chữ. Gõ sai thì máy chủ nói dòng nào sai và không ghi gì.</td><td><code>.arch/system.arch</code></td></tr>
+            <tr><td>Đổi tên</td><td>Bấm hộp (hay tab <b>Khai báo</b>) rồi <b>Đổi tên</b>: mọi chỗ nhắc tới tên đó đổi theo</td><td><code>.arch/system.arch</code></td></tr>
+            <tr><td>Xoá một tên còn được nhắc</td><td><b>Xoá</b> bị từ chối kèm danh sách chỗ nhắc; bấm <b>Xoá kèm các chỗ nhắc</b> để gỡ tên khỏi các luật đó. Chỗ không gỡ tự động được (bước của <code>flow</code>, <code>contract</code>, <code>store</code> thuộc tên đó…) vẫn bị từ chối: sửa chúng trước.</td><td><code>.arch/system.arch</code></td></tr>
+            <tr><td>Đổi trạng thái một khai báo</td><td>Nút <code>#draft</code> / <code>#proposed</code> / <code>#accepted</code> / <code>#locked</code></td><td>đúng một dòng trong <code>.arch/system.arch</code></td></tr>
+            <tr><td>Biến một vi phạm thành luật</td><td>Bấm cạnh đỏ, <b>Cho phép</b>: thêm <code>allow</code> cho đúng cặp đó</td><td><code>.arch/system.arch</code></td></tr>
+            <tr><td>Duyệt đề xuất của agent</td><td>Tab <b>Đề xuất</b>, ghi lý do, duyệt hay từ chối</td><td><code>.arch/system.arch</code> và <code>.arch/decisions.md</code></td></tr>
+            <tr><td>Xem khai báo đã lạc hậu</td><td>Tab <b>Lạc hậu</b> (chỉ đọc)</td><td>không ghi</td></tr>
+            <tr><td>Xếp lại vị trí hộp</td><td>Kéo thả hộp, hay <b>Sắp xếp lại</b></td><td><code>.arch/layout.json</code></td></tr>
+          </tbody>
+        </table>
+        </div>
+        <p><b>Lý do là bắt buộc</b> cho mọi thao tác sửa luật, kể cả bấm nút trạng thái: khoá hay mở khoá cũng là quyết định kiến trúc. Máy chủ ghi một mục <code>SỬA</code> vào <code>.arch/decisions.md</code>, gồm dòng cũ, dòng mới, người sửa và lý do. Agent đọc file đó để biết vì sao luật đổi.</p>
+        <p><b>Luật <code>#locked</code> sửa được, nhưng phải xác nhận.</b> Trình duyệt hiện hộp hỏi "Vẫn sửa?" kèm các luật đã khoá sắp bị đụng. Trả "không" (Cancel) thì trang báo "Đã huỷ: chưa ghi gì vào system.arch" và file không đổi.</p>
+        <p class="note">Phần không làm hỏng file: dòng không đụng tới giữ nguyên từng byte, kể cả chú thích; nếu agent hay người khác đã sửa file từ lúc bạn mở sơ đồ thì thao tác bị từ chối thay vì ghi đè. Cách vẽ hộp và đường nối đang được làm lại, nên trang này không tả bố cục sơ đồ. Tắt máy chủ bằng <kbd>Ctrl</kbd>+<kbd>C</kbd>.</p>
+      </article>
+
+      <article class="step">
+        <h3><span class="num">11</span> Xuất hình, chạy kiểm thật, và CI</h3>
+        <p><b>Xuất ảnh tĩnh.</b> <code>archctl export</code> in sơ đồ Mermaid để dán vào mô tả pull request hay file <code>.md</code>; thêm <code>--violations</code> thì vi phạm hiện thành mũi tên đậm đỏ ("Stock ==&gt;|vi phạm| Payment"); <code>--out sodo.md</code> ghi ra file mà GitHub tự vẽ.</p>
+        <p><b>Chạy kiểm thật.</b> Dòng <code>verify</code> trong luật gắn tên với một lệnh shell. <code>archctl verify</code> chạy các lệnh đó và ghi biên nhận. Thử trên chính repo archctl, vì nó có luật <code>verify no_deps</code> chỉ đếm gói trong <code>Cargo.lock</code>:</p>
+        <div class="try"><b>Gõ</b> (trong thư mục repo archctl)
+<pre><code>cd /Users/macos/Documents/Claude/archctl
+archctl verify no_deps</code></pre></div>
+        <div class="see"><b>Bạn sẽ thấy</b>
+<pre><code>▸ no_deps  test "$(grep -c '^\[\[package\]\]' Cargo.lock)" -eq 2
+  đạt · 0.0 giây
+
+1/1 đạt · biên nhận ghi vào .arch/.verified</code></pre></div>
+        <p>Đây là lệnh duy nhất của archctl chạy lệnh shell, và chỉ khi chính bạn gõ nó. Mỗi lệnh có trần 1800 giây (đổi bằng <code>--timeout</code>). Biên nhận không vào git.</p>
+        <p><b>Trong CI</b>, thứ tự này quan trọng:</p>
+<pre><code>- run: archctl verify
+- run: archctl check --strict</code></pre>
+        <p><code>--strict</code> biến mọi cảnh báo, cả "chưa chứng minh", thành vi phạm; vì vậy phải <code>verify</code> trước để có biên nhận. CI là chỗ agent không với tới, nên là nơi cưỡng chế thật. Trên máy bạn, agent chạy được shell thì vẫn ghi đè được file luật; README gọi đây là "lan can, không phải hàng rào an ninh". Muốn chắc hơn, khóa <code>.arch/**</code> bằng CODEOWNERS (file GitHub chỉ định ai duyệt thay đổi nào).</p>
+        <p><b>So với bản trước.</b> <code>archctl diff</code> so luật hiện tại với <code>HEAD</code> và tách thay đổi kiến trúc thật khỏi thay đổi chỉ xê dịch chữ, để bạn biết đọc kỹ chỗ nào. Trên repo archctl hiện ra "không đổi so với HEAD".</p>
+      </article>
+    </div>
+  </section>
+
+  <section>
+    <h2>Ba ví dụ làm lại từ đầu</h2>
+    <p>Nếu bạn muốn thử không cần đọc trang, ba tình huống sau là ba cách dùng thường gặp, mỗi cái chạy trên bản <code>shop</code> bạn vừa chép.</p>
+    <div class="examples">
+      <article class="example" data-vi-du>
+        <h3>Ví dụ 1 · Ca thường gặp: agent vừa viết vi phạm</h3>
+        <p>Tình huống: bạn nhờ agent "cho kho hàng kiểm hạn mức thanh toán". Nó thêm <code>import '../payment/charge'</code> vào <code>src/stock/reserve.ts</code>.</p>
+<pre><code>archctl check src/stock/reserve.ts
+✗ VI PHẠM  Stock -&gt; Payment  (không được phép, #accepted)
+  src/stock/reserve.ts:5  import '../payment/charge'</code></pre>
+        <p>Hôm nay không có archctl thì mã chạy bình thường và không ai biết. Với hook ở bước 9, agent thấy dòng trên ngay sau lần sửa và tự đưa việc gọi thanh toán về <code>Order</code>. Vì sao quan trọng: lỗi bị bắt ở 11 mili giây, trước khi nó thành thói quen của cả dự án.</p>
+      </article>
+      <article class="example" data-vi-du>
+        <h3>Ví dụ 2 · Ca biên: sơ đồ nói dối vì mã đã đổi</h3>
+        <p>Tình huống: luật <code>flow PlaceOrder</code> liệt kê bước <code>updateAnalytics</code>, nhưng agent đã xóa hàm đó khi dọn mã. Mã không vi phạm import nào, nên chẳng ai để ý.</p>
+<pre><code>⚠ KHAI BÁO LẠC HẬU  bước của flow PlaceOrder `updateAnalytics`
+  .arch/system.arch:22  — `updateAnalytics` không có trong mã — sửa mã, hoặc sửa khai báo</code></pre>
+        <p>Đây không phải lỗi import mà là sự lệch giữa sơ đồ và mã. archctl bắt nó vì agent hay đổi tên một bước rồi để sơ đồ cũ nằm đó. Ở chế độ <code>--strict</code> (CI), cảnh báo này làm đỏ.</p>
+      </article>
+      <article class="example" data-vi-du>
+        <h3>Ví dụ 3 · Ca hỏng: agent bị kẹt và bạn từ chối đề xuất</h3>
+        <p>Tình huống: agent sửa ba lần vẫn không hợp luật (vì luật thật sự cản đúng việc được giao). Ở lần thứ 3 archctl in lệnh <code>propose</code>. Agent chạy lệnh, dừng, và chờ. Bạn từ chối kèm lý do ở bước 7.</p>
+<pre><code>Đề xuất này đã bị từ chối ngày 2026-11-16 bởi tdHuy22.
+→ Đừng đề xuất lại. Tìm hướng khác, hoặc hỏi người dùng.</code></pre>
+        <p>Ngày mai, phiên mới của agent không nhớ gì, nhưng <code>decisions.md</code> còn đó. Nó không thể lách bằng cách đề xuất lại, cũng không có quyền ghi <code>system.arch</code>. Hạn chế thật: nếu agent chạy được shell, nó vẫn có thể sửa file luật bằng tay. Trên máy này, bộ công cụ agent-stack của bạn có một hook chặn agent sửa <code>system.arch</code> và chạy <code>archctl baseline</code> (tôi đã gặp chính hook đó khi chuẩn bị trang này); ngoài ra chỉ CI và CODEOWNERS mới chắc.</p>
+      </article>
+    </div>
+  </section>
+
+  <section id="cu-phap">
+    <h2>Cú pháp <code>system.arch</code> cho người mới</h2>
+    <p>File luật là chữ thường, mỗi khai báo bắt đầu bằng một từ khoá. Có 14 từ khoá; gõ từ nào khác thì archctl báo "từ khoá không nhận ra". Mọi ví dụ dưới đây đã chạy qua <code>archctl parse &lt;file&gt;</code> (lệnh chỉ đọc và soát cú pháp, không quét mã) và cho "không có lỗi, không có cảnh báo", trừ hai ví dụ cố ý sai ở cuối.</p>
+
+    <h3>Luật chung cho mọi dòng</h3>
+    <ul>
+      <li>Một khai báo một dòng. Riêng <code>flow</code>, <code>contract</code>, <code>boundary</code> kết thúc dòng đầu bằng dấu <code>:</code> và có <dfn>thân khối</dfn>: các dòng lùi vào bên dưới. Dòng lùi sâu hơn một khoá là phần tiếp của giá trị khoá đó.</li>
+      <li>Dòng bắt đầu bằng <code>#</code> là chú thích, archctl bỏ qua.</li>
+      <li>Tên chỉ gồm chữ, số, gạch dưới và gạch nối. Danh sách cách nhau bằng dấu phẩy: <code>Order, Payment</code>.</li>
+      <li>Cuối dòng có thể thêm hai chú thích: người đặt ra (<code>@human</code> hay <code>@ai</code>) và trạng thái (<code>#draft</code>, <code>#proposed</code>, <code>#accepted</code>, <code>#locked</code>). Không ghi thì mặc định là <code>@human #accepted</code>: thiếu chú thích thì luật có hiệu lực ngay, chặt hơn là lỏng.</li>
+    </ul>
+    <div class="scroll">
+    <table>
+      <thead><tr><th>Chú thích</th><th>Nghĩa</th><th>Có được kiểm không</th></tr></thead>
+      <tbody>
+        <tr><td><code>@human</code></td><td>Người đặt ra dòng này</td><td rowspan="2">Không đổi cách kiểm; chỉ ghi lại ai đặt ra. <code>archctl diff</code> coi đổi chú thích là thay đổi "quản trị", tách khỏi thay đổi ngữ nghĩa.</td></tr>
+        <tr><td><code>@ai</code></td><td>Agent đặt ra: dòng do <code>init --from-code</code> sinh, hay đề xuất của agent mà bạn đã <code>accept</code></td></tr>
+        <tr><td><code>#draft</code></td><td>Bản nháp</td><td>Chưa có hiệu lực; sơ đồ vẽ viền nét đứt</td></tr>
+        <tr><td><code>#proposed</code></td><td>Đang đề xuất</td><td>Chưa có hiệu lực; sơ đồ vẽ viền nét đứt</td></tr>
+        <tr><td><code>#accepted</code></td><td>Đã duyệt</td><td>Có hiệu lực, <code>check</code> kiểm</td></tr>
+        <tr><td><code>#locked</code></td><td>Đã duyệt và khoá</td><td>Có hiệu lực; trên sơ đồ, sửa nó phải xác nhận thêm một lần</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3>Mười ba khai báo, từng cái một</h3>
+    <div class="steps">
+      <article class="step">
+        <h3><code>component</code> và <code>external</code>: đặt tên cho một khối mã</h3>
+        <p><code>component</code> gắn một tên với các file khớp mẫu đường dẫn sau <code>at</code> (nhiều mẫu thì cách nhau dấu phẩy). <code>external</code> là thư viện ngoài; sau <code>at</code> là tên gói như khi import.</p>
+<pre><code>component Web    at src/web/**                  @human #accepted
+component Order  at src/order/**, lib/order/**  @human #locked
+external  Stripe at "stripe"</code></pre>
+        <p class="note">Một file khớp hai component thì component khai trước thắng, và <code>check</code> cảnh báo "mẫu chồng nhau".</p>
+      </article>
+
+      <article class="step">
+        <h3><code>store</code>: bảng dữ liệu thuộc về một component</h3>
+        <p>Khai báo rằng chỉ component sau <code>owned_by</code> được chạm các bảng sau <code>at</code>. Đây là một lệnh cấm ngầm: component khác nhắc tên bảng đó trong chuỗi (câu SQL, tên collection) là vi phạm, trừ khi có <code>allow</code> viết tay tới store.</p>
+<pre><code>component Order at src/order/**
+store OrderDB owned_by Order at "orders", "order_items"</code></pre>
+      </article>
+
+      <article class="step">
+        <h3><code>allow</code> và <code>deny</code>: ai được gọi ai</h3>
+        <p><code>allow A -&gt; B, C</code> cho A gọi B và C. Một component đã có ít nhất một <code>allow</code> thì gọi sang chỗ không có trong danh sách là vi phạm. <code>deny</code> cấm thẳng. <code>*</code> ở phía nguồn nghĩa là "mọi component"; <code>except</code> (chỉ dùng với <code>deny</code>) liệt kê những nguồn được miễn.</p>
+<pre><code>component Web     at src/web/**
+component Order   at src/order/**
+component Payment at src/payment/**
+external  Stripe  at "stripe"
+
+allow Web     -&gt; Order
+allow Order   -&gt; Payment
+allow Payment -&gt; Stripe
+deny  * -&gt; Stripe except Payment</code></pre>
+        <p class="note">Dòng cuối đọc là: mọi component, trừ Payment, không được đụng Stripe. Đích của <code>allow</code>/<code>deny</code> có thể là component, external, store hay nhóm <code>api</code>, nhưng không bao giờ là service.</p>
+      </article>
+
+      <article class="step">
+        <h3><code>api</code>: một nhóm tên hàm bị theo dõi</h3>
+        <p>Gom các tên hàm hay từ khoá mà archctl tìm thẳng trong mã (bỏ qua chú thích và chuỗi), rồi dùng nhóm đó làm đích của <code>allow</code>/<code>deny</code>. Hợp cho danh sách hàm nguy hiểm như <code>strcpy</code>.</p>
+<pre><code>component Parser at src/parser/**
+component Legacy at src/legacy/**
+api Unsafe at "strcpy", "gets", "sprintf"
+
+deny  * -&gt; Unsafe except Legacy</code></pre>
+      </article>
+
+      <article class="step">
+        <h3><code>service</code> và <code>link</code>: cái gì chạy ở đâu, nói chuyện với ai qua mạng</h3>
+        <p><code>service</code> là một đơn vị chạy (một container, một workload): <code>from</code> chỉ nguồn cấu hình (<code>compose:</code>, <code>k8s:</code>, <code>dockerfile:</code>, <code>tf:</code>, <code>values:</code>), <code>runs</code> liệt kê component chạy trong nó; cả hai tuỳ chọn, nhưng <code>from</code> phải đứng trước <code>runs</code>. <code>link</code> cho một service gọi service khác qua mạng; như <code>allow</code>, không có <code>link</code> là cấm. Service có không gian tên riêng, nên <code>component Api</code> và <code>service Api</code> cùng tồn tại được.</p>
+<pre><code>component Serve at src/serve/**
+component Data  at src/data/**
+service Api from compose:api runs Serve, Data
+service Db  from compose:db
+link Api -&gt; Db</code></pre>
+      </article>
+
+      <article class="step">
+        <h3><code>view</code>: một góc nhìn để vẽ</h3>
+        <p>Đặt tên cho một nhóm component. <code>archctl export --view Checkout</code> chỉ vẽ những component đó thay vì cả hệ thống. Không kiểm gì.</p>
+<pre><code>component Web     at src/web/**
+component Order   at src/order/**
+component Payment at src/payment/**
+view Checkout: Order, Payment</code></pre>
+      </article>
+
+      <article class="step">
+        <h3><code>flow</code>: các bước của một luồng nghiệp vụ</h3>
+        <p>Liệt kê các bước theo thứ tự. Thân khối nhận bốn dạng dòng: <code>a -&gt; b -&gt; c</code>, <code>parallel: a, b</code>, <code>if &lt;điều kiện&gt;: a</code>, <code>on_fail(a): b</code> (bước bù khi <code>a</code> hỏng). archctl kiểm mỗi bước có tồn tại trong mã; thứ tự thì chưa kiểm.</p>
+<pre><code>component Web   at src/web/**
+component Order at src/order/**
+flow PlaceOrder:                                   @human #accepted
+  Web -&gt; Order.reserveStock -&gt; charge -&gt; confirmOrder
+  parallel: sendEmail, updateAnalytics
+  if order.total &gt; 0: charge
+  on_fail(charge): releaseStock</code></pre>
+        <p class="note">Ba dạng bước: <code>Web</code> (tên component) không kiểm gì; <code>Order.reserveStock</code> kiểm <code>reserveStock</code> có và nằm trong Order, nên nên dùng dạng này; <code>charge</code> (tên trần) kiểm có ở đâu đó.</p>
+      </article>
+
+      <article class="step">
+        <h3><code>contract</code>: lời hứa của một năng lực</h3>
+        <p>Dòng đầu là <code>Component.nănglực:</code>. Thân khối chỉ nhận đúng bảy khoá: <code>requires</code>, <code>ensures</code>, <code>errors</code>, <code>idempotent_by</code>, <code>latency</code>, <code>consistency</code>, <code>verify</code>. archctl kiểm năng lực và các lỗi trong <code>errors</code> có tồn tại trong component; phần còn lại là văn xuôi, cần <code>verify</code> trỏ tới một bài test thật.</p>
+<pre><code>component Payment at src/payment/**
+verify contract_test runs "npm run test:contract"
+contract Payment.charge:                           @human #locked
+  requires      order.status == RESERVED
+  ensures       ok  =&gt; payment.status == CAPTURED
+                err =&gt; không có tiền nào bị chuyển
+  errors        Declined | Timeout
+  idempotent_by orderId
+  latency       p99 &lt; 800ms
+  consistency   strong
+  verify        contract_test</code></pre>
+      </article>
+
+      <article class="step">
+        <h3><code>boundary</code>: một vùng cô lập lỗi</h3>
+        <p>Dòng đầu là <code>boundary Tên contains A, B:</code>. Thân khối chỉ nhận đúng bảy khoá: <code>isolation</code>, <code>propagate</code>, <code>contain</code>, <code>retry</code>, <code>timeout</code>, <code>compensate</code>, <code>verify</code>. Khoá kiểm thật là <code>contain</code>: tên lỗi liệt kê ở đó mà xuất hiện ở component ngoài vùng là vi phạm (đó là vi phạm <code>Web -&gt; Timeout</code> ở bước 3). <code>compensate</code> kiểm bước bù có tồn tại.</p>
+<pre><code>component Web     at src/web/**
+component Order   at src/order/**
+component Payment at src/payment/**
+verify chaos_payment_down runs "npm run chaos -- payment-down"
+boundary Checkout contains Order, Payment:         @human #accepted
+  isolation   Payment.down =&gt; Order vẫn nhận đơn
+  propagate   Declined -&gt; user
+  contain     Timeout, Unavailable
+  timeout     toàn luồng &lt; 3s
+  compensate  charge.fail =&gt; releaseStock
+  verify      chaos_payment_down</code></pre>
+      </article>
+
+      <article class="step">
+        <h3><code>invariant</code> và <code>verify</code>: điều luôn đúng, và lệnh chứng minh nó</h3>
+        <p><code>invariant &lt;loại&gt; [phạm vi] &lt;mệnh đề&gt; verify &lt;tên&gt;</code> ghi một điều phải luôn đúng. Loại là một trong <code>data</code>, <code>state</code>, <code>money</code>, <code>time</code>, <code>access</code>, <code>algo</code>; chỉ <code>state</code> được kiểm tĩnh (mỗi trạng thái phải có trong mã). <code>verify &lt;tên&gt; runs "&lt;lệnh&gt;"</code> gắn một tên với một lệnh shell; <code>archctl verify</code> chạy lệnh đó và ghi biên nhận.</p>
+<pre><code>component Order at src/order/**
+verify property_test runs "npm run test:props"
+invariant state [Order]  CREATED -&gt; RESERVED -&gt; PAID -&gt; SHIPPED verify property_test
+invariant data  [Order]  order.total == sum(items.price * items.qty) verify property_test</code></pre>
+        <p class="note"><code>@</code> và <code>#</code> nằm trong dấu nháy kép được hiểu là nội dung lệnh, không phải chú thích.</p>
+      </article>
+    </div>
+
+    <h3>Hai lỗi người mới hay gặp</h3>
+    <p>Khoá lạ trong thân <code>contract</code> hay <code>boundary</code> là lỗi, không bị bỏ qua: gõ nhầm <code>contian</code> mà được nhận im lặng thì luật <code>contain</code> biến mất mà không ai hay.</p>
+<pre><code>component Order at src/order/**
+boundary Checkout contains Order:
+  contian  Timeout</code></pre>
+<pre><code>⚠ cảnh báo:2: boundary `Checkout` không có verify, đây chỉ là lời hứa
+✗ lỗi:3: không hiểu khoá `contian` trong boundary
+  → có phải `contain`? Khoá hợp lệ: isolation, propagate, contain, retry, timeout, compensate, verify</code></pre>
+    <p><code>except</code> chỉ đi với <code>deny</code>. Một file có hai dòng <code>component A</code>, <code>component B</code> rồi đến dòng thứ ba <code>allow A -&gt; B except B</code> cho:</p>
+<pre><code>✗ lỗi:3: `allow` không dùng được `except`
+  → `except` chỉ có nghĩa với `deny`</code></pre>
+    <p>Cả hai trường hợp, <code>archctl parse</code> trả mã thoát 2. Gõ lệnh này sau mỗi lần sửa tay file luật là cách nhanh nhất để biết mình viết đúng chưa.</p>
+  </section>
+
+  <section>
+    <h2>Bản đồ mã nguồn, nếu bạn muốn đọc code</h2>
+    <p>Repo là một workspace Rust với đúng hai crate và 0 gói ngoài (<code>verify no_deps</code> ở bước 11 kiểm điều này).</p>
+    <div class="scroll">
+    <table>
+      <thead><tr><th>Đường dẫn</th><th>Vai trò</th><th>Đọc khi nào</th></tr></thead>
+      <tbody>
+        <tr><td><code>crates/archctl/src/main.rs</code></td><td>Các lệnh bạn gõ (<code>check</code>, <code>propose</code>, …)</td><td>Muốn biết lệnh làm gì</td></tr>
+        <tr><td><code>crates/arch-core/src/parser.rs</code>, <code>model.rs</code></td><td>Đọc file <code>.arch</code> thành dữ liệu</td><td>Muốn thêm cú pháp luật</td></tr>
+        <tr><td><code>crates/arch-core/src/scan/</code></td><td>Quét import theo từng ngôn ngữ</td><td>Muốn hỗ trợ ngôn ngữ mới</td></tr>
+        <tr><td><code>crates/arch-core/src/check.rs</code></td><td>So đồ thị import với luật</td><td>Muốn hiểu vì sao một vi phạm được báo</td></tr>
+        <tr><td><code>crates/arch-core/src/protocol.rs</code></td><td>Đề xuất, duyệt, từ chối</td><td>Bước 7</td></tr>
+        <tr><td><code>crates/archctl/src/serve.rs</code>, <code>ui.html</code></td><td>Máy chủ và giao diện sơ đồ</td><td>Bước 10</td></tr>
+        <tr><td><code>.arch/system.arch</code></td><td>Luật của chính archctl, viết tay</td><td>Ví dụ thật nhất; một test chạy <code>check</code> lên repo, nên <code>use</code> sai hướng làm <code>cargo test</code> đỏ</td></tr>
+        <tr><td><code>docs/</code></td><td>Mô tả sâu từng phần (<code>check.md</code>, <code>protocol.md</code>, <code>adopt.md</code>, <code>ci.md</code>…)</td><td>Cần chi tiết hơn trang này</td></tr>
+        <tr><td><code>examples/</code></td><td>Ba dự án mẫu: <code>shop</code> (TypeScript), <code>sensor</code> (Rust, C, Python, Go), <code>ml</code></td><td>Muốn thử ngôn ngữ khác</td></tr>
+        <tr><td><code>bench/</code></td><td>Bộ đo trên 36 repo thật và các chương trình đối chứng</td><td>Muốn biết độ tin cậy</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p class="note">Trạng thái công việc ở <code>PLAN.md</code> mục §0.</p>
+  </section>
+
+  <section>
+    <h2>Việc nên làm tiếp</h2>
+    <ol>
+      <li>Làm bước 1 đến 5 trong 10 phút để quen màn hình <code>check</code>.</li>
+      <li>Chạy <code>init --from-code</code> trên một dự án nhỏ thật của bạn (với <code>--no-hooks</code> lần đầu) và chỉ nâng 2 đến 3 component lên <code>#accepted</code>.</li>
+      <li>Khi quen, bỏ <code>--no-hooks</code> để Claude Code tự nhắc, và thêm hai dòng CI ở bước 11.</li>
+    </ol>
+    <p class="note">Giới hạn cần nhớ: archctl chỉ thấy cạnh nào đọc được tĩnh (import, một số kiểu gọi qua mạng); cạnh chỉ có lúc chạy thì không thấy. Danh sách đầy đủ ở mục "Giới hạn đã biết" của <code>README.md</code>.</p>
+  </section>
+
+  <footer data-phan="nguon">
+    <h2>Nguồn</h2>
+    <ul>
+      <li><code>README.md</code> (cả file), <code>.arch/system.arch</code>, <code>examples/shop/.arch/system.arch</code>, <code>docs/protocol.md</code>, <code>docs/adopt.md</code>, <code>docs/serve.md</code>, <code>docs/declarations.md</code>, <code>docs/api.md</code>, <code>docs/infra.md</code>, <code>docs/check.md</code> (mục <code>store owned_by</code>), <code>PLAN.md</code> §0.</li>
+      <li>Phần cú pháp (18/11/2026): <code>crates/arch-core/src/parser.rs</code> (từ khoá, chú thích, các dạng dòng), <code>crates/arch-core/src/model.rs</code> (mặc định <code>@human #accepted</code>, trạng thái có hiệu lực), <code>crates/arch-core/src/validate.rs</code> (sáu loại <code>invariant</code>). Mỗi ví dụ là một file tạm, đã chạy <code>archctl parse</code>: 11 file thoát 0 không lỗi không cảnh báo, 2 file cố ý sai thoát 2 với đúng thông báo in trên trang.</li>
+      <li>Bước 10 (18/11/2026): viết theo <code>docs/serve.md</code> và <code>crates/archctl/src/ui.html</code> (tên nút, hộp xác nhận <code>#locked</code>, câu "Đã huỷ"), dòng địa chỉ theo <code>crates/archctl/src/serve.rs:102</code>.</li>
+      <li>Lệnh đã chạy ngày 16/11/2026 với <code>archctl 0.1.1</code> trên bản sao <code>examples/shop</code> (thư mục tạm ngoài repo): <code>check</code>, <code>check --json</code>, <code>scan</code>, <code>propose</code>, <code>proposals</code>, <code>reject</code>, <code>accept</code>, <code>export</code>, <code>init --from-code --no-hooks</code>, <code>baseline</code>, <code>check --hook</code>, <code>parse</code>; trong repo archctl: <code>check</code> (0 vi phạm), <code>verify no_deps</code> (đạt), <code>diff</code>, và <code>serve</code> (trả HTTP 200).</li>
+      <li>Chưa chạy: <code>block</code>, <code>init</code> có sinh hook, <code>verify</code> với lệnh <code>npm</code> của shop (dự án mẫu không có <code>package.json</code>), <code>export --out</code>, và bấm thử từng nút của <code>serve</code> bằng tay (bước 10 viết theo tài liệu và mã giao diện, không theo một lần bấm thật).</li>
+    </ul>
+  </footer>
+</main>
+</body>
+</html>
