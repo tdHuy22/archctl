@@ -9,7 +9,7 @@ Cập nhật 2026-11-17.
 
 ### Việc mở
 
-- **Chưa push** (17/11/2026): `main` đi trước `origin/main` các commit từ `98f7b29` tới `74cbd2e`, gồm sửa sơ đồ trong `serve` và khoá lạ là lỗi. Đẩy lên và phát hành bản mới khi bạn bảo. `archctl` trong `PATH` (`~/.cargo/bin`) vẫn là 0.1.1: muốn dùng giao diện sửa sơ đồ thì `cargo install --locked --path crates/archctl`.
+- **Chưa push** (17/11/2026): `main` đi trước `origin/main` các commit từ `98f7b29` tới `74cbd2e`, gồm sửa sơ đồ trong `serve` và khoá lạ là lỗi. Đẩy lên và phát hành bản mới khi bạn bảo. `archctl` trong `PATH` (`~/.cargo/bin`) đã cài lại từ `main` (18/11/2026, có giao diện sửa sơ đồ); số bản vẫn ghi 0.1.1 vì chưa nâng.
 - **Trang hướng dẫn** `.agent/trang/archctl-huong-dan.html` (chưa theo dõi bằng git) đã lỗi thời: nói "serve chưa vẽ được hộp mới". Cần sửa bước 10 và bảng thao tác, hay bỏ.
 - **Hộp hỏi khi sửa luật `#locked`** dùng `confirm()` của trình duyệt; trong pane của app nó tự trả "không" nên chưa thử được trọn vòng; bấm Huỷ thì giao diện không báo gì.
 - Bạn đã thử trong trình duyệt (17/11/2026): khoá `Scan`, gỡ một đích của `deny` (bạn bấm); **+ Thêm**, **Nối mũi tên**, gỡ mũi tên, ô chữ (`boundary`: tham chiếu sai bị chặn, sửa đúng thì ghi), đổi tên, xoá kèm (agent bấm trên bản sao `shop`): đều ghi đúng `system.arch` và mục `SỬA`; `parse` và `check` trên bản sao sạch.
