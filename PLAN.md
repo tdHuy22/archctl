@@ -9,6 +9,10 @@ Cập nhật 2026-11-17.
 
 ### Việc mở
 
+- **Ba việc bạn giao (18/11/2026), làm ở hai phiên mới, nâng bản ở phiên này sau cùng:**
+  1. *Sơ đồ rõ ràng hơn* (phiên riêng, worktree). Bạn trả lời "làm 2 cách luôn": tự viết trong Rust/`ui.html` và dùng ELK.js. Tiêu chí: (a) sau "Sắp xếp lại" hộp cách rộng, không chồng; (b) đường không xuyên qua hộp nằm giữa; (c) đường ra từ một hộp rời ở các điểm khác nhau; (d) hộp kéo tay giữ chỗ, cùng đầu vào ra cùng sơ đồ; ảnh trước/sau trên `shop` và `.arch` của archctl.
+  2. *Sửa trang hướng dẫn* `.agent/trang/archctl-huong-dan.html` và dạy thêm cú pháp (phiên riêng, tại chỗ).
+  3. *Nâng bản 0.1.2* sau khi 1 và 2 xong; phát hành (tag, push) hỏi bạn trước.
 - **Đã push** (18/11/2026): `main` = `origin/main` (`ba88b31`), chưa phát hành bản mới; số bản vẫn 0.1.1. `archctl` trong `PATH` đã cài lại từ `main`.
 - **Trang hướng dẫn** `.agent/trang/archctl-huong-dan.html` (chưa theo dõi bằng git) đã lỗi thời: nói "serve chưa vẽ được hộp mới". Cần sửa bước 10 và bảng thao tác, hay bỏ.
 - Thử lại bằng Aside trên bản sao `shop` với bản cài từ `main` (18/11/2026, bạn chạy `serve`, agent bấm): thêm component thiếu lý do bị chặn, có lý do thì ghi; kéo mũi tên `Web → Review` ghi `allow`; xoá `Review` bị chặn vì còn chỗ nhắc, **Xoá kèm** đưa `system.arch` về y bản gốc; ba mục `SỬA` đủ; `parse`, `check` sạch (3 vi phạm sẵn có của ví dụ).
