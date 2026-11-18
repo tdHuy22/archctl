@@ -97,23 +97,23 @@ Một binary, không cần gì khác. Tải bản cho máy mình ở trang Relea
 thư mục trong `PATH`. Trên macOS:
 
 ```bash
-shasum -a 256 -c archctl-v0.1.1-aarch64-apple-darwin.tar.gz.sha256
+shasum -a 256 -c archctl-v0.1.2-aarch64-apple-darwin.tar.gz.sha256
 ```
 
 Trên Linux:
 
 ```bash
-sha256sum -c archctl-v0.1.1-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c archctl-v0.1.2-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 Rồi:
 
 ```bash
-tar -xzf archctl-v0.1.1-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf archctl-v0.1.2-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 ```bash
-install archctl-v0.1.1-x86_64-unknown-linux-gnu/archctl ~/.local/bin/
+install archctl-v0.1.2-x86_64-unknown-linux-gnu/archctl ~/.local/bin/
 ```
 
 Target có sẵn: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` (dựng
