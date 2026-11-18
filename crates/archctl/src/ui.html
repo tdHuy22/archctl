@@ -929,7 +929,9 @@ async function send(extra) {
   }
   if (data.why === "locked") {
     const yes = confirm(`Thao tác này sửa luật đã khoá (#locked):\n\n${data.refs.join("\n")}\n\nKhoá là để không ai lỡ tay đổi. Vẫn sửa?`);
-    if (yes) send({ ...extra, confirmLocked: true });
+    // Trả "không" mà để form im lặng thì người dùng không biết đã ghi hay chưa.
+    if (!yes) { showError("Đã huỷ: chưa ghi gì vào system.arch. Các luật đã khoá vẫn như cũ:", data.refs); return; }
+    send({ ...extra, confirmLocked: true });
     return;
   }
   showError(data.error, data.refs || []);

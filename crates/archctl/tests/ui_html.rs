@@ -538,3 +538,21 @@ fn bo_quet_bat_duoc_cho_chen_chu_tho() {
         assert!(!problems(&src).is_empty(), "bộ quét không bắt được: {what}");
     }
 }
+
+/// Hộp `confirm()` trả "không" thì form phải báo đã huỷ, chưa ghi gì; trước
+/// đây nó im lặng và người dùng không biết luật khoá đã đổi hay chưa.
+#[test]
+fn tra_khong_o_hop_xac_nhan_thi_bao_da_huy() {
+    let mut seen = 0;
+    for (at, _) in UI.match_indices("confirm(") {
+        let rest = &UI[at..];
+        let until = rest.find("return;").expect("sau confirm( phải có return;");
+        assert!(
+            rest[..until].contains("showError(\"Đã huỷ"),
+            "nhánh trả \"không\" sau confirm( không báo gì:\n{}",
+            &rest[..until]
+        );
+        seen += 1;
+    }
+    assert!(seen >= 1, "ui.html không còn confirm( nào: cập nhật test này");
+}
