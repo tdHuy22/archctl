@@ -9,9 +9,10 @@ Cập nhật 2026-11-17.
 
 ### Việc mở
 
-- **Chưa push** (17/11/2026): `main` đi trước `origin/main` các commit từ `98f7b29` tới `74cbd2e`, gồm sửa sơ đồ trong `serve` và khoá lạ là lỗi. Đẩy lên và phát hành bản mới khi bạn bảo. `archctl` trong `PATH` (`~/.cargo/bin`) đã cài lại từ `main` (18/11/2026, có giao diện sửa sơ đồ); số bản vẫn ghi 0.1.1 vì chưa nâng.
+- **Đã push** (18/11/2026): `main` = `origin/main` (`ba88b31`), chưa phát hành bản mới; số bản vẫn 0.1.1. `archctl` trong `PATH` đã cài lại từ `main`.
 - **Trang hướng dẫn** `.agent/trang/archctl-huong-dan.html` (chưa theo dõi bằng git) đã lỗi thời: nói "serve chưa vẽ được hộp mới". Cần sửa bước 10 và bảng thao tác, hay bỏ.
-- **Hộp hỏi khi sửa luật `#locked`** dùng `confirm()` của trình duyệt; trong pane của app nó tự trả "không" nên chưa thử được trọn vòng; bấm Huỷ thì giao diện không báo gì.
+- **Hộp hỏi khi sửa luật `#locked`**: đã thử trọn vòng trong Aside (18/11/2026, thay `window.confirm` để trả lời): hỏi đúng dòng khoá; trả "có" thì đổi tên `Web`→`Frontend` ở mọi chỗ và ghi `SỬA`; trả "không" thì không ghi, nhưng form cứ để nguyên, không báo gì — còn mở: nên báo "đã huỷ, chưa ghi".
+- Thử lại bằng Aside trên bản sao `shop` với bản cài từ `main` (18/11/2026, bạn chạy `serve`, agent bấm): thêm component thiếu lý do bị chặn, có lý do thì ghi; kéo mũi tên `Web → Review` ghi `allow`; xoá `Review` bị chặn vì còn chỗ nhắc, **Xoá kèm** đưa `system.arch` về y bản gốc; ba mục `SỬA` đủ; `parse`, `check` sạch (3 vi phạm sẵn có của ví dụ).
 - Bạn đã thử trong trình duyệt (17/11/2026): khoá `Scan`, gỡ một đích của `deny` (bạn bấm); **+ Thêm**, **Nối mũi tên**, gỡ mũi tên, ô chữ (`boundary`: tham chiếu sai bị chặn, sửa đúng thì ghi), đổi tên, xoá kèm (agent bấm trên bản sao `shop`): đều ghi đúng `system.arch` và mục `SỬA`; `parse` và `check` trên bản sao sạch.
 - **Lưu ý khi dùng worktree:** worktree trong `.claude/worktrees/` nằm trong repo nên test `dogfood` (`khong_file_nao_cua_archctl_nam_ngoai_so_do`) trên `main` trượt vì quét cả 357 file của chúng; gỡ worktree thì đạt.
 - Test `grpc_java_addservice_doi_khang_khong_treo` (arch-core, đo dưới 5 giây) trượt một lần trong `archctl verify` khi máy vừa build release, chạy lại thì đạt: test đo giờ dễ chập chờn khi máy tải nặng.
