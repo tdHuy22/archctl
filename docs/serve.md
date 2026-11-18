@@ -21,6 +21,7 @@ chỉ làm được vế sau. Đây là vế đầu.
 | Tab **Lạc hậu** | chỉ đọc — tên khai báo nhưng không có trong mã |
 | Duyệt hoặc từ chối đề xuất | `.arch/system.arch` và `.arch/decisions.md` |
 | Sắp xếp lại | xoá `.arch/layout.json` |
+| Chọn **Bố cục: archctl** / **Bố cục: ELK** | chỉ trình duyệt này nhớ (không ghi gì vào repo) |
 
 Và quan sát: sơ đồ **tự cập nhật** khi mã hoặc luật đổi. Agent sửa file, sơ đồ
 đổi theo trong vòng nửa giây — không cần tải lại trang. Đây là "chiều 3" trong
@@ -166,6 +167,41 @@ Sàn thu nhỏ cũ là 0.6, nên một sơ đồ rộng gấp sáu lần khung n
 thấy một góc — và không có gì cho biết còn gì ở ngoài. Sàn giờ là 0.2, và chữ
 tự ẩn khi nhỏ quá: đường dẫn dưới 0.45, tên dưới 0.25. Ở mức đó hình dạng tổng
 thể là thứ duy nhất còn đọc được, nên để nó bị chữ che là mất nốt.
+
+### Đường nối không xuyên hộp, không dính chùm
+
+Hộp cách nhau rộng (khe 150 điểm ảnh giữa hai cột, 84 giữa hai hộp trong một
+cột), và mọi đường nối được **định tuyến vuông góc** trên máy chủ
+(`layout::route`), trả về trong trường `routes` của `/api/model`:
+
+- đường đi xuôi rời mép phải và vào mép trái; đi ngược thì ngược lại; hai hộp
+  cùng cột thì vòng qua khe bên phải;
+- mỗi đường có **điểm rời riêng** trên mép hộp, xếp theo độ cao của đầu bên
+  kia nên ít cắt nhau; cạnh vi phạm và luật cùng cặp dùng chung một đường, còn
+  `A → B` và `B → A` là hai đường khác nhau;
+- tìm đường bằng A* trên lưới chỉ gồm những đoạn **không chạm hộp nào**, kể cả
+  hộp kéo tay; mỗi chỗ rẽ và mỗi đoạn đi chung với đường đã vẽ đều bị tính
+  đắt hơn, nên đường sau tìm làn trống bên cạnh;
+- không tìm được (hai hộp kéo đè lên nhau, sơ đồ quá lớn so với trần số bước)
+  thì giao diện vẽ đường cong như trước. Lúc đang kéo một hộp, đường của nó
+  tạm vẽ cong; thả ra thì máy chủ định tuyến lại.
+
+Khung `boundary` được tô nền nhạt và ghi `boundary <tên>` để thấy được ngay.
+
+### Hai bố cục để so sánh
+
+Ô chọn cạnh nút **Sắp xếp lại**:
+
+| | **archctl** (mặc định) | **ELK** |
+| --- | --- | --- |
+| Ai xếp | máy chủ (`layout.rs`) | [ELK](https://eclipse.dev/elk/) layered, chạy trong Web Worker của trình duyệt |
+| Hộp kéo tay | giữ chỗ, đường nối tới nó vẫn vòng tránh hộp | giữ chỗ, nhưng đường nối tới nó vẽ cong (ELK không xếp quanh hộp cố định) |
+| Kích thước file chạy | khoảng 75 KB (bộ định tuyến và phần vẽ) | khoảng 1,6 MB (`elk-worker.min.js`); hiện file chạy nhúng cả hai |
+| Ca lỗi | không tìm được đường thì vẽ cong | ELK lỗi hay quá 10 giây thì báo và quay về archctl |
+| Mạng | không cần | không cần: ELK nhúng sẵn trong file chạy (`crates/archctl/vendor/elk/`) |
+
+Cả hai dùng chung `.arch/layout.json` cho hộp kéo tay. Nguồn, bản ghim, sha256
+và giấy phép EPL-2.0 của ELK: `crates/archctl/vendor/elk/README.md`.
 
 ## Sơ đồ không được nhảy
 

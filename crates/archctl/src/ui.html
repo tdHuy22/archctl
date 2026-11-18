@@ -110,6 +110,8 @@
     width: 100%; font: inherit; padding: 6px 8px; border: 1px solid var(--line);
     border-radius: 7px; background: var(--bg); color: var(--ink);
   }
+  header select { width: auto; flex: none; padding: 4px 6px; }
+  header button { white-space: nowrap; }
   textarea.code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; min-height: 110px; }
   pre.preview {
     margin: 4px 0 12px; padding: 8px 10px; border-radius: 7px; background: var(--bg);
@@ -133,6 +135,10 @@
   <span class="spacer"></span>
   <button id="add" class="primary" title="Thêm component, luật hay khai báo khác vào system.arch">+ Thêm</button>
   <button id="connect" aria-pressed="false" title="Bật rồi kéo từ hộp này sang hộp kia để thêm allow, deny hay link">Nối mũi tên</button>
+  <select id="layout-mode" title="Cách xếp hộp và vẽ đường nối. archctl: tự viết, đường nối tránh cả hộp kéo tay. ELK: thư viện ELK (Eclipse), đường nối tới hộp kéo tay vẽ cong.">
+    <option value="archctl">Bố cục: archctl</option>
+    <option value="elk">Bố cục: ELK</option>
+  </select>
   <button id="relayout">Sắp xếp lại</button>
 </header>
 
@@ -193,6 +199,10 @@ const view = { x: 0, y: 0, k: 1 };
 let model = null, selected = null, drag = null, fitNext = true;
 // Mũi tên đang chọn, và chế độ "Nối mũi tên": kéo từ hộp này sang hộp kia.
 let selectedEdge = null, connectMode = false;
+// Hai cách xếp để so sánh: "archctl" (máy chủ xếp và định tuyến) hay "elk"
+// (thư viện ELK chạy trong Web Worker, không chạm được khoá phiên).
+let layoutMode = "archctl";
+try { if (localStorage.getItem("archctl.layout") === "elk") layoutMode = "elk"; } catch { /* không có bộ nhớ thì dùng mặc định */ }
 const sameEdge = (a, b) => a.from === b.from && a.to === b.to && a.kind === b.kind;
 // Người đã tự kéo hoặc phóng thì đừng canh lại nữa — đó là khung nhìn của họ.
 let userMoved = false;
@@ -248,6 +258,22 @@ async function refresh() {
   const res = await fetch("/api/model", { headers: { "X-Archctl-Key": sessionKey } });
   const next = await res.json();
   if (next.error) { showFault(next); return; }
+  const ticket = ++refreshTicket;
+  next.routeOf = new Map((next.routes || []).map((r) => [r.from + "\u0000" + r.to, r.points]));
+  if (layoutMode === "elk") {
+    try {
+      // Worker lỗi lúc nạp thì `elk.layout` không bao giờ trả lời: đặt hạn.
+      await Promise.race([elkLayout(next), new Promise((_, no) => setTimeout(() => no(new Error("quá 10 giây")), 10000))]);
+    } catch (err) {
+      // Đừng để ô chọn ghi "ELK" mà sơ đồ là bố cục archctl.
+      elk = null;
+      setLayoutMode("archctl");
+      next.routeOf = new Map((next.routes || []).map((r) => [r.from + "\u0000" + r.to, r.points]));
+      alert("Bố cục ELK lỗi (" + String(err?.message || err) + "), đã quay về bố cục archctl.");
+    }
+    // Một lần cập nhật mới hơn đã tới trong lúc ELK đang xếp.
+    if (ticket !== refreshTicket) return;
+  }
   model = next;
   model.byName = Object.fromEntries(model.nodes.map((n) => [n.name, n]));
   model.byLine = Object.fromEntries((model.decls || []).map((d) => [d.line, d]));
@@ -266,6 +292,70 @@ async function refresh() {
   draw();
   summarize();
   renderTabs();
+}
+
+let refreshTicket = 0, elk = null;
+
+// Các cặp được vẽ thành đường, không trùng.
+function drawnPairs(m) {
+  const names = new Set(m.nodes.map((n) => n.name));
+  const seen = new Map();
+  for (const e of [...m.edges, ...m.violations]) {
+    if (e.from === e.to || !names.has(e.from) || !names.has(e.to)) continue;
+    seen.set(e.from + "\u0000" + e.to, [e.from, e.to]);
+  }
+  return [...seen.values()];
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const tag = document.createElement("script");
+    tag.src = src;
+    tag.onload = resolve;
+    tag.onerror = () => reject(new Error("không nạp được " + src));
+    document.head.append(tag);
+  });
+}
+
+// Bố cục ELK: xếp phân tầng, đường vuông góc. Hộp kéo tay vẫn được đưa vào
+// đồ thị (để chỗ các hộp khác không đổi khi kéo), rồi đặt lại đúng chỗ đã lưu;
+// đường nối tới hộp đó không còn đúng nên vẽ cong.
+async function elkLayout(m) {
+  if (!window.ELK) await loadScript("/vendor/elk-api.js");
+  elk ||= new window.ELK({ workerUrl: "/vendor/elk-worker.min.js" });
+  const pairs = drawnPairs(m);
+  const graph = {
+    id: "root",
+    layoutOptions: {
+      "elk.algorithm": "layered",
+      "elk.direction": "RIGHT",
+      "elk.edgeRouting": "ORTHOGONAL",
+      "elk.spacing.nodeNode": "48",
+      "elk.layered.spacing.nodeNodeBetweenLayers": "110",
+      "elk.spacing.edgeEdge": "14",
+      "elk.layered.spacing.edgeEdgeBetweenLayers": "14",
+      "elk.layered.spacing.edgeNodeBetweenLayers": "22",
+      "elk.spacing.edgeNode": "18",
+    },
+    children: m.nodes.map((n) => ({ id: n.name, width: NODE_W, height: NODE_H })),
+    edges: pairs.map(([from, to], i) => ({ id: "e" + i, sources: [from], targets: [to] })),
+  };
+  const out = await elk.layout(graph);
+  const MARGIN = 48;
+  const at = new Map(out.children.map((c) => [c.id, c]));
+  const pinned = new Set(m.nodes.filter((n) => n.pinned).map((n) => n.name));
+  for (const n of m.nodes) {
+    const c = at.get(n.name);
+    if (c && !n.pinned) { n.x = c.x + MARGIN; n.y = c.y + MARGIN; }
+  }
+  m.routeOf = new Map();
+  for (const e of out.edges || []) {
+    const [from, to] = pairs[Number(e.id.slice(1))];
+    const s = e.sections?.[0];
+    if (!s || pinned.has(from) || pinned.has(to)) continue;
+    const points = [s.startPoint, ...(s.bendPoints || []), s.endPoint].map((p) => [p.x + MARGIN, p.y + MARGIN]);
+    m.routeOf.set(from + "\u0000" + to, points);
+  }
 }
 
 function showFault(data) {
@@ -365,17 +455,49 @@ function drawBoundaries(root) {
     }
     root.append(el("rect", {
       x: box.x, y: box.y, width: box.w, height: box.h, rx: 14,
-      fill: "none", stroke: "var(--line)", "stroke-width": 1.5, "stroke-dasharray": "2 4",
+      fill: "var(--accent-soft)", "fill-opacity": 0.5,
+      stroke: "var(--muted)", "stroke-width": 1.4, "stroke-dasharray": "6 4",
     }));
     root.append(el("text",
-      { x: box.x + 12, y: box.y + 16, fill: "var(--muted)", "font-size": 11 }, b.name));
+      { x: box.x + 12, y: box.y + 17, fill: "var(--muted)", "font-size": 12, "font-weight": 600 }, `boundary ${b.name}`));
   }
 }
 
-// Cạnh rời mép phải và vào mép trái, uốn bằng bezier. Đường thẳng nối tâm
-// hai hộp sẽ xuyên qua những hộp nằm giữa; đi vòng theo chiều của layout thì
-// gần như không bao giờ chạm vào ai.
+// Đường gấp khúc vuông góc đã định tuyến (máy chủ hay ELK), bo tròn góc.
+// Không có thì (hộp đang kéo, hộp kéo tay ở bố cục ELK) vẽ đường cong.
 function edgePath(from, to) {
+  const moving = drag?.node && (drag.node === from || drag.node === to);
+  const points = moving ? null : model.routeOf?.get(from.name + "\u0000" + to.name);
+  return points?.length >= 2 ? polyline(points) : curve(from, to);
+}
+
+function polyline(points, r = 8) {
+  let d = `M${points[0][0]} ${points[0][1]}`;
+  for (let i = 1; i < points.length - 1; i++) {
+    const [px, py] = points[i - 1], [x, y] = points[i], [nx, ny] = points[i + 1];
+    const k = Math.min(r, Math.hypot(x - px, y - py) / 2, Math.hypot(nx - x, ny - y) / 2);
+    const ax = x - Math.sign(x - px) * k, ay = y - Math.sign(y - py) * k;
+    const bx = x + Math.sign(nx - x) * k, by = y + Math.sign(ny - y) * k;
+    d += ` L${ax} ${ay} Q${x} ${y} ${bx} ${by}`;
+  }
+  const last = points[points.length - 1];
+  d += ` L${last[0]} ${last[1]}`;
+  // Nhãn đặt ở giữa đường đi, tính theo chiều dài.
+  const lengths = points.slice(1).map((p, i) => Math.hypot(p[0] - points[i][0], p[1] - points[i][1]));
+  let half = lengths.reduce((a, b) => a + b, 0) / 2, mid = { x: points[0][0], y: points[0][1] };
+  for (let i = 0; i < lengths.length; i++) {
+    if (half <= lengths[i]) {
+      const t = lengths[i] ? half / lengths[i] : 0;
+      mid = { x: points[i][0] + (points[i + 1][0] - points[i][0]) * t, y: points[i][1] + (points[i + 1][1] - points[i][1]) * t };
+      break;
+    }
+    half -= lengths[i];
+  }
+  return { d, mid };
+}
+
+// Đường cong dự phòng: rời mép phải, vào mép trái, uốn bằng bezier.
+function curve(from, to) {
   const forward = to.x >= from.x;
   const a = { x: forward ? from.x + NODE_W : from.x, y: from.y + NODE_H / 2 };
   const b = { x: forward ? to.x : to.x + NODE_W, y: to.y + NODE_H / 2 };
@@ -567,7 +689,8 @@ canvas.addEventListener("pointerup", (ev) => {
   }
   if (drag && !drag.pan && drag.moved) {
     // Lưu vị trí để lần sau mở lại sơ đồ không nhảy chỗ.
-    post("/api/layout", { name: drag.node.name, x: String(drag.node.x), y: String(drag.node.y) });
+    // Lấy lại đường nối: chúng phải vòng qua hộp vừa đặt xuống.
+    post("/api/layout", { name: drag.node.name, x: String(drag.node.x), y: String(drag.node.y) }).then(refresh);
   }
   drag = null;
 });
@@ -583,6 +706,20 @@ canvas.addEventListener("wheel", (ev) => {
   userMoved = true;
   draw();
 }, { passive: false });
+
+const modeBox = document.getElementById("layout-mode");
+modeBox.value = layoutMode;
+function setLayoutMode(mode) {
+  layoutMode = mode === "elk" ? "elk" : "archctl";
+  modeBox.value = layoutMode;
+  try { localStorage.setItem("archctl.layout", layoutMode); } catch { /* không có bộ nhớ: chỉ đổi trong phiên này */ }
+}
+modeBox.addEventListener("change", () => {
+  setLayoutMode(modeBox.value);
+  fitNext = true;
+  userMoved = false;
+  refresh();
+});
 
 document.getElementById("relayout").addEventListener("click", async () => {
   if (await post("/api/relayout", {})) { fitNext = true; userMoved = false; refresh(); }

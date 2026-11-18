@@ -24,6 +24,10 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 const UI: &str = include_str!("ui.html");
+// ELK (Eclipse Layout Kernel) cho bố cục thứ hai, nhúng sẵn để `serve` chạy
+// được khi không có mạng. Nguồn, bản ghim, sha256: `vendor/elk/README.md`.
+const ELK_API: &str = include_str!("../vendor/elk/elk-api.js");
+const ELK_WORKER: &str = include_str!("../vendor/elk/elk-worker.min.js");
 const LAYOUT_FILE: &str = ".arch/layout.json";
 /// Khoảng dò ngay sau một thay đổi: đủ nhanh để thấy agent làm việc gần như
 /// tức thì.
@@ -260,6 +264,11 @@ fn handle(mut stream: TcpStream, root: &Path, clients: &Clients, port: u16, key:
 
     match (req.method.as_str(), path) {
         ("GET", "/") => respond(&mut stream, "200 OK", "text/html; charset=utf-8", UI),
+        // Thư viện công khai, không chứa dữ liệu gì của repo: không cần khoá.
+        ("GET", "/vendor/elk-api.js") => respond(&mut stream, "200 OK", "text/javascript; charset=utf-8", ELK_API),
+        ("GET", "/vendor/elk-worker.min.js") => {
+            respond(&mut stream, "200 OK", "text/javascript; charset=utf-8", ELK_WORKER);
+        }
         ("GET", "/api/model") => {
             respond(&mut stream, "200 OK", "application/json", &model_json(root));
         }
@@ -405,7 +414,8 @@ fn model_json(root: &Path) -> String {
     let saved = layout::parse_saved(
         &arch_core::read_config(&root.join(LAYOUT_FILE)).unwrap_or_default(),
     );
-    let places = layout::place(&doc, &saved);
+    // Hộp kéo tay (có trong `saved`) được đánh dấu, để bố cục ELK giữ chỗ cho nó.
+    let places = (layout::place(&doc, &saved), saved);
     let baseline = arch_core::baseline::parse(
         &arch_core::read_config(&root.join(arch_core::baseline::BASELINE_FILE)).unwrap_or_default(),
     );
@@ -490,6 +500,18 @@ fn model_json(root: &Path) -> String {
         }))
         .collect();
 
+    // Cùng các cặp ấy, để định tuyến đường nối.
+    let edge_pairs: Vec<(String, String)> = doc
+        .rules
+        .iter()
+        .flat_map(|r| {
+            let from = r.from.as_str().to_string();
+            r.to.iter().map(move |t| (from.clone(), t.as_str().to_string()))
+        })
+        .chain(doc.links.iter().flat_map(|l| l.to.iter().map(move |t| (svc(&l.from), svc(t)))))
+        .chain(doc.services.iter().flat_map(|s| s.runs.iter().map(move |c| (svc(&s.name), c.clone()))))
+        .collect();
+
     let boundaries: Vec<String> = doc
         .boundaries
         .iter()
@@ -502,21 +524,20 @@ fn model_json(root: &Path) -> String {
         })
         .collect();
 
+    // Vi phạm của tầng hạ tầng xuất phát từ node service.
+    let violation_ends = |v: &arch_core::check::Violation| match v.reason {
+        Reason::NotLinked => (svc(&v.from), svc(&v.to)),
+        Reason::NotRun => (svc(&v.from), v.to.clone()),
+        _ => (v.from.clone(), v.to.clone()),
+    };
     let violations: Vec<String> = report
         .violations
         .iter()
         .map(|v| {
             format!(
                 r#"{{"from":{},"to":{},"file":{},"line":{},"spec":{},"via":{},"count":{},"rule":{},"hint":{},"baselined":{}}}"#,
-                // Vi phạm của tầng hạ tầng xuất phát từ node service.
-                json::string(&match v.reason {
-                    Reason::NotLinked | Reason::NotRun => svc(&v.from),
-                    _ => v.from.clone(),
-                }),
-                json::string(&match v.reason {
-                    Reason::NotLinked => svc(&v.to),
-                    _ => v.to.clone(),
-                }),
+                json::string(&violation_ends(v).0),
+                json::string(&violation_ends(v).1),
                 json::string(&v.file),
                 v.line,
                 json::string(&v.spec),
@@ -636,12 +657,25 @@ fn model_json(root: &Path) -> String {
         })
         .collect();
 
+    // Đường nối vuông góc cho mọi cặp được vẽ, tính trên toạ độ cuối (kể cả
+    // hộp kéo tay) nên không xuyên qua hộp nào.
+    let mut pairs: Vec<(String, String)> = edge_pairs;
+    pairs.extend(report.violations.iter().map(violation_ends));
+    let routes: Vec<String> = layout::route(&places.0, &pairs)
+        .iter()
+        .map(|((from, to), points)| {
+            let points: Vec<String> = points.iter().map(|p| format!("[{:.1},{:.1}]", p.x, p.y)).collect();
+            format!(r#"{{"from":{},"to":{},"points":[{}]}}"#, json::string(from), json::string(to), points.join(","))
+        })
+        .collect();
+
     format!(
-        r#"{{"archHash":{},"decls":[{}],"nodes":[{}],"edges":[{}],"boundaries":[{}],"violations":[{}],"missing":[{}],"vacuous":[{}],"unproven":[{}],"deploy":[{}],"proposals":[{}],"stats":{{"files":{},"checked":{},"unchecked":{}}}}}"#,
+        r#"{{"archHash":{},"decls":[{}],"nodes":[{}],"edges":[{}],"routes":[{}],"boundaries":[{}],"violations":[{}],"missing":[{}],"vacuous":[{}],"unproven":[{}],"deploy":[{}],"proposals":[{}],"stats":{{"files":{},"checked":{},"unchecked":{}}}}}"#,
         json::string(&hash),
         decls.join(","),
         nodes.join(","),
         edges.join(","),
+        routes.join(","),
         boundaries.join(","),
         violations.join(","),
         missing.join(","),
@@ -660,11 +694,11 @@ fn node_json(
     kind: &str,
     sub: &str,
     meta: &arch_core::model::Meta,
-    places: &std::collections::BTreeMap<String, Point>,
+    places: &(std::collections::BTreeMap<String, Point>, layout::Saved),
 ) -> String {
-    let point = places.get(name).copied().unwrap_or(Point { x: 48.0, y: 48.0 });
+    let point = places.0.get(name).copied().unwrap_or(Point { x: 48.0, y: 48.0 });
     format!(
-        r#"{{"name":{},"kind":{},"sub":{},"status":{},"owner":{},"line":{},"x":{:.0},"y":{:.0}}}"#,
+        r#"{{"name":{},"kind":{},"sub":{},"status":{},"owner":{},"line":{},"x":{:.0},"y":{:.0},"pinned":{}}}"#,
         json::string(name),
         json::string(kind),
         json::string(sub),
@@ -673,6 +707,7 @@ fn node_json(
         meta.line,
         point.x,
         point.y,
+        places.1.contains_key(name),
     )
 }
 
@@ -684,8 +719,8 @@ fn field(body: &str, key: &str) -> Option<String> {
 
 fn save_position(root: &Path, body: &str) -> Result<(), String> {
     let name = field(body, "name").ok_or("thiếu `name`")?;
-    let x: f64 = field(body, "x").ok_or("thiếu `x`")?.parse().map_err(|_| "x không phải số")?;
-    let y: f64 = field(body, "y").ok_or("thiếu `y`")?.parse().map_err(|_| "y không phải số")?;
+    let x = layout::coordinate(&field(body, "x").ok_or("thiếu `x`")?).ok_or("x không phải số hữu hạn")?;
+    let y = layout::coordinate(&field(body, "y").ok_or("thiếu `y`")?).ok_or("y không phải số hữu hạn")?;
 
     let path = root.join(LAYOUT_FILE);
     let mut saved = layout::parse_saved(&arch_core::read_for_update(&path)?);

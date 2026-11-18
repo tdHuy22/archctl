@@ -556,3 +556,30 @@ fn tra_khong_o_hop_xac_nhan_thi_bao_da_huy() {
     }
     assert!(seen >= 1, "ui.html không còn confirm( nào: cập nhật test này");
 }
+
+/// ELK nhúng trong file chạy phải đúng bản đã ghim và kiểm (TM-96): ai đổi
+/// một byte của thư viện chạy trong trình duyệt thì test này đỏ.
+#[test]
+fn elk_nhung_dung_ban_da_ghim() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/elk");
+    for (file, want) in [
+        ("elk-api.js", "ccca46175c05bbd280b5de6c9853103711e52c666a101f145b717e345363e24d"), // gitleaks:allow (sha256 của file công khai, không phải khoá)
+        ("elk-worker.min.js", "dca3a19d9ec37f5634bf5876b4ebd2455c3f43f0d32570136c13c13edaba9bfb"), // gitleaks:allow (sha256 của file công khai, không phải khoá)
+        ("LICENSE.md", "637e81f4a1b6b4079535c499fca05e238cf7605c1ff5b76d60d7da7ce96700c9"), // gitleaks:allow (sha256 của file công khai, không phải khoá)
+    ] {
+        let bytes = std::fs::read(dir.join(file)).unwrap();
+        assert_eq!(arch_core::protocol::sha256::hex(&bytes), want, "{file} khác bản đã ghim");
+    }
+}
+
+/// Trang chỉ nạp phần nhỏ `elk-api.js`; mã ELK chạy trong Web Worker, không
+/// có DOM và không có khoá phiên (TM-97). Không nạp gì từ mạng ngoài.
+#[test]
+fn elk_chay_trong_worker_va_khong_tai_tu_mang() {
+    let ui = include_str!("../src/ui.html");
+    assert!(ui.contains(r#"workerUrl: "/vendor/elk-worker.min.js""#));
+    assert_eq!(ui.matches("elk-worker").count(), 1, "chỉ nhắc worker ở `workerUrl`, không nạp vào trang");
+    for bad in ["http://", "https://", "//cdn", "unpkg", "jsdelivr"] {
+        assert!(!ui.contains(&format!("src = \"{bad}")) && !ui.contains(&format!("loadScript(\"{bad}")), "{bad}");
+    }
+}

@@ -733,3 +733,28 @@ fn mo_hinh_co_nguyen_van_moi_khai_bao() {
         "{model}"
     );
 }
+
+/// Đường nối đã định tuyến đi kèm mô hình, cả cho cạnh vi phạm; ELK được
+/// phục vụ từ chính file chạy, không cần khoá (thư viện công khai) và không
+/// cần mạng.
+#[test]
+fn mo_hinh_co_duong_noi_va_elk_nhung_san() {
+    let s = Server::start("routes", 4809);
+    let out = s.get("/api/model");
+    assert!(out.contains(r#""routes":[{"#), "{out}");
+    assert!(out.contains(r#"{"from":"Web","to":"Report","points":[["#), "cạnh vi phạm phải có đường: {out}");
+    assert!(out.contains(r#""pinned":false"#), "{out}");
+
+    for path in ["/vendor/elk-api.js", "/vendor/elk-worker.min.js"] {
+        let status = s.raw(&format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+        assert_eq!(status, "HTTP/1.1 200 OK", "{path}");
+    }
+    let worker = s.get("/vendor/elk-worker.min.js");
+    assert!(worker.len() > 1_000_000 && worker.contains("gwtOnLoad"), "phải là bản ELK đầy đủ");
+
+    // Kéo tay một hộp thì nó được đánh dấu giữ chỗ.
+    let moved = s.post("/api/layout", r#"{"name":"Web","x":"900","y":"40"}"#);
+    assert!(moved.contains(r#""ok":true"#), "{moved}");
+    let out = s.get("/api/model");
+    assert!(out.contains(r#""name":"Web","kind":"component""#) && out.contains(r#""x":900,"y":40,"pinned":true"#), "{out}");
+}
